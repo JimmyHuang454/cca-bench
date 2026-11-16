@@ -1,0 +1,57 @@
+{
+  "_comment": "农田边缘：基本不动，处于小区边缘，SINR 低。",
+  "tech": "4g",
+  "defaults": {
+    "car_loss_db": 3,
+    "edge_rsrp_dbm": -104,
+    "cell": {
+      "side": "left",
+      "offset_m": 150,
+      "height_m": 40,
+      "tx_dbm": 46,
+      "range_mode": "soft",
+      "antenna": {
+        "type": "omni"
+      }
+    },
+    "tunnel_cell_spacing_m": 0,
+    "tunnel_loss_db": 40,
+    "tunnel_ramp_m": 30
+  },
+  "track": {
+    "points": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        60,
+        0,
+        0
+      ]
+    ]
+  },
+  "timeline": {
+    "0-90": {
+      "speed_kmh": 0
+    },
+    "90-100": {
+      "speed_kmh": 3
+    },
+    "100-180": {
+      "speed_kmh": 0,
+      "interference_dbm": -105
+    }
+  },
+  "cells": [
+    {
+      "id": "R1",
+      "track_m": 10,
+      "side": "left",
+      "offset_m": 1500,
+      "height_m": 40,
+      "range_m": 1600
+    }
+  ]
+}

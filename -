@@ -1,0 +1,11 @@
+FAIL tcp-copa-test 0.019 s
+  PASS Copa paces at 2 * cwnd / RTTstanding 0.000 s
+  PASS Copa queueing delay uses RTTstanding 0.000 s
+  PASS Copa velocity doubles after three windows and resets 0.000 s
+  PASS Copa switches between default and competitive mode 0.000 s
+  PASS Copa restarts slow start after a timeout 0.000 s
+  PASS copa-auto probes for AdaptiveProbeRtts round trips 0.011 s
+  FAIL copa-auto gentle probe holds 0.5*BDP and restores full cwnd 0.004 s
+      test="m_copa->IsCompetitive() (actual) == false (limit)" actual="1" limit="0" in="/Users/qwe/Desktop/my/project/ns-3-dev-git/src/internet/test/tcp-copa-test.cc:419" flow must stay in default mode before probe
+      test="m_copa->IsCompetitive() (actual) == false (limit)" actual="1" limit="0" in="/Users/qwe/Desktop/my/project/ns-3-dev-git/src/internet/test/tcp-copa-test.cc:430" gentle hold must not trigger competitive mode
+      test="m_tcb->m_cWnd.Get() (actual) > preProbeCwnd - m_mss (limit)" actual="43670" limit="61067" in="/Users/qwe/Desktop/my/project/ns-3-dev-git/src/internet/test/tcp-copa-test.cc:442" gentle probe exit must restore pre-probe cwnd in full

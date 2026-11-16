@@ -1,0 +1,104 @@
+{
+  "_comment": "山区公路：弯道爬坡，山体遮挡造成覆盖空洞，有一段无覆盖隧道。",
+  "tech": "4g",
+  "defaults": {
+    "car_loss_db": 9,
+    "edge_rsrp_dbm": -105,
+    "cell": {
+      "side": "left",
+      "offset_m": 150,
+      "height_m": 40,
+      "tx_dbm": 46,
+      "range_mode": "soft",
+      "antenna": {
+        "type": "omni"
+      }
+    },
+    "tunnel_cell_spacing_m": 0,
+    "tunnel_loss_db": 40,
+    "tunnel_ramp_m": 30
+  },
+  "track": {
+    "points": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        800,
+        300,
+        40
+      ],
+      [
+        1400,
+        100,
+        90
+      ],
+      [
+        2000,
+        600,
+        140
+      ],
+      [
+        2800,
+        500,
+        200
+      ]
+    ]
+  },
+  "timeline": {
+    "0-10": {
+      "speed_kmh": [
+        0,
+        50
+      ]
+    },
+    "10-50": {
+      "speed_kmh": 50
+    },
+    "50-80": {
+      "speed_kmh": 45,
+      "car_loss_db": 24,
+      "_comment": "山体遮挡，多 15 dB"
+    },
+    "80-95": {
+      "speed_kmh": 45,
+      "tunnel": true,
+      "_comment": "短隧道，没有覆盖"
+    },
+    "95-130": {
+      "speed_kmh": 40
+    },
+    "130-155": {
+      "speed_kmh": 40,
+      "car_loss_db": 22
+    },
+    "155-180": {
+      "speed_kmh": 50
+    }
+  },
+  "cells": [
+    {
+      "id": "R1",
+      "track_m": 100,
+      "side": "right",
+      "offset_m": 200,
+      "height_m": 50
+    },
+    {
+      "id": "R2",
+      "track_m": 1400,
+      "side": "left",
+      "offset_m": 250,
+      "height_m": 60
+    },
+    {
+      "id": "R3",
+      "track_m": 2500,
+      "side": "right",
+      "offset_m": 200,
+      "height_m": 60
+    }
+  ]
+}
