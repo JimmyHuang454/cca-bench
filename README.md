@@ -1,6 +1,6 @@
 # copa-auto-bench
 
-Linux 内核 TCP 拥塞控制模块 **`tcp_copa_auto.ko`** 与基于 Mahimahi / LeoReplayer 的多数据集自动化对比评测框架（与 [`quinn-jls`](https://github.com/spongebob888/quinn-jls) 独立分离）。
+Linux 内核 TCP 拥塞控制模块 **`tcp_copa_auto.ko`** 与基于 Mahimahi / LeoReplayer 的多数据集自动化对比评测框架。
 
 ## 目录结构
 
@@ -89,15 +89,51 @@ sysctl net.ipv4.tcp_available_congestion_control
 | **`vl2`** | 极端双峰重尾（极多超小 RPC + 极少数超大传输） | 80 请求，跨度 89.9s，总计 10.91 MB | VL2 ([SIGCOMM'09](https://dl.acm.org/doi/10.1145/1592568.1592576))，由 [`scripts/gen_workloads.py`](scripts/gen_workloads.py) 生成 |
 | **`pageload`** | 突发式网页资源簇（HTML/CSS/JS/图片成批到达 + 思考间隔） | 80 请求，跨度 48.7s，总计 19.91 MB | HTTP/3 网页加载模型，由 [`scripts/gen_workloads.py`](scripts/gen_workloads.py) 生成 |
 
-### 可选拥塞控制算法
+### 可选拥塞控制算法（通过 `kernel_ccs` / `quinn_ccs` 自由挑选）
 
-- **Linux 内核 TCP 栈（`kernel_ccs`）**：
-  - `tcp_copa_auto.ko`：`copa_auto`、`copa_auto_theta<X>`（如 `copa_auto_theta0.9`、`copa_auto_theta0.98`）、`copa_auto_nc`、`copa_orig`
-  - `tcp_leocc.ko`：`leocc`（[`SpaceNetLab/LeoCC`](https://github.com/SpaceNetLab/LeoCC) 仿真版，已适配 Linux 6.x 主线，在 `leo` 分片自动加入对比）
-  - Mortise eBPF：`mortise_copa`
-  - Linux 主线内置：`bbr`（v1）、`cubic`、`vegas`、`cdg`、`veno`、`yeah`、`illinois`、`westwood`、`hybla`、`reno`
-- **QUIC 用户态栈（`quinn_ccs`，需 `run_quinn=true`）**：
-  - `copa-auto`、`copa-auto-theta<X>`、`copa-auto-nc`、`copa`、`copa-nc`、`bbr1`、`bbr2`、`bbr3`、`cubic`、`new-reno`
+在 GitHub Actions 触发界面中，留空 `kernel_ccs` / `quinn_ccs` 会按 `mode` 跑默认算法集；填入逗号分隔的算法名即可**只跑你指定的算法组合**（支持 `{theta}` 占位符，会自动替换为 `theta` 输入框的首个值）。
+
+#### 1. Linux 内核 TCP 栈（`kernel_ccs`，`run_kernel=true`）
+
+| 算法名 | 分类 / 来源 | 说明 |
+| :--- | :--- | :--- |
+| `copa_auto` | `tcp_copa_auto.ko`（本仓库） | 自适应 $\delta$（默认 $\theta=0.50$），开启竞争模式切换 |
+| `copa_auto_theta<X>` | `tcp_copa_auto.ko`（本仓库） | 自定义 $\theta \in [0.01, 0.995]$，如 `copa_auto_theta0.9`、`copa_auto_theta0.98` |
+| `copa_auto_nc` | `tcp_copa_auto.ko`（本仓库） | 自适应 $\delta$（$\theta=0.50$），关闭竞争模式切换 |
+| `copa_orig` | `tcp_copa_auto.ko`（本仓库） | 原版固定 $\delta=0.50$ Copa（现代 Linux 6.x 内核实现） |
+| `mortise_copa` | eBPF（[BobAnkh/Mortise](https://github.com/BobAnkh/Mortise)） | 官方 Mortise eBPF Copa |
+| `leocc` | `tcp_leocc.ko`（[SpaceNetLab/LeoCC](https://github.com/SpaceNetLab/LeoCC)） | LEO 低轨卫星专用算法（仿真版适配 Linux 6.x，`leo` 分片默认自动加入） |
+| `bbr` | Linux 主线内置 | Google 官方 BBRv1 |
+| `cubic` | Linux 主线内置 | Linux 默认丢包型基线 |
+| `vegas` | Linux 主线内置 | 经典基于排队延迟算法 |
+| `cdg` | Linux 主线内置 | CAIA Delay-Gradient（基于延迟梯度） |
+| `veno` | Linux 主线内置 | 混合丢包+排队估计（无线链路优化） |
+| `yeah` | Linux 主线内置 | YeAH-TCP（快慢双模混合算法） |
+| `illinois` | Linux 主线内置 | 延迟调制 AIMD 混合算法 |
+| `westwood` | Linux 主线内置 | 基于带宽估计（无线丢包场景） |
+| `hybla` | Linux 主线内置 | 高 RTT 补偿（卫星 / LeoCC 场景） |
+| `reno` | Linux 主线内置 | 经典 NewReno |
+
+各 `mode` 留空 `kernel_ccs` 时的默认算法集：
+- `quick` / `datasets`：`copa_auto,copa_auto_nc,copa_auto_theta<theta>,mortise_copa`（`leo` 分片自动附加 `leocc`）
+- `rct`：`copa_auto,copa_auto_theta0.9,copa_auto_theta0.98,copa_orig,mortise_copa`
+- `rct-datasets`：`copa_auto,copa_auto_theta<theta...>,copa_auto_nc,copa_orig,mortise_copa,bbr,cubic,vegas,cdg`（`leo` 分片自动附加 `leocc`）
+- `smoke` / `full` / `lumos-*-all` 等：`copa_auto,copa_auto_nc,copa_auto_theta<theta>,copa_orig,mortise_copa,bbr,cubic`
+
+#### 2. QUIC 用户态栈（`quinn_ccs`，需勾选 `run_quinn=true`）
+
+- 可选算法：`copa-auto`、`copa-auto-theta<X>`、`copa-auto-nc`、`copa`、`copa-nc`、`bbr1`、`bbr2`、`bbr3`、`cubic`、`new-reno`
+
+#### 3. 常用 Actions 填写示例
+
+- **快速冒烟（纯内核 TCP）**：`mode=quick`，`theta=0.9`，`kernel_ccs` 留空，`run_kernel=true`，`run_quinn=false`
+- **自定义内核全算法横向对比**：
+  - `mode=rct-datasets`，`theta=0.9,0.98`，`repeats=3`，`rct_workloads=app,websearch,vl2,pageload`
+  - `kernel_ccs=copa_auto,copa_auto_theta0.9,copa_auto_theta0.98,copa_auto_nc,copa_orig,mortise_copa,leocc,bbr,cubic,vegas,cdg,veno,yeah,hybla`
+- **卫星场景专项对比**：
+  - `mode=leo`，`kernel_ccs=copa_auto,copa_auto_theta0.98,leocc,mortise_copa,bbr,cubic,hybla`
+- **补充看 QUIC 侧 BBRv1/v2/v3**：
+  - 勾选 `run_quinn=true`，`quinn_ccs=copa-auto,copa-auto-theta0.98,bbr1,bbr2,bbr3,cubic`
 
 ---
 
