@@ -43,6 +43,11 @@ on:
         required: false
         default: ""
         type: string
+      queues:
+        description: "Optional queue sizes override, e.g. 150KB,2MB or 2MB (empty = dataset-specific shallow/deep queues)"
+        required: false
+        default: ""
+        type: string
       rct_workloads:
         description: "Comma-separated workloads for rct-datasets (app,websearch,vl2,pageload)"
         required: false
@@ -113,7 +118,7 @@ jobs:
     needs: plan
     if: ${{ inputs.run_quinn == true }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -155,6 +160,7 @@ jobs:
           THETA: ${{ inputs.theta || '0.98' }}
           REPEATS: ${{ inputs.repeats || '1' }}
           PARALLEL: ${{ inputs.parallel || '' }}
+          QUEUES: ${{ inputs.queues || '' }}
           QUINN_CCS: ${{ inputs.quinn_ccs || '' }}
           SHARD: ${{ matrix.shard }}
           WORKLOAD: ${{ matrix.workload }}
@@ -174,7 +180,7 @@ jobs:
     needs: plan
     if: ${{ github.event_name == 'push' || inputs.run_kernel }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 240
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -254,6 +260,7 @@ jobs:
           THETA: ${{ inputs.theta || '0.98' }}
           REPEATS: ${{ inputs.repeats || '1' }}
           PARALLEL: ${{ inputs.parallel || '' }}
+          QUEUES: ${{ inputs.queues || '' }}
           KERNEL_CCS: ${{ inputs.kernel_ccs || '' }}
           SHARD: ${{ matrix.shard }}
           WORKLOAD: ${{ matrix.workload }}

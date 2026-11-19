@@ -56,9 +56,43 @@ def parse_thetas(theta_raw: str) -> tuple[str, list[str]]:
     return vals[0], vals
 
 
+def parse_queues_spec(spec: str) -> str:
+    """Convert human-readable queue sizes like '150KB,2MB' or '2M' to comma-separated bytes."""
+    units = {
+        "": 1,
+        "b": 1,
+        "k": 1000,
+        "kb": 1000,
+        "m": 1000000,
+        "mb": 1000000,
+        "g": 1000000000,
+        "gb": 1000000000,
+    }
+    out: list[str] = []
+    for tok in spec.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        m = re.match(r"^([0-9]*\.?[0-9]+)\s*([a-zA-Z]*)$", tok)
+        if not m:
+            raise ValueError(f"Invalid queue size {tok!r}; expected e.g. 150KB, 2MB, or bytes")
+        val = float(m.group(1))
+        unit = m.group(2).lower()
+        if unit not in units:
+            raise ValueError(f"Unknown queue size unit {unit!r} in {tok!r}")
+        out.append(str(int(round(val * units[unit]))))
+    if not out:
+        raise ValueError("Empty queue size specification")
+    return ",".join(out)
+
+
 def build_plan(mode: str, rct_workloads_raw: str) -> tuple[str, dict[str, list[dict[str, str]]]]:
-    lumos_5g_shards = [f"lumos-5g-s{i}-of-12" for i in range(1, 13)]
+    lumos_5g_shards = [f"lumos-5g-s{i}-of-16" for i in range(1, 17)]
     lumos_4g_shards = [f"lumos-4g-s{i}-of-18" for i in range(1, 19)]
+    base_shards = [
+        "lte", "nyc-stat", "nyc-walk-1", "nyc-walk-2", "nyc-walk-3",
+        "nyc-drive-1", "nyc-drive-2", "nyc-subway", "synth", "leo",
+    ]
     shards = {
         "quick": ["smoke"],
         "rct": ["smoke"],
@@ -66,10 +100,7 @@ def build_plan(mode: str, rct_workloads_raw: str) -> tuple[str, dict[str, list[d
         "lumos-5g-all": lumos_5g_shards,
         "lumos-4g-all": lumos_4g_shards,
         "lumos-all": lumos_5g_shards + lumos_4g_shards,
-        "full": [
-            "lte", "nyc-stat", "nyc-walk-1", "nyc-walk-2", "nyc-walk-3",
-            "nyc-drive-1", "nyc-drive-2", "synth", "nyc-subway", "lumos-5g",
-        ],
+        "full": base_shards + lumos_5g_shards + lumos_4g_shards,
         "datasets": ["nyc-subway", "lumos-5g", "leo"],
     }.get(mode, [mode])
 
@@ -80,6 +111,8 @@ def build_plan(mode: str, rct_workloads_raw: str) -> tuple[str, dict[str, list[d
             workloads = ["app"]
         elif mode == "rct-datasets":
             workloads = rct_workloads
+        elif mode == "full":
+            workloads = ["bulk", *[w for w in rct_workloads if w != "bulk"]]
         else:
             workloads = ["bulk"] if mode == "datasets" or shard == "leo" else ["bulk", "app"]
         for workload in workloads:
@@ -211,42 +244,51 @@ def auto_parallel(shard: str, cpus: int | None = None) -> int:
 
 
 def resolve_shard_tuning(
-    mode: str, shard: str, workload: str, parallel_override: str = "", cpus: int | None = None
+    mode: str,
+    shard: str,
+    workload: str,
+    parallel_override: str = "",
+    queues_override: str = "",
+    cpus: int | None = None,
 ) -> tuple[int, int, str, int, bool]:
-    """Return (bulk_secs, app_secs, queues, parallel, high_bdp_conn_win)."""
+    """Return (bulk_secs, app_secs, queues_bytes_csv, parallel, high_bdp_conn_win)."""
     bulk_secs = 30 if shard == "smoke" else 45
-    app_secs = 300
-    queues = "150000,2000000"
+    app_secs = 0 if mode in ("rct-datasets", "full") else 300
     parallel = auto_parallel(shard, cpus=cpus)
     if parallel_override.strip():
         parallel = max(1, int(parallel_override.strip()))
     high_bdp = False
 
-    if mode in ("quick", "datasets"):
-        queues = "150000"
-    elif mode == "rct":
-        queues = "2000000"
-    elif mode == "rct-datasets":
-        queues = "2000000"
-        app_secs = 0
-
+    # Dataset-specific default shallow / deep queues (aligned with each dataset's BDP / paper):
+    #   LTE / NYC 4G / Synth / Lumos 4G : 150 KB, 2 MB
+    #   Lumos 5G (100-800 Mbps)         : 2 MB, 16 MB
+    #   LeoCC Starlink (official 50k p) : 2 MB, 75 MB
     if shard.startswith("lumos-5g") or shard == "lumos-rct":
-        queues = "2000000,16000000"
+        queues = "2MB,16MB"
         high_bdp = True
-        if mode == "datasets" or workload == "bulk":
-            queues = "2000000"
-        if (mode == "rct-datasets" or mode.startswith("lumos-")) and workload != "bulk":
-            queues = "16000000"
+        if mode == "datasets" or (mode.startswith("lumos-") and workload == "bulk"):
+            queues = "2MB"
+        elif mode == "rct-datasets" or (mode.startswith("lumos-") and workload != "bulk"):
+            queues = "16MB"
     elif shard.startswith("lumos-4g"):
-        queues = "2000000"
+        queues = "150KB,2MB" if mode == "full" else "2MB"
     elif shard == "leo":
         bulk_secs = 115
-        queues = "2000000,75000000"
+        queues = "2MB,75MB"
         high_bdp = True
         if mode in ("datasets", "rct-datasets"):
-            queues = "2000000"
+            queues = "2MB"
+    else:
+        queues = "150KB,2MB"
+        if mode in ("quick", "datasets"):
+            queues = "150KB"
+        elif mode in ("rct", "rct-datasets"):
+            queues = "2MB"
 
-    return bulk_secs, app_secs, queues, parallel, high_bdp
+    if queues_override.strip():
+        queues = queues_override.strip()
+
+    return bulk_secs, app_secs, parse_queues_spec(queues), parallel, high_bdp
 
 
 def resolve_quinn_ccs(mode: str, theta_raw: str, override: str) -> str:
@@ -277,7 +319,7 @@ def resolve_kernel_ccs(mode: str, shard: str, theta_raw: str, override: str, ava
         ccs = ["copa_auto", "copa_auto_nc", f"copa_auto_theta{first_theta}", "mortise_copa", 'bbr']
     elif mode == "rct":
         ccs = ["copa_auto", "copa_auto_theta0.9", "copa_auto_theta0.98", "copa_orig", "mortise_copa"]
-    elif mode == "rct-datasets":
+    elif mode in ("rct-datasets", "full"):
         ccs = ["copa_auto", *theta_ccs, "copa_auto_nc", "copa_orig", "mortise_copa", "bbr", "cubic"]
         for extra in ("vegas", "cdg"):
             if extra in avail_ccs:
@@ -315,7 +357,7 @@ def cmd_run_quinn(args: argparse.Namespace) -> int:
 
     prepare_workloads(pathlib.Path("/tmp/workloads"), bulk_lines=200)
     bulk_secs, app_secs, queues, parallel, high_bdp = resolve_shard_tuning(
-        mode, shard, workload, os.environ.get("PARALLEL", "")
+        mode, shard, workload, os.environ.get("PARALLEL", ""), os.environ.get("QUEUES", "")
     )
     ccs = resolve_quinn_ccs(mode, theta, override)
 
@@ -371,7 +413,7 @@ def cmd_run_kernel(args: argparse.Namespace) -> int:
         mortise_app_wk=mortise_root / "workload" / "app.wk",
     )
     bulk_secs, app_secs, queues, parallel, _ = resolve_shard_tuning(
-        mode, shard, workload, os.environ.get("PARALLEL", "")
+        mode, shard, workload, os.environ.get("PARALLEL", ""), os.environ.get("QUEUES", "")
     )
 
     py_log = (out_dir / "process_report.log").open("w", encoding="utf-8")
@@ -472,7 +514,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
         "--input-dir", args.input_dir,
         "--out-dir", str(out_dir),
     ]
-    if mode in ("rct", "rct-datasets", "lumos-5g-all", "lumos-4g-all", "lumos-all"):
+    if mode in ("rct", "rct-datasets", "full", "lumos-5g-all", "lumos-4g-all", "lumos-all"):
         rct_cmd.append("--print-summary")
     rct_out = subprocess.check_output(rct_cmd, text=True)
 
