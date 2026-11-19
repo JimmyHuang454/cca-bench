@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.DS_Store
+*.o
+*.ko
+*.mod
+*.mod.c
+*.order
+*.symvers
+.*.cmd
+.tmp_versions/
+kernel/tcp_copa_auto/test_core
+/trace
