@@ -626,6 +626,15 @@ def run_mortise_job(
     return stem, 0
 
 
+def auto_parallel(shard: str, cpus: int | None = None) -> int:
+    """Choose safe concurrency from CPU count without introducing Mahimahi scheduling jitter."""
+    n_cpu = cpus if cpus is not None else (os.cpu_count() or 4)
+    high_rate = shard.startswith("lumos-5g") or shard in ("lumos-rct", "leo", "local-leo")
+    if high_rate:
+        return max(2, min(16, (n_cpu * 3) // 4))
+    return max(2, min(24, (n_cpu * 3) // 2))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run Mahimahi trace suite for quinn-jls or Mortise.")
     parser.add_argument("--stack", required=True, choices=["quinn", "kernel", "mortise"])
@@ -634,12 +643,12 @@ def main() -> int:
     parser.add_argument("--queues", default="150000,2000000", help="Comma-separated queue sizes in bytes")
     parser.add_argument("--workloads", default="bulk,app", help="Comma-separated workloads (bulk,app,websearch,vl2,pageload)")
     parser.add_argument("--bulk-secs", type=int, default=45)
-    parser.add_argument("--app-secs", type=int, default=200, help="Application observation window in seconds (0 = auto: span + 60s)")
+    parser.add_argument("--app-secs", type=int, default=200, help="Application observation window in seconds (0 = auto: span + 150s)")
     parser.add_argument("--repeats", type=int, default=1, help="Number of time-shifted repeats per configuration")
     parser.add_argument("--send-fairness", choices=["true", "false"], default="true")
     parser.add_argument("--stream-receive-window", default=None, help="Optional quinn --stream-receive-window (e.g. 8M)")
     parser.add_argument("--connection-window", help="Quinn connection receive and send windows (e.g. 64M)")
-    parser.add_argument("--parallel", type=int, default=4)
+    parser.add_argument("--parallel", type=int, default=0, help="Max concurrent runs (0 = auto from CPU count)")
     parser.add_argument("--bin", required=True, type=Path, help="Path to quinn-perf or Mortise client binary")
     parser.add_argument("--trace-dir", required=True, type=Path)
     parser.add_argument(
@@ -660,6 +669,8 @@ def main() -> int:
 
     if args.repeats < 1:
         raise SystemExit("--repeats must be >= 1")
+    if args.parallel <= 0:
+        args.parallel = auto_parallel(args.shard)
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     local_leo_map = discover_local_leo_traces(args.local_leo_dir) if args.local_leo_dir else {}

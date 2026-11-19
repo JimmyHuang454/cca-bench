@@ -201,12 +201,25 @@ def prepare_workloads(workloads_dir: pathlib.Path, bulk_lines: int, mortise_app_
     (workloads_dir / "bulk.wk").write_text("0\t2097152\n" * bulk_lines, encoding="utf-8")
 
 
-def resolve_shard_tuning(mode: str, shard: str, workload: str) -> tuple[int, int, str, int, bool]:
+def auto_parallel(shard: str, cpus: int | None = None) -> int:
+    """Choose safe concurrency from CPU count without introducing Mahimahi scheduling jitter."""
+    n_cpu = cpus if cpus is not None else (os.cpu_count() or 4)
+    high_rate = shard.startswith("lumos-5g") or shard in ("lumos-rct", "leo", "local-leo")
+    if high_rate:
+        return max(2, min(16, (n_cpu * 3) // 4))
+    return max(2, min(24, (n_cpu * 3) // 2))
+
+
+def resolve_shard_tuning(
+    mode: str, shard: str, workload: str, parallel_override: str = "", cpus: int | None = None
+) -> tuple[int, int, str, int, bool]:
     """Return (bulk_secs, app_secs, queues, parallel, high_bdp_conn_win)."""
     bulk_secs = 30 if shard == "smoke" else 45
     app_secs = 300
     queues = "150000,2000000"
-    parallel = 4
+    parallel = auto_parallel(shard, cpus=cpus)
+    if parallel_override.strip():
+        parallel = max(1, int(parallel_override.strip()))
     high_bdp = False
 
     if mode in ("quick", "datasets"):
@@ -219,7 +232,6 @@ def resolve_shard_tuning(mode: str, shard: str, workload: str) -> tuple[int, int
 
     if shard.startswith("lumos-5g") or shard == "lumos-rct":
         queues = "2000000,16000000"
-        parallel = 2
         high_bdp = True
         if mode == "datasets" or workload == "bulk":
             queues = "2000000"
@@ -227,11 +239,9 @@ def resolve_shard_tuning(mode: str, shard: str, workload: str) -> tuple[int, int
             queues = "16000000"
     elif shard.startswith("lumos-4g"):
         queues = "2000000"
-        parallel = 4
     elif shard == "leo":
         bulk_secs = 115
         queues = "2000000,75000000"
-        parallel = 2
         high_bdp = True
         if mode in ("datasets", "rct-datasets"):
             queues = "2000000"
@@ -304,7 +314,9 @@ def cmd_run_quinn(args: argparse.Namespace) -> int:
     stream_rw = os.environ.get("STREAM_RECEIVE_WINDOW", "8M")
 
     prepare_workloads(pathlib.Path("/tmp/workloads"), bulk_lines=200)
-    bulk_secs, app_secs, queues, parallel, high_bdp = resolve_shard_tuning(mode, shard, workload)
+    bulk_secs, app_secs, queues, parallel, high_bdp = resolve_shard_tuning(
+        mode, shard, workload, os.environ.get("PARALLEL", "")
+    )
     ccs = resolve_quinn_ccs(mode, theta, override)
 
     env = os.environ.copy()
@@ -358,7 +370,9 @@ def cmd_run_kernel(args: argparse.Namespace) -> int:
         bulk_lines=8192,
         mortise_app_wk=mortise_root / "workload" / "app.wk",
     )
-    bulk_secs, app_secs, queues, parallel, _ = resolve_shard_tuning(mode, shard, workload)
+    bulk_secs, app_secs, queues, parallel, _ = resolve_shard_tuning(
+        mode, shard, workload, os.environ.get("PARALLEL", "")
+    )
 
     py_log = (out_dir / "process_report.log").open("w", encoding="utf-8")
     mgr_log = (out_dir / "manager.log").open("w", encoding="utf-8")

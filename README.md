@@ -45,6 +45,7 @@ sysctl net.ipv4.tcp_available_congestion_control
 | `mode` | `quick` | 评测模式，见下表 |
 | `theta` | `0.9` | `copa_auto` 吞吐-延迟权衡参数 $\theta \in [0.01, 0.99]$；`rct-datasets` 支持逗号分隔多个值（如 `0.9,0.98`） |
 | `repeats` | `1` | 每个配置的时间偏移重复次数（>1 时汇总输出中位数与 min–max 区间） |
+| `parallel` | 空（按 CPU 核数自动分配） | 单机并发数（高带宽 5G/Leo 默认 `0.75×CPU` [2..16]，常规默认 `1.5×CPU` [2..24]） |
 | `rct_workloads` | `app,websearch,vl2,pageload` | `rct-datasets` 模式下要跑的请求负载 |
 | `kernel_ccs` | 空（按 `mode` 默认） | 覆写 Linux 内核 TCP 栈算法列表（逗号分隔，支持 `{theta}` 占位符） |
 | `quinn_ccs` | 空（按 `mode` 默认） | 覆写 QUIC (`quinn-perf`) 算法列表（仅 `run_quinn=true` 时生效） |

@@ -1,4 +1,4 @@
-name: Mahimahi Comparison (copa-auto vs Mortise)
+name: CCAs Bench
 
 on:
   push:
@@ -37,6 +37,11 @@ on:
         description: "Number of time-shifted repeats per configuration (default 1)"
         required: true
         default: "1"
+        type: string
+      parallel:
+        description: "Optional max concurrent runs per runner (empty = auto-scaled from CPU count)"
+        required: false
+        default: ""
         type: string
       rct_workloads:
         description: "Comma-separated workloads for rct-datasets (app,websearch,vl2,pageload)"
@@ -149,6 +154,7 @@ jobs:
           MODE: ${{ needs.plan.outputs.mode }}
           THETA: ${{ inputs.theta || '0.98' }}
           REPEATS: ${{ inputs.repeats || '1' }}
+          PARALLEL: ${{ inputs.parallel || '' }}
           QUINN_CCS: ${{ inputs.quinn_ccs || '' }}
           SHARD: ${{ matrix.shard }}
           WORKLOAD: ${{ matrix.workload }}
@@ -247,6 +253,7 @@ jobs:
           MODE: ${{ needs.plan.outputs.mode }}
           THETA: ${{ inputs.theta || '0.98' }}
           REPEATS: ${{ inputs.repeats || '1' }}
+          PARALLEL: ${{ inputs.parallel || '' }}
           KERNEL_CCS: ${{ inputs.kernel_ccs || '' }}
           SHARD: ${{ matrix.shard }}
           WORKLOAD: ${{ matrix.workload }}
