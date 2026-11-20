@@ -229,14 +229,6 @@ static void tcp_copa_cong_control(struct sock *sk,
 			       acked_pkts, mss, rate_bps, app_limited);
 	new_cwnd = clamp_t(u32, new_cwnd, COPA_MIN_CWND_PKTS, tp->snd_cwnd_clamp);
 	tcp_copa_set_cwnd(tp, new_cwnd);
-	if (unlikely(READ_ONCE(diagnose)) && now_us >= priv->next_sample_us) {
-		priv->next_sample_us = now_us + 100000;
-		pr_info("copa_sample t=%llu sport=%u cwnd=%u out=%u notsent=%u rs_app=%d tp_app=%d ss=%d phase=%d pace=%lu ca_state=%u\n",
-			now_us, inet_sk(sk)->inet_num, new_cwnd, tp->packets_out,
-			tp->write_seq - tp->snd_nxt, rs && rs->is_app_limited,
-			tp->app_limited != 0, ca->slow_start, ca->drain_phase,
-			READ_ONCE(sk->sk_pacing_rate), inet_csk(sk)->icsk_ca_state);
-	}
 
 	pacing_rate = copa_pacing_rate_bps(ca, mss, now_us);
 	if (pacing_rate > 0) {
@@ -244,6 +236,15 @@ static void tcp_copa_cong_control(struct sock *sk,
 		if (pacing_rate > max_rate)
 			pacing_rate = max_rate;
 		WRITE_ONCE(sk->sk_pacing_rate, (unsigned long)pacing_rate);
+	}
+	if (unlikely(READ_ONCE(diagnose)) && now_us >= priv->next_sample_us) {
+		priv->next_sample_us = now_us + 100000;
+		pr_info("copa_sample t=%llu sport=%u cwnd=%u out=%u notsent=%u rs_app=%d tp_app=%d ss=%d phase=%d kind=%d deadline=%llu standing=%llu srtt=%llu rtt=%llu pace=%lu ca_state=%u\n",
+			now_us, inet_sk(sk)->inet_num, new_cwnd, tp->packets_out,
+			tp->write_seq - tp->snd_nxt, rs && rs->is_app_limited,
+			tp->app_limited != 0, ca->slow_start, ca->drain_phase,
+			ca->drain_kind, ca->drain_deadline_us, ca->standing_us, srtt_us, rtt_sample_us,
+			READ_ONCE(sk->sk_pacing_rate), inet_csk(sk)->icsk_ca_state);
 	}
 }
 

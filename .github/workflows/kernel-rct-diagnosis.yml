@@ -7,8 +7,13 @@ permissions:
 jobs:
   baseline:
     runs-on: ubuntu-24.04
-    timeout-minutes: 55
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        trial: [3, 4, 5, observed-a, observed-b]
     env:
+      TRIAL: ${{ matrix.trial }}
       SHARD: diag-52
       MODE: full
       QUEUES: 2MB
@@ -16,8 +21,6 @@ jobs:
       REPEATS: 1
       WORKLOAD: pageload
       KERNEL_CCS: copa_auto,bbr
-    outputs:
-      result: ${{ steps.diag.outputs.result }}
     steps:
       - name: Checkout copa-auto-bench
         uses: actions/checkout@v4
@@ -36,7 +39,7 @@ jobs:
             libxcb-composite0-dev libxcb-present-dev libcairo2-dev \
             libpango1.0-dev dnsmasq iproute2 \
             clang llvm libbpf-dev libelf-dev dwarves pkg-config \
-            build-essential python3-pip python3-venv curl \
+            build-essential python3-pip python3-venv curl tcpdump \
             "linux-headers-$(uname -r)" \
             linux-tools-common "linux-tools-$(uname -r)" || \
             sudo apt-get install -y -qq linux-headers-generic linux-tools-generic || true
@@ -95,11 +98,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kernel-rct-diagnosis
+          name: kernel-rct-diagnosis-${{ matrix.trial }}
           path: /tmp/rct-diag
-  result:
-    needs: baseline
-    runs-on: ubuntu-24.04
-    name: ${{ needs.baseline.outputs.result }}
-    steps:
-      - run: echo "See artifact for detailed timelines"
