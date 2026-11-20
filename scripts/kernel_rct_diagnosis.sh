@@ -8,6 +8,21 @@ git -C /tmp/Mortise rev-parse HEAD >> "$root/environment.txt"
 sysctl net.ipv4.tcp_slow_start_after_idle net.core.default_qdisc >> "$root/environment.txt"
 run_pair() {
     local dest="$root/$SHARD-$1"
+    # Mortise binds port 5000 without SO_REUSEADDR. Wait out TIME_WAIT
+    # from the preceding pair before starting another server on this runner.
+    python3 - <<'PYPORT'
+import errno, socket, time
+deadline = time.monotonic() + 100
+while True:
+    with socket.socket() as probe:
+        try:
+            probe.bind(("0.0.0.0", 5000))
+            break
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE or time.monotonic() >= deadline:
+                raise
+    time.sleep(1)
+PYPORT
     python3 scripts/ci_runner.py run-kernel --out-dir "$dest"
     python3 - "$dest" <<'PY'
 import csv, sys
