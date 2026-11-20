@@ -1,0 +1,79 @@
+{
+  "_comment": "体育场：几乎不动，容量变化完全来自周围用户。散场前后负载变化大。",
+  "tech": "4g",
+  "defaults": {
+    "car_loss_db": 6,
+    "edge_rsrp_dbm": -100,
+    "cell": {
+      "side": "left",
+      "offset_m": 60,
+      "height_m": 25,
+      "tx_dbm": 46,
+      "range_mode": "soft",
+      "antenna": {
+        "type": "omni"
+      }
+    },
+    "tunnel_cell_spacing_m": 0,
+    "tunnel_loss_db": 30,
+    "tunnel_ramp_m": 10
+  },
+  "track": {
+    "points": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        120,
+        0,
+        0
+      ]
+    ]
+  },
+  "timeline": {
+    "0-40": {
+      "speed_kmh": 0,
+      "crowd_ues": 5,
+      "crowd_mbps": 1
+    },
+    "40-80": {
+      "speed_kmh": 0,
+      "crowd_ues": 20,
+      "crowd_mbps": 1
+    },
+    "80-120": {
+      "speed_kmh": 0,
+      "crowd_ues": 20,
+      "crowd_mbps": 2,
+      "_comment": "中场休息，大家都在看视频"
+    },
+    "120-150": {
+      "speed_kmh": 2,
+      "crowd_ues": 20,
+      "crowd_mbps": 1
+    },
+    "150-180": {
+      "speed_kmh": 2,
+      "crowd_ues": 5,
+      "crowd_mbps": 1
+    }
+  },
+  "cells": [
+    {
+      "id": "M1",
+      "track_m": 20,
+      "side": "left",
+      "offset_m": 150,
+      "height_m": 30
+    },
+    {
+      "id": "M2",
+      "track_m": 100,
+      "side": "right",
+      "offset_m": 180,
+      "height_m": 30
+    }
+  ]
+}

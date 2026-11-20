@@ -6,7 +6,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export NS3_ROOT="${NS3_ROOT:-$HERE/ns-3}"
 J="${JOBS:-$(($(getconf _NPROCESSORS_ONLN) - 1))}"
-R="$HERE/results"; SC="$HERE/scripts"; PY="python3 -I"
+R="$HERE/results"; SC="$HERE/scripts/paper"; PY="python3 -I"
 WHAT="${1:-all}"
 want() { [ "$WHAT" = all ] || [ "$WHAT" = "$1" ]; }
 mkdir -p "$R"
@@ -48,7 +48,7 @@ if want lines; then
     SWEEP_OUT="$R/lines" python3 "$SC/run.py" $LINES --ccs copa-auto,copa,cubic,bbr,copa-d0.05,copa-d0.02 --runs 3 --jobs "$J"
     ( cd "$R/lines"; find . \( -name 'r[0-9]-metrics.json' -o -name 'r[0-9]-rttprobe-metrics.json' \) | while read -r f; do
         mkdir -p "$R/lines-nc/$(dirname "$f")"; cp "$f" "$R/lines-nc/$f"; done )
-    SWEEP_OUT="$R/lines-nc" python3 "$SC/run.py" $LINES --ccs copa-auto,copa --runs 3 --jobs "$J" --set ns3::TcpCopa::ModeSwitching=false
+    SWEEP_OUT="$R/lines-nc" python3 "$SC/run.py" $LINES --ccs copa-auto,copa --runs 3 --jobs "$J" --set ns3::TcpCopaKernel::ModeSwitching=false
     $PY "$SC/lines_analyze.py" "$R/lines" "$R/lines-nc" "$R/lines-summary.json"
     # Multi-flow runs on four lines. They reuse the capacity probes of the single-flow sweep.
     MULTI="city-drive city-subway rural-road hsr-line"
@@ -60,7 +60,7 @@ if want lines; then
             done; done
         done
         SWEEP_OUT="$R/lines-multi/sw-n$n" python3 "$SC/run.py" $MULTI --ccs copa-auto,copa,cubic,bbr --runs 3 --jobs "$J" --set numFlows=$n
-        SWEEP_OUT="$R/lines-multi/nc-n$n" python3 "$SC/run.py" $MULTI --ccs copa-auto,copa --runs 3 --jobs "$J" --set numFlows=$n --set ns3::TcpCopa::ModeSwitching=false
+        SWEEP_OUT="$R/lines-multi/nc-n$n" python3 "$SC/run.py" $MULTI --ccs copa-auto,copa --runs 3 --jobs "$J" --set numFlows=$n --set ns3::TcpCopaKernel::ModeSwitching=false
     done
     $PY "$SC/lines_multi_analyze.py" "$R/lines-multi" "$R/lines-multi-summary.json"
 fi

@@ -6,20 +6,21 @@
 
 ---
 
-## 1. 目录结构
+## 1. 仓库目录结构
 
 ```text
-ns3/
-├── tcp_ccas_bench.cc       # 统一 ns-3 评测入口（Bulk + Mortise .wk + Mahimahi/LeoCC 轨迹）
-├── ns-3/                   # ns-3 源码与构建目录（gitignored，由 setup_ns3.sh 或下方命令初始化）
-├── ns3-overlay/            # ns-3 定制扩展（含 TcpBbrV2、TcpBbrV3、tcp-capacity-trace 等）
-├── setup_ns3.sh            # 原版 ns-3 全量初始化脚本
-├── Makefile / run_all.sh   # 原版论文专项实验入口
-├── config/ docs/ scripts/  # 原版实验配置与分析脚本
-└── traces/ results/ smoke/ # 本地轨迹缓存与输出目录（gitignored）
+copa-delta-repro/
+├── kernel/                 # 纯 Linux 内核 C 模块（tcp_copa_auto/, tcp_leocc/）
+├── ns3/                    # ns-3 仿真引擎、overlay、论文遗留脚本（scripts/paper/）
+│   ├── ns3-overlay/        # TcpCopaKernel, TcpMortiseCopa, TcpBbrV2/V3 及 3 个仿真引擎
+│   └── ns-3/               # ns-3 源码与构建目录（gitignored）
+├── datasets/               # 统一数据集目录
+│   ├── lines/              # 统一场景 JSON：wired/, wifi/, 4g/, mahimahi/(gitignored)
+│   ├── traces/             # Mahimahi/Lumos5G/NYC/LeoCC 原始轨迹缓存（gitignored）
+│   └── workloads/          # Mortise .wk 应用负载（app/websearch/vl2/pageload.wk）
+├── scripts/                # 分类脚本：bench/, data/, eval/, env/
+└── results/                # 统一输出（gitignored）：cache/, ns3/<shard>/, kernel/, reports/
 ```
-
-> 配套调度与汇总脚本位于 [../kernel/scripts/](../kernel/scripts/)：`run_ns3_suite.py`、`ci_runner.py`、`gen_workloads.py`、`mahimahi_eval.py`。
 
 ---
 
@@ -27,19 +28,22 @@ ns3/
 
 已全部封装进根目录 [../Makefile](../Makefile) 与 [Makefile](Makefile)，在**仓库根目录**或 `ns3/` 目录下均可直接执行：
 
-### 2.1 首次初始化 ns-3（精简 6 模块 `optimized` 构建，推荐）
+### 2.1 首次初始化 ns-3（含 `lte` + `wifi` 物理层模块的 `optimized` 构建）
 
 ```bash
 make setup-bench
 ```
 
-等价于拉取 ns-3 基线 commit（`84a73f9c00abf5e5b8aa676e1775261fb717c3ac`）、覆盖 `ns3-overlay/`、同步 `copa_auto_core.h` / `copa_auto_math.h` / `tcp_ccas_bench.cc`，并以 6 模块 `optimized` 编译（速度比 debug 快 3–5 倍）。编译产物路径：`ns3/ns-3/build/scratch/ns3-dev-tcp_ccas_bench-optimized`。
+等价于拉取 ns-3 基线 commit（`84a73f9c00abf5e5b8aa676e1775261fb717c3ac`）、将最新 [../kernel/tcp_copa_auto/copa_auto_core.h](../kernel/tcp_copa_auto/copa_auto_core.h) 同步到 `ns3-overlay/src/internet/model/` 并覆盖进 `ns3/ns-3`，以 `optimized` 模式编出全部 3 个仿真引擎：
+- `ns3-dev-tcp-capacity-trace-optimized`：有线链路（`wired`）+ 精确 1 ms `mm-link` 门控（`4g`/`5g`/`leo`/`synth`）+ Bulk / `.wk` 负载
+- `ns3-dev-tcp-lte-highspeed-handover-optimized`：3GPP 4G 物理层 + 14 条实景路线（`datasets/lines/4g/*.json`）+ Bulk / `.wk` 负载
+- `ns3-dev-tcp-wifi-bench-optimized`：原生 802.11ax Wi-Fi MAC/PHY + CSMA/CA 竞争（`datasets/lines/wifi/*.json`）+ Bulk / `.wk` 负载
 
-### 2.2 修改 `copa_auto_core.h` 后的快速测试与增量重编译（~1–2 秒）
+### 2.2 修改 `copa_auto_core.h` 后的快速测试与增量重编译
 
 ```bash
 make test-core     # 跑 C 核心单元测试（kernel/tcp_copa_auto）
-make build-bench   # 同步头文件并增量重编 tcp_ccas_bench
+make build-bench   # 同步最新 C 核心与 overlay 并增量重编 3 个仿真引擎
 ```
 
 ---
@@ -48,18 +52,29 @@ make build-bench   # 同步头文件并增量重编 tcp_ccas_bench
 
 ### 3.1 通过 Makefile 一键跑分片并自动生成汇总报告（推荐）
 
-`make bench` 会自动完成：**生成 `.wk` 负载 → 并发运行 ns-3 评测 → 调用 `mahimahi_eval.py` 输出并打印 `comparison_summary.md`**。
+`make bench-*` 会自动完成：**确认 `.wk` 负载 →（若为 4G/Wi-Fi PHY 自动探测并缓存信道容量）→ 并发运行 ns-3 评测 → 调用 `scripts/eval/eval_report.py` 在 `results/ns3/<shard>/` 下生成并打印 `comparison_summary.md`**。
 
 ```bash
 # 查看所有目标和默认参数
 make help
 
-# 快捷目标（支持在仓库根目录或 ns3/ 下执行）
-make bench-synth       # 合成轨迹（2 条，几秒出结果）
-make bench-lte         # 4 条真实 Mahimahi LTE-driving 轨迹
-make bench-leo         # LeoCC Starlink 卫星切换轨迹（自动 115 s + 10ms 时变延迟）
-make bench-datasets    # 6 大类数据集核心代表
-make bench-full        # 全量 44 个分片（329 条轨迹）
+# 统一场景与链路评测（支持在仓库根目录或 ns3/ 下执行）
+make bench-wired        # 有线链路（datasets/lines/wired/*.json：home, wan, dc, step）
+make bench-wifi         # 原生 802.11ax Wi-Fi 物理层（datasets/lines/wifi/*.json：home, wall, cafe）
+make bench-lines-quick  # 3GPP 4G 物理层快速子集（city-street, train-tunnel, highway-congestion）
+make bench-lines        # 全部 14 条 3GPP 4G 物理层路线（datasets/lines/4g/*.json）
+make bench-synth        # 合成轨迹（2 条，几秒出结果）
+make bench-4g           # 4 条真实 Mahimahi 4G 驾车轨迹（兼容别名 bench-lte）
+make bench-5g           # Lumos5G 5G 轨迹
+make bench-leo          # LeoCC Starlink 卫星切换轨迹（自动 115 s + 10 ms 时变延迟）
+make bench-datasets     # 6 大类数据集核心代表
+make bench-full         # 全量 44 个分片（329 条轨迹）
+
+# 将 Mahimahi 轨迹转换为统一 lines JSON（输出到 datasets/lines/mahimahi/）
+make convert-mahimahi SHARD=4g,5g,leo,synth
+
+# 汇总全部 ns-3 + Linux kernel 结果到 results/reports/all_summary.md
+make report
 ```
 
 **常用参数覆写示例**（支持所有变量任意组合）：
@@ -67,53 +82,54 @@ make bench-full        # 全量 44 个分片（329 条轨迹）
 ```bash
 # 自定义分片、算法、负载集、并发数
 make bench \
-  SHARD=lte,leo \
+  SHARD=wired,wifi,4g \
   CCS=copa_auto_nc,copa_auto_nc_j0,mortise_copa,bbr,bbr3,cubic \
   WORKLOADS=bulk,app,websearch \
   REPEATS=1
 
 # 手动固定 jitter_us（如 3 ms，跳过 MEASURE_J 探测）
-make bench-lte JITTER_US=3000
+make bench-4g JITTER_US=3000
 
-# 调节仿真时钟与带宽槽粒度（默认 CLOCK_MS=1.0, BIN_MS=5.0）
-make bench-synth CLOCK_MS=1.0 BIN_MS=5.0
+# 调节快/慢时钟粒度（默认 CLOCK_MS=1.0, COPA_CLOCK_US=1）
+make bench-wired CLOCK_MS=0.1 COPA_CLOCK_US=1000
 
 # 仅重新汇总已有结果目录
-make summary OUT_DIR=ns3/results/bench/lte
+make summary OUT_DIR=results/ns3/wired
 
 # 清理评测输出
-make clean-bench
+make clean-bench   # 清理 results/ns3
+make clean-all     # 清理 results/{ns3,kernel,reports,cache}
 ```
 
-> `SHARD` 支持单个分片、逗号拼接（如 `lte,leo,nyc-subway`）及复合别名：`full`（全部 44 分片）、`datasets`（6 大类代表）、`rct-datasets`、`lumos-5g-all`（16 分片）、`lumos-4g-all`（18 分片）、`lumos-all`（34 分片）。
+> `SHARD` 支持单个分片、逗号拼接（如 `wired,wifi,lines-quick,4g,leo`）及复合别名：`full`、`datasets`、`rct-datasets`、`lumos-5g-all`、`lumos-4g-all`、`lumos-all`。
 
-### 3.2 单次调试运行 `tcp_ccas_bench`
+### 3.2 单次调试运行 `tcp-capacity-trace`
 
 ```bash
-ns3/ns-3/build/scratch/ns3-dev-tcp_ccas_bench-optimized \
+ns3/ns-3/build/scratch/ns3-dev-tcp-capacity-trace-optimized \
   --cc=copa_auto_nc \
-  --mode=bulk \
-  --downTrace=ns3/traces/mahimahi/ATT-LTE-driving.down \
-  --upTrace=ns3/traces/mahimahi/ATT-LTE-driving.up \
+  --downTrace=datasets/traces/mahimahi/ATT-LTE-driving.down \
+  --upTrace=datasets/traces/mahimahi/ATT-LTE-driving.up \
   --baseRttMs=20 \
   --queueBytes=2000000 \
-  --durS=60 \
-  --warmupS=5 \
-  --binMs=5.0 \
+  --stopTime=60 \
+  --warmup=5 \
   --clockGranularityMs=1.0 \
-  --jitterUs=-1
+  --copaClockUs=1 \
+  --jitterUs=-1 \
+  --evalJson=1
 ```
 
 ### 3.3 时钟粒度与时间参数（默认值一览）
 
-| 参数（`run_ns3_suite.py` / `tcp_ccas_bench`） | 默认值 | 含义与作用 |
+| 参数（`Makefile` / `run_ns3_suite.py` / ns-3 CLI） | 默认值 | 含义与作用 |
 | :--- | :--- | :--- |
 | ns-3 内部事件调度精度（固定） | **`1 ns`** | `ns3::Time::NS`，ns-3 默认离散事件时间分辨率 |
-| `copa_auto_core.h` 时间戳精度（固定） | **`1 µs`** | `Simulator::Now().GetMicroSeconds()`，与 Linux 内核 `tcp_jiffies32` / `srtt_us` 对齐 |
-| `--clock-ms` / `--clockGranularityMs` | **`1.0 ms`** | `ns3::TcpSocketBase::ClockGranularity`，TCP 协议栈 RTO/RTT 定时器时钟粒度（与 ns-3 默认 `1 ms` 一致，可调如 `0.1` / `1.0` / `4.0` ms） |
-| `--bin-ms` / `--binMs` | **`5.0 ms`** | Mahimahi 轨迹带宽时间槽（rate bin）采样与更新周期（决定下行带宽轨迹重放粒度；上行固定 `10 ms`，LeoCC 时变延迟固定 `10 ms`） |
-| `--bulk-secs` / `--durS` | **`60 s`**（`leo` 为 **`115 s`**） | Bulk 流仿真总时长 |
-| `--warmup-s` / `--warmupS` | **`5.0 s`** | Bulk 指标统计前跳过的预热时长 |
+| Mahimahi 链路发包门控（固定） | **`1 ms`（精确 `mm-link`）** | `MahimahiGate` 逐毫秒精确放行 1500B 包，与真实 Linux `mm-link` 1:1 等价 |
+| `CLOCK_MS` / `--clock-ms` / `--clockGranularityMs` | **`1.0 ms`** | `ns3::TcpSocketBase::ClockGranularity`，TCP 协议栈 RTO/RTT 定时器时钟（对标 Linux `HZ=1000`，可调 `0.1` 快时钟 / `4.0` 慢时钟） |
+| `COPA_CLOCK_US` / `--copa-clock-us` / `--copaClockUs` | **`1 µs`** | 喂给 `TcpCopaKernel` / `TcpMortiseCopa` 的时间戳与 RTT 量化粒度（`1` = 微秒高精度，`1000` / `4000` = 模拟 1–4 ms 慢时钟） |
+| `--bulk-secs` / `--stopTime` | **`60 s`**（`leo` 为 **`115 s`**） | Bulk 流仿真总时长 |
+| `--warmup-s` / `--warmup` | **`5.0 s`** | Bulk 指标统计前跳过的预热时长 |
 
 ---
 
@@ -170,19 +186,38 @@ Workflow 位于 [.github/workflows/ns3-bench.yml](../.github/workflows/ns3-bench
 
 ---
 
-## 6. 可选数据集与分片（6 大类，329 条轨迹）
+## 6. 两大类评测场景与数据集总览
 
-| 数据集 | 场景特征 | 对应 `--shard` | 默认浅 / 深队列 | 默认 Bulk 时长 |
+本框架包含**两类独立但互补的场景体系**，均共用最新 `TcpCopaKernel`（`copa_auto_core.h`）、1:1 官方 `TcpMortiseCopa` 与全部 ns-3 基线算法：
+
+### 6.1 移植自 Mahimahi / 公开轨迹数据集（`tcp-capacity-trace`，精确 1 ms `mm-link` 门控）
+
+通过 `make bench-*`（[run_ns3_suite.py](../kernel/scripts/run_ns3_suite.py)）驱动，全部按真实 Mahimahi 逐毫秒发包机会（1500B/slot）重放，支持 Bulk 与 4 种 `.wk` 应用负载：
+
+| 数据集（6 大类，329 条轨迹） | 场景特征 | 对应 `--shard` / `make` 目标 | 默认浅 / 深队列 | 默认 Bulk 时长 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Mahimahi Cellular LTE** | 蜂窝驾车、高抖动（4 条：`ATT-2016`/`ATT`/`TMobile`/`Verizon`） | `lte`（`smoke` 仅第 1 条） | `150 KB` / `2 MB` | `60 s` |
+| **Mahimahi Cellular 4G** | 4G 驾车、高抖动（4 条：`ATT-2016`/`ATT`/`TMobile`/`Verizon`） | `4g`（兼容 `lte`，`make bench-4g`） | `150 KB` / `2 MB` | `60 s` |
 | **NYC 4G（NYU）** | 城市定点 5 条 / 步行 12 条 / 驾车 6 条（共 23 条） | `nyc-stat`、`nyc-walk-1..3`、`nyc-drive-1..2` | `150 KB` / `2 MB` | `60 s` |
 | **NYC 4G Subway（2018）** | 地铁场景无/有交叉流（2 条） | `nyc-subway`（`nyc-rct` 精选 3 条） | `150 KB` / `2 MB` | `60 s` |
 | **Lumos5G 5G（SIGCOMM'21）** | 商业 5G 毫米波步行/驾车、超高带宽（全集 121 条） | `lumos-5g`（2 条）、`lumos-rct`（1 条）、`lumos-5g-s1-of-16..s16-of-16` | `2 MB` / `16 MB` | `60 s` |
 | **Lumos5G 4G（SIGCOMM'21）** | 商业 4G 轨迹（全集 175 条） | `lumos-4g-s1-of-18..s18-of-18` | `150 KB` / `2 MB` | `60 s` |
-| **LeoCC Starlink** | LEO 卫星 15 s 级切换、10 ms 时变延迟 + 带宽（2 条官方示例；支持 `--shard local-leo --local-leo-dir` 扩展） | `leo` / `local-leo` | `2 MB` / `75 MB` | `115 s` |
-| **合成轨迹（Synth）** | 稳态 48 Mbps 与阶跃带宽（2 条：`synth-48mbps`、`synth-step`） | `synth` | `150 KB` / `2 MB` | `60 s` |
+| **LeoCC Starlink** | LEO 卫星 15 s 级切换、保序 10 ms 时变延迟 + 带宽（2 条官方示例；支持 `--shard local-leo` 扩展） | `leo`（`make bench-leo`）/ `local-leo` | `2 MB` / `75 MB` | `115 s` |
+| **合成轨迹（Synth）** | 稳态 48 Mbps 与阶跃带宽（2 条：`synth-48mbps`、`synth-step`） | `synth`（`make bench-synth`） | `150 KB` / `2 MB` | `60 s` |
 
-> GitHub Actions 的 `mode=full` 与本地的 `--shard full` 均会自动编排全部 **44 个分片（329 条轨迹）** 并行执行。
+> GitHub Actions 的 `mode=full` 与本地的 `make bench-full`（`--shard full`）均会自动编排全部 **44 个分片（329 条轨迹）** 并行执行。
+
+---
+
+### 6.2 基于 `lines` JSON 格式定义的 3GPP 4G 物理层路线与合成场景
+
+定义文件位于 [ns3-overlay/scratch/lines/](ns3-overlay/scratch/lines/)（格式规范见 [FORMAT.md](ns3-overlay/scratch/lines/FORMAT.md)），由 `tcp-lte-highspeed-handover`（完整 3GPP 4G 无线物理层 + 基站切换 + 多用户干扰 + 建筑物遮挡）和 `tcp-capacity-trace` 驱动：
+
+| `make` 目标 | 底层仿真器 | 场景来源与内容 |
+| :--- | :--- | :--- |
+| **`make lines`** | `tcp-lte-highspeed-handover` | **14 条 `lines` JSON 真实生活路线**（单流 + 2/4 流多流竞争）：<br>• 步行/运动：`walk-line`（`walk.json`）、`run-line`（`run.json`）<br>• 城市交通：`city-drive`（`city-drive.json`）、`city-bus`（`city-bus.json`）、`city-subway`（`city-subway.json`）、`city-elevated`（`city-elevated.json`）<br>• 城市密集区：`city-mall`（`city-mall.json`）、`city-stadium`（`city-stadium.json`）<br>• 乡村/偏远：`rural-road`（`rural-road.json`）、`rural-mountain`（`rural-mountain.json`）、`rural-village`（`rural-village.json`）、`rural-edge`（`rural-edge.json`）<br>• 城际高速：`hwy-line`（`highway.json`）、`hsr-line`（`hsr.json`，300 km/h 高铁） |
+| **`make mobile`** | `tcp-lte-highspeed-handover` | 3GPP 4G 高速公路/高铁切换专项 + 2/4 流与背景流公平性竞争（`config/hwy.args`） |
+| **`make basic`** | `tcp-capacity-trace` | 合成链路动态剖面（`outage` 隧道断网、`step` 带宽阶跃、`handover` 切换、`fluctuate` 对数正态随机游走） |
+| **`make 4g-paper`**（别名 `make lte`） / **`make leo`** | `tcp-capacity-trace` | 论文原版 1/2/4 流 180 s Mahimahi 4G 与 LeoCC `4.8K.zip` 大规模重放 |
 
 ---
 

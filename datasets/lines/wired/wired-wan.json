@@ -1,0 +1,13 @@
+{
+  "_comment": "跨洲有线长肥管道（LFN）：100 Mbps，120 ms 高 RTT，BDP 1.5 MB",
+  "name": "wired-wan",
+  "tech": "wired",
+  "profile": "outage",
+  "outage_duration_s": 0.0,
+  "bandwidth_mbps": 100.0,
+  "base_rtt_ms": 120.0,
+  "queues": ["2MB", "16MB"],
+  "loss_rate": 0.0,
+  "aqm": "none",
+  "duration_s": 60.0
+}

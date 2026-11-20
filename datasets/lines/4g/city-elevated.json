@@ -1,0 +1,77 @@
+{
+  "_comment": "城市高架：80 km/h，站点密，同频干扰强，切换频繁。",
+  "tech": "4g",
+  "defaults": {
+    "car_loss_db": 9,
+    "edge_rsrp_dbm": -100,
+    "cell": {
+      "side": "left",
+      "offset_m": 60,
+      "height_m": 25,
+      "tx_dbm": 46,
+      "range_mode": "soft",
+      "antenna": {
+        "type": "omni"
+      }
+    },
+    "tunnel_cell_spacing_m": 0,
+    "tunnel_loss_db": 30,
+    "tunnel_ramp_m": 10
+  },
+  "track": {
+    "points": [
+      [
+        0,
+        0,
+        12
+      ],
+      [
+        2000,
+        0,
+        12
+      ],
+      [
+        3400,
+        800,
+        12
+      ],
+      [
+        4400,
+        800,
+        12
+      ]
+    ]
+  },
+  "timeline": {
+    "0-10": {
+      "speed_kmh": [
+        0,
+        80
+      ]
+    },
+    "10-90": {
+      "speed_kmh": 80
+    },
+    "90-100": {
+      "speed_kmh": 80,
+      "interference_dbm": -90
+    },
+    "100-140": {
+      "speed_kmh": 80,
+      "interference_dbm": -95
+    },
+    "140-180": {
+      "speed_kmh": 80
+    }
+  },
+  "cell_grid": [
+    {
+      "from_m": 150,
+      "to_m": 4000,
+      "spacing_m": 500,
+      "side": "alternate",
+      "id_prefix": "M",
+      "range_m": 330
+    }
+  ]
+}

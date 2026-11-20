@@ -3,7 +3,9 @@
 
 REPO_ROOT    := $(abspath $(CURDIR)/..)
 KERNEL_DIR   := $(REPO_ROOT)/kernel
-SCRIPTS_DIR  := $(KERNEL_DIR)/scripts
+SCRIPTS_DIR  := $(REPO_ROOT)/scripts
+DATASETS_DIR := $(REPO_ROOT)/datasets
+RESULTS_DIR  := $(REPO_ROOT)/results
 NS3_ROOT     ?= $(CURDIR)/ns-3
 NS3_BASE     := 84a73f9c00abf5e5b8aa676e1775261fb717c3ac
 JOBS         ?= $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
@@ -13,73 +15,89 @@ export JOBS
 # ---------------------------------------------------------------------------
 # Benchmark suite configurable variables (override via `make bench SHARD=...`)
 # ---------------------------------------------------------------------------
-SHARD        ?= synth
-CCS          ?= copa_auto,copa_auto_nc,copa_auto_nc_j0,mortise_copa,bbr,bbr3,cubic,vegas,veno,yeah
-WORKLOADS    ?= bulk,websearch
-REPEATS      ?= 1
-JITTER_US    ?= -1
-BIN_MS       ?= 5.0
-CLOCK_MS     ?= 1.0
-QUEUES       ?=
-PARALLEL     ?= $(JOBS)
-RESUME       ?= 1
-TRACE_DIR    ?= $(CURDIR)/traces/cache
-WORKLOAD_DIR ?= $(CURDIR)/results/workloads
-OUT_DIR      ?= $(CURDIR)/results/bench/$(SHARD)
-SUMMARY_DIR  ?= $(OUT_DIR)/summary
-BENCH_BIN    ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp_ccas_bench-optimized
+SHARD         ?= synth
+CCS           ?= copa_auto,copa_auto_nc,copa_auto_nc_j0,mortise_copa,bbr,bbr3,cubic,vegas,veno,yeah
+WORKLOADS     ?= bulk,websearch
+REPEATS       ?= 1
+JITTER_US     ?= -1
+CLOCK_MS      ?= 1.0
+COPA_CLOCK_US ?= 1
+QUEUES        ?=
+PARALLEL      ?= $(JOBS)
+RESUME        ?= 1
 
-WORKLOAD_MAP := app=$(WORKLOAD_DIR)/app.wk,websearch=$(WORKLOAD_DIR)/websearch.wk,vl2=$(WORKLOAD_DIR)/vl2.wk,pageload=$(WORKLOAD_DIR)/pageload.wk
-QUEUES_FLAG  := $(if $(QUEUES),--queues $(QUEUES),)
-RESUME_FLAG  := $(if $(filter 1 true yes,$(RESUME)),--resume,)
+TRACE_DIR     ?= $(DATASETS_DIR)/traces
+LINES_DIR     ?= $(DATASETS_DIR)/lines
+WORKLOAD_DIR  ?= $(DATASETS_DIR)/workloads
+CAP_CACHE     ?= $(RESULTS_DIR)/cache/phy_cap_cache.json
+OUT_DIR       ?= $(RESULTS_DIR)/ns3/$(SHARD)
+REPORT_DIR    ?= $(RESULTS_DIR)/reports
+
+BENCH_BIN     ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp-capacity-trace-optimized
+LTE_BIN       ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp-lte-highspeed-handover-optimized
+WIFI_BIN      ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp-wifi-bench-optimized
+
+WORKLOAD_MAP  := app=$(WORKLOAD_DIR)/app.wk,websearch=$(WORKLOAD_DIR)/websearch.wk,vl2=$(WORKLOAD_DIR)/vl2.wk,pageload=$(WORKLOAD_DIR)/pageload.wk
+QUEUES_FLAG   := $(if $(QUEUES),--queues $(QUEUES),)
+RESUME_FLAG   := $(if $(filter 1 true yes,$(RESUME)),--resume,)
 
 # Legacy trace paths
 LTE_TRACES := traces/mahimahi/Verizon-LTE-driving.down
 LEO_TRACES := traces/leocc/4.8K.zip
 
-.PHONY: help setup-bench test-core sync-bench build-bench workloads \
-        bench bench-synth bench-lte bench-leo bench-datasets bench-full \
-        summary clean-bench \
-        setup smoke fetch fetch-mahimahi fetch-leocc basic lte leo mobile lines figures all clean-results
+.PHONY: help setup-bench test-core sync-bench build-bench workloads convert-mahimahi \
+        bench bench-wired bench-wifi bench-synth bench-4g bench-lte bench-5g bench-leo \
+        bench-lines-quick bench-lines bench-datasets bench-full \
+        summary report clean-bench clean-all \
+        setup smoke fetch fetch-mahimahi fetch-leocc basic 4g-paper lte leo mobile lines figures all clean-results
 
 help:
-	@echo "=== Copa-Auto ns-3 Benchmark Targets ==="
-	@echo "  make setup-bench     Clone ns-3 base + overlay, configure 6-module optimized build, build tcp_ccas_bench"
-	@echo "  make test-core       Run C unit tests for kernel/tcp_copa_auto/copa_auto_core.h"
-	@echo "  make build-bench     Sync copa_auto_core.h + tcp_ccas_bench.cc and rebuild tcp_ccas_bench"
-	@echo "  make workloads       Generate websearch/vl2/pageload .wk files (and download app.wk if missing)"
-	@echo "  make bench           Run run_ns3_suite.py + mahimahi_eval.py for SHARD=$(SHARD)"
-	@echo "  make bench-synth     Shortcut: make bench SHARD=synth"
-	@echo "  make bench-lte       Shortcut: make bench SHARD=lte"
-	@echo "  make bench-leo       Shortcut: make bench SHARD=leo"
-	@echo "  make bench-datasets  Shortcut: make bench SHARD=datasets"
-	@echo "  make bench-full      Shortcut: make bench SHARD=full (all 44 shards / 329 traces)"
-	@echo "  make summary         Re-run mahimahi_eval.py on OUT_DIR and print comparison_summary.md"
-	@echo "  make clean-bench     Delete results/bench"
+	@echo "=== 1. Build, Unit Tests & Datasets ==="
+	@echo "  make setup-bench       Clone ns-3 + overlay, build all 3 engines (capacity-trace, 4G PHY, Wi-Fi 802.11ax)"
+	@echo "  make test-core         Run C unit tests for kernel/tcp_copa_auto/copa_auto_core.h"
+	@echo "  make build-bench       Sync copa_auto_core.h + ns3-overlay and rebuild all 3 ns-3 binaries"
+	@echo "  make workloads         Ensure datasets/workloads/{app,websearch,vl2,pageload}.wk exist"
+	@echo "  make convert-mahimahi  Convert Mahimahi traces to unified lines JSON (datasets/lines/mahimahi/)"
+	@echo ""
+	@echo "=== 2. Unified Benchmark Suite (results -> results/ns3/<shard>/) ==="
+	@echo "  make bench             Run run_ns3_suite.py + eval_report.py for SHARD=$(SHARD)"
+	@echo "  make bench-wired       Wired links (datasets/lines/wired/*.json: home, wan, dc, step)"
+	@echo "  make bench-wifi        Real 802.11ax Wi-Fi MAC/PHY (datasets/lines/wifi/*.json: home, wall, cafe)"
+	@echo "  make bench-lines-quick 3GPP 4G PHY quick subset (city-street, train-tunnel, highway-congestion)"
+	@echo "  make bench-lines       All 14 3GPP 4G PHY real-world routes (datasets/lines/4g/*.json)"
+	@echo "  make bench-synth       Synthetic Mahimahi traces (2 traces)"
+	@echo "  make bench-4g          Mahimahi 4G-driving traces (4 traces; alias: bench-lte)"
+	@echo "  make bench-5g          Lumos5G traces"
+	@echo "  make bench-leo         LeoCC Starlink fixed + dynamic traces"
+	@echo "  make bench-datasets    nyc-subway + lumos-5g + leo"
+	@echo "  make bench-full        All shards combined"
+	@echo ""
+	@echo "=== 3. Reports & Cleanup ==="
+	@echo "  make summary           Re-run eval_report.py on OUT_DIR and print comparison_summary.md"
+	@echo "  make report            Aggregate ALL results/ns3/* + results/kernel/* -> results/reports/all_summary.md"
+	@echo "  make clean-bench       Delete results/ns3"
+	@echo "  make clean-all         Delete results/ns3, results/kernel, results/reports, results/cache"
+	@echo ""
+	@echo "=== 4. Legacy Paper Scenarios ==="
+	@echo "  make lines | mobile | basic | 4g-paper | leo | figures | clean-results"
 	@echo ""
 	@echo "=== Configurable Variables ==="
-	@echo "  SHARD=$(SHARD)"
-	@echo "  CCS=$(CCS)"
-	@echo "  WORKLOADS=$(WORKLOADS)"
-	@echo "  REPEATS=$(REPEATS)  JITTER_US=$(JITTER_US)  BIN_MS=$(BIN_MS)  CLOCK_MS=$(CLOCK_MS)"
-	@echo "  QUEUES=$(QUEUES)  PARALLEL=$(PARALLEL)"
+	@echo "  SHARD=$(SHARD)  CCS=$(CCS)"
+	@echo "  WORKLOADS=$(WORKLOADS)  REPEATS=$(REPEATS)"
+	@echo "  JITTER_US=$(JITTER_US)  CLOCK_MS=$(CLOCK_MS)  COPA_CLOCK_US=$(COPA_CLOCK_US)"
+	@echo "  QUEUES=$(QUEUES)  PARALLEL=$(PARALLEL)  RESUME=$(RESUME)"
 	@echo "  OUT_DIR=$(OUT_DIR)"
-	@echo ""
-	@echo "=== Legacy Paper Reproduction Targets ==="
-	@echo "  make setup | smoke | fetch | basic | lte | leo | mobile | lines | figures | all | clean-results"
 
 # ---------------------------------------------------------------------------
-# Copa-Auto ns-3 Benchmark Targets
+# Build & Core Tests
 # ---------------------------------------------------------------------------
 test-core:
 	$(MAKE) -C $(KERNEL_DIR)/tcp_copa_auto test
 
 sync-bench:
-	@mkdir -p "$(NS3_ROOT)/scratch"
-	cp "$(CURDIR)/tcp_ccas_bench.cc" "$(NS3_ROOT)/scratch/tcp_ccas_bench.cc"
-	cp "$(CURDIR)/mortise_copa_ns3.h" "$(NS3_ROOT)/scratch/mortise_copa_ns3.h"
-	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_core.h" "$(NS3_ROOT)/scratch/copa_auto_core.h"
-	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_math.h" "$(NS3_ROOT)/scratch/copa_auto_math.h"
+	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_core.h" "$(CURDIR)/ns3-overlay/src/internet/model/copa_auto_core.h"
+	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_math.h" "$(CURDIR)/ns3-overlay/src/internet/model/copa_auto_math.h"
+	cp -R "$(CURDIR)/ns3-overlay/." "$(NS3_ROOT)/"
 
 setup-bench:
 	@if [ ! -f "$(NS3_ROOT)/ns3" ]; then \
@@ -89,49 +107,87 @@ setup-bench:
 		git -C "$(NS3_ROOT)" fetch --depth 1 origin "$(NS3_BASE)"; \
 		git -C "$(NS3_ROOT)" checkout -q FETCH_HEAD; \
 	fi
-	cp -R "$(CURDIR)/ns3-overlay/." "$(NS3_ROOT)/"
 	$(MAKE) sync-bench
 	cd "$(NS3_ROOT)" && ./ns3 configure --build-profile=optimized --disable-python --disable-werror \
-		--enable-modules=core,network,internet,point-to-point,applications,traffic-control
-	cd "$(NS3_ROOT)" && ./ns3 build tcp_ccas_bench
+		--enable-modules=core,network,internet,point-to-point,applications,traffic-control,lte,wifi,mobility,buildings,propagation,spectrum,flow-monitor
+	cd "$(NS3_ROOT)" && ./ns3 build tcp-capacity-trace tcp-lte-highspeed-handover tcp-wifi-bench
+	ln -sf ns3-dev-tcp-capacity-trace-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-capacity-trace-default"
+	ln -sf ns3-dev-tcp-lte-highspeed-handover-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-lte-highspeed-handover-default"
+	ln -sf ns3-dev-tcp-wifi-bench-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-wifi-bench-default"
 
 build-bench: sync-bench
-	cd "$(NS3_ROOT)" && ./ns3 build tcp_ccas_bench
+	cd "$(NS3_ROOT)" && ./ns3 build tcp-capacity-trace tcp-lte-highspeed-handover tcp-wifi-bench
+	ln -sf ns3-dev-tcp-capacity-trace-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-capacity-trace-default"
+	ln -sf ns3-dev-tcp-lte-highspeed-handover-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-lte-highspeed-handover-default"
+	ln -sf ns3-dev-tcp-wifi-bench-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-wifi-bench-default"
 
 workloads:
 	@mkdir -p "$(WORKLOAD_DIR)"
-	python3 "$(SCRIPTS_DIR)/gen_workloads.py" --out-dir "$(WORKLOAD_DIR)"
+	@if [ ! -f "$(WORKLOAD_DIR)/websearch.wk" ] || [ ! -f "$(WORKLOAD_DIR)/vl2.wk" ] || [ ! -f "$(WORKLOAD_DIR)/pageload.wk" ]; then \
+		python3 "$(SCRIPTS_DIR)/data/gen_workloads.py" --out-dir "$(WORKLOAD_DIR)"; \
+	fi
 	@if [ ! -f "$(WORKLOAD_DIR)/app.wk" ]; then \
 		echo "Downloading Mortise app.wk..."; \
 		curl -fsSL https://raw.githubusercontent.com/BobAnkh/Mortise/main/mortise/workload/app.wk -o "$(WORKLOAD_DIR)/app.wk" \
 			|| echo "Warning: could not download app.wk (offline?); websearch/vl2/pageload are ready."; \
 	fi
 
+convert-mahimahi:
+	@mkdir -p "$(TRACE_DIR)" "$(LINES_DIR)/mahimahi"
+	python3 "$(SCRIPTS_DIR)/data/mahimahi_to_lines.py" \
+		--shard "$(SHARD)" \
+		--trace-dir "$(TRACE_DIR)" \
+		--out-dir "$(LINES_DIR)/mahimahi"
+
+# ---------------------------------------------------------------------------
+# Unified ns-3 Benchmark Suite
+# ---------------------------------------------------------------------------
 bench: workloads
 	@if [ ! -x "$(BENCH_BIN)" ]; then $(MAKE) build-bench; fi
-	@mkdir -p "$(OUT_DIR)" "$(SUMMARY_DIR)"
-	python3 "$(SCRIPTS_DIR)/run_ns3_suite.py" \
+	@mkdir -p "$(OUT_DIR)" "$(RESULTS_DIR)/cache"
+	python3 "$(SCRIPTS_DIR)/bench/run_ns3_suite.py" \
 		--bin "$(BENCH_BIN)" \
+		--lte-bin "$(LTE_BIN)" \
+		--wifi-bin "$(WIFI_BIN)" \
 		--shard "$(SHARD)" \
 		--ccs "$(CCS)" \
 		--workloads "$(WORKLOADS)" \
 		--workload-map "$(WORKLOAD_MAP)" \
 		--repeats "$(REPEATS)" \
 		--jitter-us "$(JITTER_US)" \
-		--bin-ms "$(BIN_MS)" \
 		--clock-ms "$(CLOCK_MS)" \
+		--copa-clock-us "$(COPA_CLOCK_US)" \
 		--parallel "$(PARALLEL)" \
 		--trace-dir "$(TRACE_DIR)" \
+		--lines-dir "$(LINES_DIR)" \
+		--cap-cache "$(CAP_CACHE)" \
 		$(QUEUES_FLAG) \
 		$(RESUME_FLAG) \
 		--out-dir "$(OUT_DIR)"
-	$(MAKE) summary OUT_DIR="$(OUT_DIR)" SUMMARY_DIR="$(SUMMARY_DIR)"
+	$(MAKE) summary OUT_DIR="$(OUT_DIR)"
+
+bench-wired:
+	$(MAKE) bench SHARD=wired
+
+bench-wifi:
+	$(MAKE) bench SHARD=wifi
+
+bench-lines-quick:
+	$(MAKE) bench SHARD=lines-quick
+
+bench-lines:
+	$(MAKE) bench SHARD=lines
 
 bench-synth:
 	$(MAKE) bench SHARD=synth
 
-bench-lte:
-	$(MAKE) bench SHARD=lte
+bench-4g:
+	$(MAKE) bench SHARD=4g
+
+bench-lte: bench-4g
+
+bench-5g:
+	$(MAKE) bench SHARD=lumos-5g
 
 bench-leo:
 	$(MAKE) bench SHARD=leo
@@ -143,16 +199,28 @@ bench-full:
 	$(MAKE) bench SHARD=full
 
 summary:
-	@mkdir -p "$(SUMMARY_DIR)"
-	python3 "$(SCRIPTS_DIR)/mahimahi_eval.py" \
+	@mkdir -p "$(OUT_DIR)"
+	python3 "$(SCRIPTS_DIR)/eval/eval_report.py" \
 		--input-dir "$(OUT_DIR)" \
-		--out-csv "$(SUMMARY_DIR)/comparison_summary.csv" \
-		--out-md "$(SUMMARY_DIR)/comparison_summary.md"
+		--out-csv "$(OUT_DIR)/comparison_summary.csv" \
+		--out-md "$(OUT_DIR)/comparison_summary.md"
 	@echo ""
-	@cat "$(SUMMARY_DIR)/comparison_summary.md"
+	@cat "$(OUT_DIR)/comparison_summary.md"
+
+report:
+	@mkdir -p "$(REPORT_DIR)"
+	python3 "$(SCRIPTS_DIR)/eval/eval_report.py" \
+		--input-dir "$(RESULTS_DIR)/ns3" "$(RESULTS_DIR)/kernel" \
+		--out-csv "$(REPORT_DIR)/all_summary.csv" \
+		--out-md "$(REPORT_DIR)/all_summary.md"
+	@echo ""
+	@cat "$(REPORT_DIR)/all_summary.md"
 
 clean-bench:
-	rm -rf "$(CURDIR)/results/bench"
+	rm -rf "$(RESULTS_DIR)/ns3"
+
+clean-all:
+	rm -rf "$(RESULTS_DIR)/ns3" "$(RESULTS_DIR)/kernel" "$(RESULTS_DIR)/reports" "$(RESULTS_DIR)/cache"
 
 # ---------------------------------------------------------------------------
 # Legacy Paper Reproduction Targets
@@ -180,6 +248,8 @@ $(LEO_TRACES):
 basic:
 	./run_all.sh basic
 
+4g-paper: lte
+
 lte: $(LTE_TRACES)
 	./run_all.sh lte
 
@@ -195,7 +265,8 @@ lines:
 figures:
 	./run_all.sh figures
 
-all: basic lte leo mobile lines figures
+all: fetch
+	./run_all.sh all
 
 clean-results:
-	rm -rf results smoke
+	rm -rf results

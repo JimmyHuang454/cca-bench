@@ -5,14 +5,12 @@ on:
     branches: ["master", "main", "codex/**"]
     paths:
       - .github/workflows/ns3-bench.yml
-      - ns3/tcp_ccas_bench.cc
-      - ns3/mortise_copa_ns3.h
       - ns3/ns3-overlay/**
       - ns3/setup_ns3.sh
       - kernel/tcp_copa_auto/**
-      - kernel/scripts/run_ns3_suite.py
-      - kernel/scripts/mahimahi_eval.py
-      - kernel/scripts/ci_runner.py
+      - scripts/**
+      - datasets/lines/**
+      - datasets/workloads/**
   workflow_dispatch:
     inputs:
       mode:
@@ -86,7 +84,7 @@ jobs:
         env:
           MODE: ${{ inputs.mode || 'quick' }}
           RCT_WORKLOADS: ${{ inputs.rct_workloads || 'app' }}
-        run: python3 kernel/scripts/ci_runner.py plan
+        run: python3 scripts/bench/ci_runner.py plan
 
   build-ns3:
     name: Build ns-3 & unit tests
@@ -126,29 +124,28 @@ jobs:
           fi
           cp -R ns3/ns3-overlay/. ns3/ns-3/
 
-      - name: Copy shared Copa-Auto C core & tcp_ccas_bench.cc into ns3/ns-3/scratch
+      - name: Sync Copa-Auto C core & ns3-overlay into ns3/ns-3
         run: |
-          cp ns3/tcp_ccas_bench.cc ns3/ns-3/scratch/tcp_ccas_bench.cc
-          cp ns3/mortise_copa_ns3.h ns3/ns-3/scratch/mortise_copa_ns3.h
-          cp kernel/tcp_copa_auto/copa_auto_core.h ns3/ns-3/scratch/copa_auto_core.h
-          cp kernel/tcp_copa_auto/copa_auto_math.h ns3/ns-3/scratch/copa_auto_math.h
+          cp kernel/tcp_copa_auto/copa_auto_core.h ns3/ns3-overlay/src/internet/model/copa_auto_core.h
+          cp kernel/tcp_copa_auto/copa_auto_math.h ns3/ns3-overlay/src/internet/model/copa_auto_math.h
+          cp -R ns3/ns3-overlay/. ns3/ns-3/
 
-      - name: Configure & build tcp_ccas_bench
+      - name: Configure & build tcp-capacity-trace
         working-directory: ns3/ns-3
         run: |
           if [ ! -f cmake-cache/build.ninja ] && [ ! -f cmake-cache/Makefile ]; then
             ./ns3 configure --build-profile=optimized --disable-python --disable-werror \
               --enable-modules=core,network,internet,point-to-point,applications,traffic-control
           fi
-          ./ns3 build tcp_ccas_bench
+          ./ns3 build tcp-capacity-trace
 
       - name: Package ns-3 benchmark binary and shared libs
         run: |
           mkdir -p /tmp/ns3-dist/lib
-          BIN=$(find ns3/ns-3/build/scratch -maxdepth 1 -type f -name '*tcp_ccas_bench*' -executable | head -n1)
+          BIN=$(find ns3/ns-3/build/scratch -maxdepth 1 -type f -name '*tcp-capacity-trace*' -executable | head -n1)
           test -n "$BIN"
-          cp "$BIN" /tmp/ns3-dist/tcp_ccas_bench
-          chmod +x /tmp/ns3-dist/tcp_ccas_bench
+          cp "$BIN" /tmp/ns3-dist/tcp-capacity-trace
+          chmod +x /tmp/ns3-dist/tcp-capacity-trace
           cp -a ns3/ns-3/build/lib/libns3*.so* /tmp/ns3-dist/lib/ || true
 
       - name: Upload ns-3 binary artifact
@@ -189,8 +186,8 @@ jobs:
           SHARD: ${{ matrix.shard }}
           WORKLOAD: ${{ matrix.workload }}
         run: |
-          chmod +x /tmp/ns3-dist/tcp_ccas_bench
-          python3 kernel/scripts/ci_runner.py run-ns3 --bin /tmp/ns3-dist/tcp_ccas_bench --out-dir /tmp/ns3_out
+          chmod +x /tmp/ns3-dist/tcp-capacity-trace
+          python3 scripts/bench/ci_runner.py run-ns3 --bin /tmp/ns3-dist/tcp-capacity-trace --out-dir /tmp/ns3_out
 
       - name: Upload shard results
         if: ${{ !cancelled() }}
@@ -218,7 +215,7 @@ jobs:
         env:
           MODE: ${{ needs.plan.outputs.mode }}
         run: |
-          python3 kernel/scripts/ci_runner.py summarize --input-dir /tmp/all_results --out-dir /tmp/summary
+          python3 scripts/bench/ci_runner.py summarize --input-dir /tmp/all_results --out-dir /tmp/summary
 
       - name: Upload summary artifact
         uses: actions/upload-artifact@v4

@@ -1,0 +1,49 @@
+{
+  "_comment": "城市跑步（10-12 km/h）：滨江公园（站点稀疏）-> 高架桥下的地下通道 -> CBD 背街（楼挡 + 邻区干扰）-> 路口等红灯（人群）-> 人行街（密集人群，减速）-> 恢复配速 -> 放松走回小区 -> 等电梯 -> 乘电梯上 5 楼。3GPP UMa 城区宏站（--pathloss=uma）。格式见 FORMAT.md",
+
+  "tech": "4g",
+
+  "defaults": {
+    "_comment": "人体损耗 3 dB；地下通道无室分，信号只从洞口进入",
+    "car_loss_db": 3,
+    "edge_rsrp_dbm": -105,
+    "cell": {
+      "side": "left", "offset_m": 60, "height_m": 25,
+      "tx_dbm": 46, "range_mode": "soft", "antenna": { "type": "omni" }
+    },
+    "tunnel_cell_spacing_m": 0,
+    "tunnel_loss_db": 30,
+    "tunnel_ramp_m": 10
+  },
+
+  "track": {
+    "_comment": "沿江向 x 跑 230 m（180-222 m 处穿过高架桥下的通道），左转沿 y 进 CBD，再沿 x 跑回小区，电梯竖直上升 15 m",
+    "points": [[0, 0, 0], [230, 0, 0], [230, 260, 0], [379.5, 260, 0], [379.5, 260, 15], [399.5, 260, 15]]
+  },
+
+  "timeline": {
+    "0-10":    { "speed_kmh": [0, 10], "_comment": "起跑" },
+    "10-70":   { "speed_kmh": 10, "_comment": "滨江公园，宏站间距约 500 m" },
+    "70-85":   { "speed_kmh": 10, "tunnel": true, "_comment": "高架桥下的人行通道约 42 m" },
+    "85-125":  { "speed_kmh": 12, "car_loss_db": 16, "interference_dbm": -95, "_comment": "CBD 背街：高楼挡住宏站（+13 dB），周围小区同频干扰" },
+    "125-130": { "speed_kmh": [12, 0] },
+    "130-160": { "speed_kmh": 0, "crowd_ues": 20, "crowd_mbps": 3, "_comment": "晚高峰路口等红灯" },
+    "160-165": { "speed_kmh": [0, 8] },
+    "165-215": { "speed_kmh": 8, "car_loss_db": 7, "crowd_ues": 40, "crowd_mbps": 3, "_comment": "人行街人多，只能慢跑" },
+    "215-245": { "speed_kmh": 12 },
+    "245-260": { "speed_kmh": [12, 5], "_comment": "放松" },
+    "260-275": { "speed_kmh": 5, "car_loss_db": 15, "_comment": "进入住宅楼" },
+    "275-290": { "speed_kmh": 0, "car_loss_db": 15, "_comment": "等电梯" },
+    "290-300": { "speed_kmh": 5.4, "car_loss_db": 38, "_comment": "电梯上行 15 m（1.5 m/s）" },
+    "300-305": { "speed_kmh": 0, "car_loss_db": 38 },
+    "305-320": { "speed_kmh": 3, "car_loss_db": 10, "_comment": "5 楼走廊" }
+  },
+
+  "cells": [
+    { "id": "M1", "pos": [-50, -150, 25], "_comment": "公园一侧的宏站" },
+    { "id": "M2", "pos": [450, -200, 25], "_comment": "距 M1 约 500 m" },
+    { "id": "M3", "pos": [150, 330, 30], "_comment": "CBD 宏站" },
+    { "id": "M4", "pos": [420, 180, 25], "_comment": "小区附近的宏站" },
+    { "id": "S1", "pos": [260, 330, 10], "tx_dbm": 30, "_comment": "人行街灯杆小站" }
+  ]
+}

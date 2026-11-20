@@ -1,0 +1,15 @@
+{
+  "_comment": "有线带宽阶跃拥塞：40 Mbps 在第 20 s 骤降至 10 Mbps 持续 15 s 后恢复",
+  "name": "wired-step",
+  "tech": "wired",
+  "profile": "step",
+  "bandwidth_mbps": 40.0,
+  "step_at_s": 20.0,
+  "step_duration_s": 15.0,
+  "step_factor": 0.25,
+  "base_rtt_ms": 20.0,
+  "queues": ["150KB", "2MB"],
+  "loss_rate": 0.0,
+  "aqm": "none",
+  "duration_s": 60.0
+}

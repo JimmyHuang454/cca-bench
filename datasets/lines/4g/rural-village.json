@@ -1,0 +1,65 @@
+{
+  "_comment": "村庄步行：站点远，信号弱，偶尔进屋。",
+  "tech": "4g",
+  "defaults": {
+    "car_loss_db": 3,
+    "edge_rsrp_dbm": -100,
+    "cell": {
+      "side": "left",
+      "offset_m": 150,
+      "height_m": 40,
+      "tx_dbm": 46,
+      "range_mode": "soft",
+      "antenna": {
+        "type": "omni"
+      }
+    },
+    "tunnel_cell_spacing_m": 0,
+    "tunnel_loss_db": 40,
+    "tunnel_ramp_m": 30
+  },
+  "track": {
+    "points": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        250,
+        0,
+        0
+      ]
+    ]
+  },
+  "timeline": {
+    "0-60": {
+      "speed_kmh": 4
+    },
+    "60-90": {
+      "speed_kmh": 0,
+      "car_loss_db": 15,
+      "_comment": "进屋"
+    },
+    "90-150": {
+      "speed_kmh": 4,
+      "crowd_ues": 3,
+      "crowd_mbps": 2
+    },
+    "150-180": {
+      "speed_kmh": 0,
+      "crowd_ues": 3,
+      "crowd_mbps": 2
+    }
+  },
+  "cells": [
+    {
+      "id": "R1",
+      "track_m": 20,
+      "side": "left",
+      "offset_m": 800,
+      "height_m": 40,
+      "range_m": 1200
+    }
+  ]
+}

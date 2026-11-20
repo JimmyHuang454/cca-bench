@@ -91,6 +91,8 @@ set(source_files
     model/tcp-bic.cc
     model/tcp-congestion-ops.cc
     model/tcp-copa.cc
+    model/tcp-copa-kernel.cc
+    model/tcp-mortise-copa.cc
     model/tcp-cubic.cc
     model/tcp-dctcp.cc
     model/tcp-header.cc
@@ -220,6 +222,8 @@ set(header_files
     model/tcp-bic.h
     model/tcp-congestion-ops.h
     model/tcp-copa.h
+    model/tcp-copa-kernel.h
+    model/tcp-mortise-copa.h
     model/tcp-cubic.h
     model/tcp-dctcp.h
     model/tcp-header.h

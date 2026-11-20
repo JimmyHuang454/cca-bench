@@ -1,0 +1,13 @@
+{
+  "_comment": "校园/数据中心高速低延迟有线链路：500 Mbps，2 ms RTT",
+  "name": "wired-dc",
+  "tech": "wired",
+  "profile": "outage",
+  "outage_duration_s": 0.0,
+  "bandwidth_mbps": 500.0,
+  "base_rtt_ms": 2.0,
+  "queues": ["150KB", "2MB"],
+  "loss_rate": 0.0,
+  "aqm": "none",
+  "duration_s": 30.0
+}

@@ -1,0 +1,12 @@
+{
+  "_comment": "隔墙 802.11ax Wi-Fi：15 m + 15 dB 穿墙衰减 + 1 个 10 Mbps 背景设备争用",
+  "name": "wifi-wall",
+  "tech": "wifi",
+  "distance_m": 15.0,
+  "wall_loss_db": 15.0,
+  "channel_width_mhz": 80,
+  "bg_stas": 1,
+  "bg_mbps_each": 10.0,
+  "server_delay_ms": 10.0,
+  "duration_s": 40.0
+}

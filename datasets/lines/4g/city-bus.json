@@ -1,0 +1,101 @@
+{
+  "_comment": "城市公交：车内人多，频繁进出站。站距约 400 m，车速低。",
+  "tech": "4g",
+  "defaults": {
+    "car_loss_db": 10,
+    "edge_rsrp_dbm": -100,
+    "cell": {
+      "side": "left",
+      "offset_m": 60,
+      "height_m": 25,
+      "tx_dbm": 46,
+      "range_mode": "soft",
+      "antenna": {
+        "type": "omni"
+      }
+    },
+    "tunnel_cell_spacing_m": 0,
+    "tunnel_loss_db": 30,
+    "tunnel_ramp_m": 10
+  },
+  "track": {
+    "points": [
+      [
+        0,
+        0,
+        0
+      ],
+      [
+        1400,
+        0,
+        0
+      ]
+    ]
+  },
+  "timeline": {
+    "0-8": {
+      "speed_kmh": [
+        0,
+        30
+      ]
+    },
+    "8-40": {
+      "speed_kmh": 30
+    },
+    "40-48": {
+      "speed_kmh": [
+        30,
+        0
+      ]
+    },
+    "48-68": {
+      "speed_kmh": 0,
+      "crowd_ues": 15,
+      "crowd_mbps": 2,
+      "_comment": "到站上下客"
+    },
+    "68-76": {
+      "speed_kmh": [
+        0,
+        30
+      ]
+    },
+    "76-108": {
+      "speed_kmh": 30,
+      "crowd_ues": 10,
+      "crowd_mbps": 2
+    },
+    "108-116": {
+      "speed_kmh": [
+        30,
+        0
+      ]
+    },
+    "116-136": {
+      "speed_kmh": 0,
+      "crowd_ues": 15,
+      "crowd_mbps": 2
+    },
+    "136-144": {
+      "speed_kmh": [
+        0,
+        30
+      ]
+    },
+    "144-180": {
+      "speed_kmh": 30,
+      "crowd_ues": 10,
+      "crowd_mbps": 2
+    }
+  },
+  "cell_grid": [
+    {
+      "from_m": 100,
+      "to_m": 1300,
+      "spacing_m": 400,
+      "side": "alternate",
+      "id_prefix": "M",
+      "range_m": 350
+    }
+  ]
+}

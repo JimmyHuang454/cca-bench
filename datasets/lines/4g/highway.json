@@ -1,0 +1,47 @@
+{
+  "_comment": "高速公路三维线路：匝道加速 -> 郊野路段（稀疏站点）-> 山区隧道 -> 进城减速、拥堵停车 -> 城郊路段（加密站点）。格式见 FORMAT.md",
+
+  "tech": "4g",
+
+  "defaults": {
+    "_comment": "车体损耗 9 dB：3GPP TR 38.901 普通玻璃车辆的均值；边缘 RSRP -105 dBm 为工程常用覆盖门限",
+    "car_loss_db": 9,
+    "edge_rsrp_dbm": -105,
+    "cell": {
+      "side": "left", "offset_m": 80, "height_m": 35,
+      "tx_dbm": 46, "range_mode": "soft", "antenna": { "type": "omni" }
+    },
+    "tunnel_cell_spacing_m": 500,
+    "tunnel_loss_db": 40
+  },
+
+  "track": {
+    "_comment": "前 2.5 km 直线，之后一段弯道并爬升 20 m",
+    "points": [[0, 0, 0], [2500, 0, 0], [3500, 600, 20], [5200, 600, 20]]
+  },
+
+  "timeline": {
+    "0-10":    { "speed_kmh": [0, 120], "_comment": "匝道加速" },
+    "10-70":   { "speed_kmh": 120, "_comment": "郊野路段" },
+    "70-90":   { "speed_kmh": 120, "tunnel": true, "_comment": "约 670 m 的山区隧道" },
+    "90-110":  { "speed_kmh": [120, 30], "_comment": "接近城区，车流变密" },
+    "110-120": { "speed_kmh": 30 },
+    "120-130": { "speed_kmh": 0, "_comment": "拥堵停车 10 s" },
+    "130-140": { "speed_kmh": [0, 60] },
+    "140-180": { "speed_kmh": [60, 120], "_comment": "城郊路段" }
+  },
+
+  "cell_grid": [
+    { "from_m": 0, "to_m": 2100, "spacing_m": 1500, "side": "alternate",
+      "offset_m": 120, "height_m": 40, "id_prefix": "R",
+      "_comment": "郊野路段：站距 1.5 km，左右交替，离路 120 m" },
+    { "from_m": 3300, "to_m": 5000, "spacing_m": 600, "side": "alternate",
+      "offset_m": 60, "height_m": 30, "id_prefix": "U",
+      "_comment": "城郊路段：站距 600 m，离路 60 m" }
+  ],
+
+  "cells": [
+    { "id": "X", "track_m": 2950, "side": "right", "offset_m": 70,
+      "_comment": "隧道出口旁的基站" }
+  ]
+}

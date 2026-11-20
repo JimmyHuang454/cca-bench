@@ -8,7 +8,7 @@ import statistics
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from mahimahi_eval import parse_meta_from_stem
+from eval_report import parse_meta_from_stem
 
 DEADLINES_S = (1, 5, 15, 30)
 

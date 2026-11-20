@@ -24,7 +24,10 @@ import time
 import urllib.request
 
 SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent
-REPO_ROOT = SCRIPTS_DIR.parent
+SCRIPTS_ROOT = SCRIPTS_DIR.parent
+DATA_SCRIPTS_DIR = SCRIPTS_ROOT / "data"
+EVAL_SCRIPTS_DIR = SCRIPTS_ROOT / "eval"
+REPO_ROOT = SCRIPTS_ROOT.parent
 
 EXTRA_CONGESTION_VARIANTS: list[tuple[str, str]] = [
     ("CopaAuto", "copa_auto"),
@@ -230,7 +233,7 @@ def prepare_workloads(workloads_dir: pathlib.Path, bulk_lines: int, mortise_app_
                     raise
                 time.sleep(2)
     subprocess.run(
-        [sys.executable, str(SCRIPTS_DIR / "gen_workloads.py"), "--out-dir", str(workloads_dir)],
+        [sys.executable, str(DATA_SCRIPTS_DIR / "gen_workloads.py"), "--out-dir", str(workloads_dir)],
         check=True,
     )
     (workloads_dir / "bulk.wk").write_text("0\t2097152\n" * bulk_lines, encoding="utf-8")
@@ -530,7 +533,7 @@ def compact_shard_dir(shard_dir: pathlib.Path) -> int:
     """Pre-aggregate a downloaded shard into shard_eval.csv and remove large raw logs."""
     subprocess.run(
         [
-            sys.executable, str(SCRIPTS_DIR / "mahimahi_eval.py"),
+            sys.executable, str(EVAL_SCRIPTS_DIR / "eval_report.py"),
             "--input-dir", str(shard_dir),
             "--out-csv", str(shard_dir / "shard_eval.csv"),
             "--out-md", str(shard_dir / "shard_eval.md"),
@@ -659,7 +662,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 
     subprocess.run(
         [
-            sys.executable, str(SCRIPTS_DIR / "mahimahi_eval.py"),
+            sys.executable, str(EVAL_SCRIPTS_DIR / "eval_report.py"),
             "--input-dir", str(input_dir),
             "--out-csv", str(out_dir / "comparison_summary.csv"),
             "--out-md", str(summary_md),
@@ -670,7 +673,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     )
 
     rct_cmd = [
-        sys.executable, str(SCRIPTS_DIR / "mahimahi_rct.py"),
+        sys.executable, str(EVAL_SCRIPTS_DIR / "mahimahi_rct.py"),
         "--input-dir", str(input_dir),
         "--out-dir", str(out_dir),
     ]

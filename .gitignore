@@ -1,8 +1,13 @@
+# ns-3 build & generated datasets/results
 ns3/ns-3
 ns3/traces/
 ns3/results/
 ns3/smoke/
 kernel/trace/
+datasets/traces/
+datasets/lines/mahimahi/
+results/
 __pycache__/
 *.pyc
+*.un~
 .DS_Store

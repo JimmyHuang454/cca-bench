@@ -322,6 +322,8 @@ def fmt_num(val: Any, digits: int = 2) -> str:
 
 
 def trace_group(trace: str) -> str:
+    if trace.startswith("wired-") or trace.startswith("wifi-") or trace.startswith("line-"):
+        return trace
     if trace.startswith("leo-starlink-"):
         return "Starlink-" + trace.rsplit("-", 1)[-1]
     if trace.startswith("nyc2018-4g-subway-"):
@@ -329,7 +331,7 @@ def trace_group(trace: str) -> str:
     if trace.startswith("5g_trace_"):
         return "Lumos5G-" + trace.rsplit("_", 1)[-1]
     if "LTE-driving" in trace:
-        return "LTE-driving"
+        return "4G-driving"
     if trace.endswith("-home1") or trace.endswith("-home3") or trace.endswith("-home") or trace in {
         "trace-3457194-timessquare",
         "trace-3458374-timessquare",
@@ -341,7 +343,7 @@ def trace_group(trace: str) -> str:
         return "NYC-walking"
     if trace.startswith("synth-"):
         return trace
-    return "other"
+    return trace or "other"
 
 
 def mean_valid(rows: list[dict[str, Any]], key: str) -> float:
@@ -420,8 +422,14 @@ def load_shard_csv(path: Path) -> list[dict[str, Any]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Analyze Mahimahi logs and RCT CSVs.")
-    parser.add_argument("--input-dir", required=True, type=Path, help="Directory with *.downlink.log, shard_eval.csv, and *.rct.csv")
+    parser = argparse.ArgumentParser(description="Unified benchmark evaluator for ns-3, Linux kernel, and Quinn.")
+    parser.add_argument(
+        "--input-dir",
+        required=True,
+        nargs="+",
+        type=Path,
+        help="One or more directories containing *.downlink.log, shard_eval.csv, and *.rct.csv",
+    )
     parser.add_argument("--out-csv", required=True, type=Path, help="Output summary CSV")
     parser.add_argument("--out-md", required=True, type=Path, help="Output summary Markdown")
     parser.add_argument("--min-rtt-ms", type=float, default=20.0, help="Base propagation RTT in ms")
@@ -429,7 +437,11 @@ def main() -> None:
     parser.add_argument("--bulk-end-s", type=float, default=None, help="Optional end timestamp (s) for bulk window")
     args = parser.parse_args()
 
-    logs = sorted(args.input_dir.rglob("*.downlink.log"))
+    input_dirs = [d for d in args.input_dir if d.exists()]
+    logs: list[Path] = []
+    for d in input_dirs:
+        logs.extend(d.rglob("*.downlink.log"))
+    logs = sorted(set(logs))
     records: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, str, str, str, str, str]] = set()
 
@@ -467,7 +479,10 @@ def main() -> None:
         records.append(row)
 
     out_csv_resolved = args.out_csv.resolve()
-    for shard_csv in sorted(args.input_dir.rglob("shard_eval.csv")):
+    shard_csvs: list[Path] = []
+    for d in input_dirs:
+        shard_csvs.extend(d.rglob("shard_eval.csv"))
+    for shard_csv in sorted(set(shard_csvs)):
         if shard_csv.resolve() == out_csv_resolved:
             continue
         for row in load_shard_csv(shard_csv):
@@ -529,10 +544,10 @@ def main() -> None:
             app_groups.setdefault(gk, []).append(r)
 
     lines = [
-        "# Mahimahi Comparison Summary (`quinn-jls` vs `BobAnkh/Mortise`)",
+        "# Copa-Auto Unified Benchmark Summary",
         "",
         f"Bulk metrics skip the first `{args.bulk_warmup_s:.1f}s` warmup window.",
-        "- Note: `copa-auto-nc-theta*` runs **Copa default mode only (`默认模式`, `mode_switching=false`)** with `--copa-tradeoff=<theta>`; `copa-auto-theta*` enables competitive mode (`mode_switching=true`).",
+        "- Note: `copa_auto_nc` / `copa-auto-nc-*` runs **Copa default mode only (`mode_switching=false`)**; `copa_auto` enables competitive mode (`mode_switching=true`).",
         "",
         "## 1. Bulk Saturated Flows (Kleinrock Power & Delay-Utilization Tradeoff)",
         "",
@@ -661,6 +676,62 @@ def main() -> None:
                     an=r["an"],
                     sd=fmt_with_gap(r["sd"], best_sd, 2, False, "x"),
                     ov=fmt_with_gap(r["ov"], best_ov, 3, True),
+                )
+            )
+
+    # Section 4: Cross-Stack Consistency (ns-3 vs Linux Kernel)
+    ns3_bulk: dict[tuple[str, str, str], float] = {}
+    kern_bulk: dict[tuple[str, str, str], float] = {}
+    for (grp, q, stk, cc), grows in bulk_groups.items():
+        v = mean_valid(grows, "norm_power")
+        if math.isnan(v):
+            continue
+        if stk.startswith("ns3"):
+            ns3_bulk[(grp, q, cc)] = v
+        elif stk == "kernel":
+            kern_bulk[(grp, q, cc)] = v
+
+    ns3_app: dict[tuple[str, str, str], float] = {}
+    kern_app: dict[tuple[str, str, str], float] = {}
+    for (grp, q, stk, cc), grows in app_groups.items():
+        v = mean_valid(grows, "fct_slowdown")
+        if math.isnan(v):
+            continue
+        if stk.startswith("ns3"):
+            ns3_app[(grp, q, cc)] = v
+        elif stk == "kernel":
+            kern_app[(grp, q, cc)] = v
+
+    overlap_keys = sorted(
+        (set(ns3_bulk.keys()) & set(kern_bulk.keys())) | (set(ns3_app.keys()) & set(kern_app.keys())),
+        key=lambda x: (x[0], queue_sort_key(x[1]), x[2]),
+    )
+    if overlap_keys:
+        lines.extend([
+            "",
+            "## 4. Cross-Stack Consistency (ns-3 vs Linux Kernel)",
+            "",
+            "| Trace Group | Queue | CC | ns-3 NormPower | Kernel NormPower | Δ Power | ns-3 Slowdown | Kernel Slowdown | Δ Slowdown |",
+            "|---|---:|---|---:|---:|---:|---:|---:|---:|",
+        ])
+        for grp, q, cc in overlap_keys:
+            nb = ns3_bulk.get((grp, q, cc), math.nan)
+            kb = kern_bulk.get((grp, q, cc), math.nan)
+            db = ((nb - kb) / kb * 100.0) if (not math.isnan(nb) and not math.isnan(kb) and kb > 0) else math.nan
+            na = ns3_app.get((grp, q, cc), math.nan)
+            ka = kern_app.get((grp, q, cc), math.nan)
+            da = ((na - ka) / ka * 100.0) if (not math.isnan(na) and not math.isnan(ka) and ka > 0) else math.nan
+            lines.append(
+                "| {grp} | {q} | {cc} | {nb} | {kb} | {db} | {na} | {ka} | {da} |".format(
+                    grp=grp,
+                    q=format_queue_size(q),
+                    cc=cc,
+                    nb=fmt_num(nb, 3),
+                    kb=fmt_num(kb, 3),
+                    db=(f"{db:+.1f}%" if not math.isnan(db) else "-"),
+                    na=(f"{na:.2f}x" if not math.isnan(na) else "-"),
+                    ka=(f"{ka:.2f}x" if not math.isnan(ka) else "-"),
+                    da=(f"{da:+.1f}%" if not math.isnan(da) else "-"),
                 )
             )
 

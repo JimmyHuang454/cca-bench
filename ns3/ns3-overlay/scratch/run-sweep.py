@@ -46,7 +46,9 @@ import math
 import os
 import statistics
 import subprocess
+import concurrent.futures
 import threading
+import time
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -883,19 +885,46 @@ def main():
         needed = {STUDIES[s][0] for s in args.studies}
         binaries = {s: find_binary(p) for s, p in PROGRAMS.items() if s in needed}
         jobs = [j for s in args.studies for j in make_jobs(s, ccs_of(s), args.runs, baseline)]
-        print(f"{len(jobs)} jobs, {args.jobs} in parallel")
+        print(f"{len(jobs)} jobs, {args.jobs} in parallel (3GPP 4G PHY: ~15-60s per job)", flush=True)
         done = 0
+        skipped = 0
+        failed = 0
+        t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=args.jobs) as pool:
             futures = {pool.submit(run_job, j, binaries): j for j in jobs}
-            for fut in as_completed(futures):
-                done += 1
-                status = fut.result()
-                job = futures[fut]
-                if status.startswith("FAILED"):
-                    print(f"  {status}")
-                elif status == "ok":
-                    print(f"  [{done}/{len(jobs)}] {job[1]} {job[2]} {job[3]} run {job[4]}",
-                          flush=True)
+            pending = set(futures.keys())
+            while pending:
+                finished, pending = concurrent.futures.wait(
+                    pending, timeout=15.0, return_when=concurrent.futures.FIRST_COMPLETED
+                )
+                elapsed = time.monotonic() - t0
+                if not finished:
+                    running_sample = [f"{futures[f][1]}/{futures[f][3]}" for f in list(pending)[:3]]
+                    print(
+                        f"  [running {done}/{len(jobs)} | {elapsed:.0f}s elapsed | "
+                        f"{len(pending)} left | e.g. {', '.join(running_sample)}]",
+                        flush=True,
+                    )
+                    continue
+                for fut in finished:
+                    done += 1
+                    status = fut.result()
+                    job = futures[fut]
+                    pct = 100.0 * done / max(len(jobs), 1)
+                    ran = done - skipped
+                    eta_s = (elapsed / ran * len(pending)) if ran > 0 else 0.0
+                    eta_str = f"{int(eta_s // 60)}m{int(eta_s % 60):02d}s" if ran > 0 else "--"
+                    if status.startswith("FAILED"):
+                        failed += 1
+                        print(f"  [{done}/{len(jobs)} {pct:5.1f}% | {elapsed:.0f}s | ETA {eta_str}] {status}", flush=True)
+                    elif status == "ok":
+                        print(
+                            f"  [{done}/{len(jobs)} {pct:5.1f}% | {elapsed:.0f}s | ETA {eta_str}] "
+                            f"{job[1]} {job[2]} {job[3]} run {job[4]}",
+                            flush=True,
+                        )
+                    else:
+                        skipped += 1
 
     for study in args.studies:
         # Aggregate every algorithm that has results, not only this call's --ccs.

@@ -45,6 +45,7 @@
  */
 
 #include "mobile-scenario-params.h"
+#include "mortise-workload.h"
 #include "track-loss-model.h"
 #include "line3d.h"
 
@@ -103,60 +104,33 @@ uint32_t g_handoverCount = 0;    //!< Number of successful handovers
 uint32_t g_rlfCount = 0;         //!< Number of radio link failures
 double g_samplePeriodMs = 100.0; //!< Throughput sampling period
 
-/**
- * Delta of a Copa variant name: "copa" is the default 0.5, "copa-d0.1" is 0.1.
- *
- * @param cc algorithm name
- * @return delta, or 0 if cc is not Copa
- */
-double
-CopaDelta(const std::string& cc)
+std::string
+BaseCc(const std::string& cc)
 {
-    if (cc == "copa")
-    {
-        return 0.5;
-    }
-    if (cc == "copa-auto")
-    {
-        // Initial delta, until the online estimates are ready.
-        return 0.1;
-    }
-    if (cc.rfind("copa-d", 0) == 0)
-    {
-        const double d = std::stod(cc.substr(6));
-        NS_ABORT_MSG_UNLESS(d > 0 && d <= 1, "Copa delta must be in (0, 1]: " << cc);
-        return d;
-    }
-    return 0;
+    return cc.substr(0, cc.find('+'));
 }
 
-/**
- * Set the delta of the Copa socket of a sender node, right after the
- * application has created it.
- *
- * @param nodeId sender node id
- * @param delta Copa delta (latency factor)
- */
-void
-SetCopaDelta(uint32_t nodeId, double delta)
+bool
+IsCopaKernelName(const std::string& name)
 {
-    Config::Set("/NodeList/" + std::to_string(nodeId) +
-                    "/$ns3::TcpL4Protocol/SocketList/0/CongestionOps/$ns3::TcpCopa/LatencyFactor",
-                DoubleValue(delta));
+    const std::string cc = BaseCc(name);
+    return cc == "copa" || cc == "copa-auto" || cc == "copa_auto" || cc == "copa_auto_nc" ||
+           cc == "copa_auto_nc_j0" || cc == "copa_auto_nc_j3" || cc == "copa_orig" ||
+           cc.rfind("copa-d", 0) == 0 || cc.rfind("copa_auto_theta", 0) == 0 ||
+           cc.rfind("copa_auto_nc_theta", 0) == 0;
+}
+
+bool
+IsAdaptiveCopaName(const std::string& name)
+{
+    const std::string cc = BaseCc(name);
+    return cc == "copa-auto" || cc == "copa_auto" || cc == "copa_auto_nc" ||
+           cc == "copa_auto_nc_j0" || cc == "copa_auto_nc_j3" ||
+           cc.rfind("copa_auto_theta", 0) == 0 || cc.rfind("copa_auto_nc_theta", 0) == 0;
 }
 
 std::ofstream g_copaEstFile; //!< Estimates of the adaptive Copa delta (copa-auto, flow 0)
 
-/**
- * Record the estimates of the adaptive Copa delta.
- *
- * @param jitter jitter floor j [s]
- * @param ratio c / mu [s]
- * @param rho total utilization of the bottleneck
- * @param baseRtt R0' [s]
- * @param dqTarget power-optimal queueing delay dq* [s]
- * @param delta delta in use
- */
 void
 CopaEstimateTracer(double jitter, double ratio, double rho, double baseRtt, double dqTarget, double delta)
 {
@@ -168,35 +142,103 @@ CopaEstimateTracer(double jitter, double ratio, double rho, double baseRtt, doub
     }
 }
 
-/**
- * Turn on the adaptive delta of the Copa socket of a sender node and record
- * its estimates.
- *
- * @param nodeId sender node id
- * @param flow flow index (estimates are recorded for flow 0)
- */
 void
-EnableAdaptiveCopa(uint32_t nodeId, uint32_t flow)
+ConfigureCcFlow(uint32_t nodeId,
+                uint32_t flow,
+                std::string name,
+                int32_t jitterUs,
+                uint32_t copaClockUs)
 {
-    const std::string path = "/NodeList/" + std::to_string(nodeId) +
-                             "/$ns3::TcpL4Protocol/SocketList/0/CongestionOps/$ns3::TcpCopa/";
-    Config::Set(path + "AdaptiveDelta", BooleanValue(true));
-    if (flow == 0)
+    const std::string cc = BaseCc(name);
+    if (cc == "mortise_copa")
     {
-        Config::ConnectWithoutContext(path + "AdaptiveEstimate",
-                                      MakeCallback(&CopaEstimateTracer));
+        const std::string path = "/NodeList/" + std::to_string(nodeId) +
+                                 "/$ns3::TcpL4Protocol/SocketList/0/CongestionOps/$ns3::TcpMortiseCopa/";
+        Config::Set(path + "CopaClockUs", UintegerValue(std::max<uint32_t>(copaClockUs, 1U)));
+        return;
+    }
+    if (!IsCopaKernelName(name))
+    {
+        return;
+    }
+
+    const std::string path = "/NodeList/" + std::to_string(nodeId) +
+                             "/$ns3::TcpL4Protocol/SocketList/0/CongestionOps/$ns3::TcpCopaKernel/";
+    const bool nosw = (name.find("+nosw") != std::string::npos);
+
+    bool adaptive = false;
+    bool modeSwitching = !nosw;
+    int32_t effJitterUs = jitterUs;
+    uint32_t thetaMilli = 500U;
+    uint32_t initDeltaQ20 = 41943U; /* 0.04 * 2^20 */
+
+    if (cc == "copa" || cc == "copa_orig")
+    {
+        adaptive = false;
+        modeSwitching = !nosw;
+        initDeltaQ20 = 524288U;
+    }
+    else if (cc.rfind("copa-d", 0) == 0)
+    {
+        const double d = std::stod(cc.substr(6));
+        NS_ABORT_MSG_UNLESS(d > 0 && d <= 1, "Copa delta must be in (0, 1]: " << cc);
+        adaptive = false;
+        modeSwitching = !nosw;
+        initDeltaQ20 = static_cast<uint32_t>(std::clamp(std::round(d * 1048576.0), 1049.0, 1048576.0));
+    }
+    else if (cc == "copa-auto" || cc == "copa_auto")
+    {
+        adaptive = true;
+        modeSwitching = !nosw;
+    }
+    else if (cc == "copa_auto_nc")
+    {
+        adaptive = true;
+        modeSwitching = false;
+    }
+    else if (cc == "copa_auto_nc_j0")
+    {
+        adaptive = true;
+        modeSwitching = false;
+        effJitterUs = 0;
+    }
+    else if (cc == "copa_auto_nc_j3")
+    {
+        adaptive = true;
+        modeSwitching = false;
+        effJitterUs = 3000;
+    }
+    else if (cc.rfind("copa_auto_theta", 0) == 0)
+    {
+        double th = std::stod(cc.substr(15));
+        adaptive = true;
+        modeSwitching = !nosw;
+        thetaMilli = static_cast<uint32_t>(std::clamp<int>(static_cast<int>(std::round(th * 1000.0)), 10, 995));
+    }
+    else if (cc.rfind("copa_auto_nc_theta", 0) == 0)
+    {
+        double th = std::stod(cc.substr(18));
+        adaptive = true;
+        modeSwitching = false;
+        thetaMilli = static_cast<uint32_t>(std::clamp<int>(static_cast<int>(std::round(th * 1000.0)), 10, 995));
+    }
+
+    Config::Set(path + "Adaptive", BooleanValue(adaptive));
+    Config::Set(path + "ModeSwitching", BooleanValue(modeSwitching));
+    Config::Set(path + "JitterUs", IntegerValue(effJitterUs));
+    Config::Set(path + "ThetaMilli", UintegerValue(thetaMilli));
+    Config::Set(path + "InitDeltaQ20", UintegerValue(initDeltaQ20));
+    Config::Set(path + "CopaClockUs", UintegerValue(std::max<uint32_t>(copaClockUs, 1U)));
+    if (adaptive && flow == 0 && g_copaEstFile.is_open())
+    {
+        Config::ConnectWithoutContext(path + "Estimates", MakeCallback(&CopaEstimateTracer));
     }
 }
 
-/**
- * Map a short algorithm name to its ns-3 TypeId name.
- *
- * @param cc short name
- * @return TypeId name
- */
 std::string
-CcTypeName(const std::string& cc)
+CcTypeName(const std::string& name)
 {
+    const std::string cc = BaseCc(name);
     if (cc == "cubic")
     {
         return "ns3::TcpCubic";
@@ -205,25 +247,54 @@ CcTypeName(const std::string& cc)
     {
         return "ns3::TcpBbr";
     }
-    if (cc == "bbrv2" || cc == "bbrv2l")
+    if (cc == "bbr2" || cc == "bbrv2" || cc == "bbrv2l")
     {
         return "ns3::TcpBbrV2";
     }
-    if (cc == "bbrv3" || cc == "bbrv3l")
+    if (cc == "bbr3" || cc == "bbrv3" || cc == "bbrv3l")
     {
         return "ns3::TcpBbrV3";
     }
-    if (cc == "copa" || cc == "copa-auto" || cc.rfind("copa-d", 0) == 0)
+    if (cc == "vegas")
     {
-        return "ns3::TcpCopa";
+        return "ns3::TcpVegas";
     }
-    if (cc == "newreno")
+    if (cc == "veno")
     {
-        return "ns3::TcpNewReno";
+        return "ns3::TcpVeno";
     }
-    NS_FATAL_ERROR("Unknown congestion control '" << cc
-                                                   << "'. Use cubic, bbr, bbrv2(l), bbrv3(l) or copa.");
-    return "";
+    if (cc == "yeah")
+    {
+        return "ns3::TcpYeah";
+    }
+    if (cc == "illinois")
+    {
+        return "ns3::TcpIllinois";
+    }
+    if (cc == "westwood")
+    {
+        return "ns3::TcpWestwoodPlus";
+    }
+    if (cc == "hybla")
+    {
+        return "ns3::TcpHybla";
+    }
+    if (cc == "reno" || cc == "newreno")
+    {
+        return "ns3::TcpLinuxReno";
+    }
+    if (cc == "mortise_copa")
+    {
+        return "ns3::TcpMortiseCopa";
+    }
+    if (IsCopaKernelName(name))
+    {
+        return "ns3::TcpCopaKernel";
+    }
+    TypeId tid;
+    NS_ABORT_MSG_UNLESS(TypeId::LookupByNameFailSafe(cc, &tid),
+                        "Unknown congestion control '" << cc << "'");
+    return cc;
 }
 
 /**
@@ -352,7 +423,7 @@ SampleThroughput()
     double total = 0.0;
     for (size_t i = 0; i < g_sinks.size(); i++)
     {
-        uint64_t rx = g_sinks[i]->GetTotalRx();
+        uint64_t rx = g_sinks[i] ? g_sinks[i]->GetTotalRx() : 0;
         double mbps = dt > 0 ? (rx - g_lastRxBytes[i]) * 8.0 / dt / 1e6 : 0.0;
         g_lastRxBytes[i] = rx;
         perFlow.push_back(mbps);
@@ -633,7 +704,22 @@ main(int argc, char* argv[])
     std::string scenarioFile;       // resolved 3-D line (line3d.h)
     MobileScenarioParams params;
 
+    double clockGranularityMs = 1.0;
+    uint32_t copaClockUs = 1;
+    int32_t jitterUs = -1;
+    std::string workloadFile;
+    bool evalJson = false;
+    double capacityMbps = 0.0;
+    double baseRttMs = 0.0;
+
     CommandLine cmd(__FILE__);
+    cmd.AddValue("clockGranularityMs", "TCP ClockGranularity in ms (default 1.0)", clockGranularityMs);
+    cmd.AddValue("copaClockUs", "Copa timestamp/RTT quantization in us (1=us, 1000=1ms slow clock)", copaClockUs);
+    cmd.AddValue("jitterUs", "Override Copa-Auto jitter_us (-1=auto, >=0=manual)", jitterUs);
+    cmd.AddValue("workloadFile", "Optional Mortise <gap_ms> <size_bytes> .wk workload", workloadFile);
+    cmd.AddValue("evalJson", "Print single-line JSON compatible with eval_report.py", evalJson);
+    cmd.AddValue("capacityMbps", "Reference UDP capacity probe Mbps (for utilization)", capacityMbps);
+    cmd.AddValue("baseRttMs", "Reference unloaded base RTT ms (0=auto from min ACK RTT)", baseRttMs);
     cmd.AddValue("cc",
                  "Congestion control: cubic, bbr, bbrv2(l), bbrv3(l), copa (delta 0.5) or "
                  "copa-d<delta>",
@@ -743,6 +829,9 @@ main(int argc, char* argv[])
     Config::SetDefault("ns3::TcpSocket::SndBufSize", UintegerValue(1 << 21));
     Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue(segmentSize));
     Config::SetDefault("ns3::TcpSocketBase::Sack", BooleanValue(true));
+    Config::SetDefault("ns3::TcpSocketBase::ClockGranularity",
+                       TimeValue(MilliSeconds(std::max(clockGranularityMs, 0.001))));
+    Config::SetDefault("ns3::TcpSocketState::EnablePacing", BooleanValue(true));
     Config::SetDefault("ns3::TcpL4Protocol::RecoveryType",
                        TypeIdValue(TcpPrrRecovery::GetTypeId()));
     if (!capacityProbe)
@@ -1099,18 +1188,56 @@ main(int argc, char* argv[])
 
     // Downlink transfers: remote host i -> UE port dlPort + i.
     const uint16_t dlPort = 1234;
+    std::vector<double> wkArr;
+    std::vector<uint32_t> wkSizes;
+    Ptr<MortiseAppReceiver> appRx;
+    const bool appMode = !workloadFile.empty() && !capacityProbe && !rttProbe;
+    if (appMode)
+    {
+        NS_ABORT_MSG_UNLESS(LoadMortiseWorkload(workloadFile, wkArr, wkSizes, 1.0),
+                            "Failed to load --workloadFile " << workloadFile);
+        simTime = std::max(simTime, wkArr.back() + 20.0);
+    }
     for (uint32_t i = 0; i < totalFlows; i++)
     {
         const double start = 1.0 + i * flowStagger;
         const uint16_t port = dlPort + i;
-        std::string factory = capacityProbe ? "ns3::UdpSocketFactory" : "ns3::TcpSocketFactory";
-        PacketSinkHelper sinkHelper(factory, InetSocketAddress(Ipv4Address::GetAny(), port));
-        ApplicationContainer sinkApp = sinkHelper.Install(ueNodes.Get(0));
-        g_sinks.push_back(sinkApp.Get(0)->GetObject<PacketSink>());
         g_lastRxBytes.push_back(0);
         g_rtt.emplace_back();
         g_srtt.emplace_back();
         g_retx.push_back(0);
+        if (appMode && i == 0)
+        {
+            appRx = CreateObject<MortiseAppReceiver>();
+            appRx->Setup(port, wkArr, wkSizes);
+            ueNodes.Get(0)->AddApplication(appRx);
+            appRx->SetStartTime(Seconds(0.5));
+            appRx->SetStopTime(Seconds(simTime));
+            g_sinks.push_back(nullptr);
+
+            Ptr<MortiseAppSender> appTx = CreateObject<MortiseAppSender>();
+            appTx->Setup(InetSocketAddress(ueIpIfaces.GetAddress(0), port), wkArr, wkSizes);
+            remoteHosts.Get(i)->AddApplication(appTx);
+            appTx->SetStartTime(Seconds(start));
+            appTx->SetStopTime(Seconds(simTime));
+
+            Simulator::Schedule(Seconds(start + 0.1),
+                                &ConnectSenderTraces,
+                                remoteHosts.Get(i)->GetId(),
+                                i);
+            Simulator::Schedule(Seconds(start) + MicroSeconds(1),
+                                &ConfigureCcFlow,
+                                remoteHosts.Get(i)->GetId(),
+                                i,
+                                flowCc[i],
+                                jitterUs,
+                                copaClockUs);
+            continue;
+        }
+        std::string factory = capacityProbe ? "ns3::UdpSocketFactory" : "ns3::TcpSocketFactory";
+        PacketSinkHelper sinkHelper(factory, InetSocketAddress(Ipv4Address::GetAny(), port));
+        ApplicationContainer sinkApp = sinkHelper.Install(ueNodes.Get(0));
+        g_sinks.push_back(sinkApp.Get(0)->GetObject<PacketSink>());
         sinkApp.Start(Seconds(1.0));
         sinkApp.Stop(Seconds(simTime));
 
@@ -1136,20 +1263,13 @@ main(int argc, char* argv[])
                                 &ConnectSenderTraces,
                                 remoteHosts.Get(i)->GetId(),
                                 i);
-            if (CopaDelta(flowCc[i]) > 0)
-            {
-                Simulator::Schedule(Seconds(start) + MicroSeconds(1),
-                                    &SetCopaDelta,
-                                    remoteHosts.Get(i)->GetId(),
-                                    CopaDelta(flowCc[i]));
-            }
-            if (flowCc[i] == "copa-auto")
-            {
-                Simulator::Schedule(Seconds(start) + MicroSeconds(2),
-                                    &EnableAdaptiveCopa,
-                                    remoteHosts.Get(i)->GetId(),
-                                    i);
-            }
+            Simulator::Schedule(Seconds(start) + MicroSeconds(1),
+                                &ConfigureCcFlow,
+                                remoteHosts.Get(i)->GetId(),
+                                i,
+                                flowCc[i],
+                                jitterUs,
+                                copaClockUs);
         }
         sourceApp.Start(Seconds(start));
         sourceApp.Stop(Seconds(simTime));
@@ -1183,8 +1303,11 @@ main(int argc, char* argv[])
     std::ofstream trajFile;
     if (use3d)
     {
-        trajFile.open(base + "-trajectory.data");
-        trajFile << "# t x y z speed_kmh interference_dbm car_loss_db tunnel cell sinr_db\n";
+        if (!evalJson)
+        {
+            trajFile.open(base + "-trajectory.data");
+            trajFile << "# t x y z speed_kmh interference_dbm car_loss_db tunnel cell sinr_db\n";
+        }
         Ptr<LteUePhy> uePhy = ueLteDevs.Get(0)->GetObject<LteUeNetDevice>()->GetPhy();
         Ptr<MobilityModel> ueMob = ueNodes.Get(0)->GetObject<MobilityModel>();
         auto poll = std::make_shared<std::function<void(double, double)>>();
@@ -1204,63 +1327,72 @@ main(int argc, char* argv[])
                     m->SetAttribute("CarLoss", DoubleValue(car));
                 }
             }
-            const auto pr = l3.Project(p);
-            bool tun = false;
-            for (const auto& tr : l3.tunnels)
+            if (!evalJson)
             {
-                tun = tun || (pr.first >= tr.first && pr.first <= tr.second);
+                const auto pr = l3.Project(p);
+                bool tun = false;
+                for (const auto& tr : l3.tunnels)
+                {
+                    tun = tun || (pr.first >= tr.first && pr.first <= tr.second);
+                }
+                const Vector v = ueMob->GetVelocity();
+                trajFile << t << " " << p.x << " " << p.y << " " << p.z << " "
+                         << 3.6 * std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z) << " "
+                         << (intf > -300 ? intf : 0.0) << " " << car << " " << tun << " "
+                         << g_lastCellId << " " << g_lastSinr << "\n";
             }
-            const Vector v = ueMob->GetVelocity();
-            trajFile << t << " " << p.x << " " << p.y << " " << p.z << " "
-                     << 3.6 * std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z) << " "
-                     << (intf > -300 ? intf : 0.0) << " " << car << " " << tun << " "
-                     << g_lastCellId << " " << g_lastSinr << "\n";
             Simulator::Schedule(MilliSeconds(100), [poll, intf, car]() { (*poll)(intf, car); });
         };
         Simulator::ScheduleNow([poll]() { (*poll)(1.0, -1.0); });
 
-        std::ofstream lf(base + "-line.data");
-        lf << "# scenario " << scenarioFile << "\n";
-        for (uint32_t i = 0; i < l3.cells.size(); i++)
+        if (!evalJson)
         {
-            const auto& c = l3.cells[i];
-            lf << (c.tunnel ? "tcell " : "cell ") << c.id << " " << c.pos.x << " " << c.pos.y
-               << " " << c.pos.z << " tx " << cellTx[i] << " range " << c.range << " hard "
-               << c.hard << " cellId " << i + 1 << "\n";
+            std::ofstream lf(base + "-line.data");
+            lf << "# scenario " << scenarioFile << "\n";
+            for (uint32_t i = 0; i < l3.cells.size(); i++)
+            {
+                const auto& c = l3.cells[i];
+                lf << (c.tunnel ? "tcell " : "cell ") << c.id << " " << c.pos.x << " " << c.pos.y
+                   << " " << c.pos.z << " tx " << cellTx[i] << " range " << c.range << " hard "
+                   << c.hard << " cellId " << i + 1 << "\n";
+            }
         }
     }
 
     // Traces.
-    g_throughputFile.open(base + "-throughput.data", std::ios::out);
-    g_rsrpFile.open(base + "-rsrp.data", std::ios::out);
-    g_handoverFile.open(base + "-handover.data", std::ios::out);
-    if (rttProbe)
+    if (!evalJson)
     {
-        g_idealRttFile.open(base + "-idealrtt.data", std::ios::out);
-        g_idealRttFile << "# t rtt_ms seq (64-byte UDP echo every 10 ms, no TCP load)\n";
-    }
-    if (!capacityProbe && !rttProbe)
-    {
-        g_cwndFile.open(base + "-cwnd.data", std::ios::out);
-        if (cc == "copa-auto")
+        g_throughputFile.open(base + "-throughput.data", std::ios::out);
+        g_rsrpFile.open(base + "-rsrp.data", std::ios::out);
+        g_handoverFile.open(base + "-handover.data", std::ios::out);
+        if (rttProbe)
         {
-            g_copaEstFile.open(base + "-copaest.data", std::ios::out);
-            g_copaEstFile << "# t j_ms k_ms rho r0_ms dq_target_ms delta\n";
+            g_idealRttFile.open(base + "-idealrtt.data", std::ios::out);
+            g_idealRttFile << "# t rtt_ms seq (64-byte UDP echo every 10 ms, no TCP load)\n";
         }
-        g_rttFile.open(base + "-rtt.data", std::ios::out);
-        if (rttSampleLog)
+        if (!capacityProbe && !rttProbe)
         {
-            g_rawRttLog.open(base + "-rtt-samples.csv");
-            g_rawRttLog << "time_s,flow,rtt_ms\n";
-        }
-        g_rttSampleFile.open(base + "-rttsample.data", std::ios::out);
-        g_rttSampleFile << "# t flow mean_rtt_ms (RTT samples of the last 100 ms)\n";
-        g_binRttSum.assign(totalFlows, 0.0);
-        g_binRttCount.assign(totalFlows, 0);
-        Simulator::Schedule(MilliSeconds(100), &FlushRttBins);
-        if (std::getenv("TCP_DEBUG_STATE"))
-        {
-            g_stateFile.open(base + "-state.data", std::ios::out);
+            g_cwndFile.open(base + "-cwnd.data", std::ios::out);
+            if (cc == "copa-auto")
+            {
+                g_copaEstFile.open(base + "-copaest.data", std::ios::out);
+                g_copaEstFile << "# t j_ms k_ms rho r0_ms dq_target_ms delta\n";
+            }
+            g_rttFile.open(base + "-rtt.data", std::ios::out);
+            if (rttSampleLog)
+            {
+                g_rawRttLog.open(base + "-rtt-samples.csv");
+                g_rawRttLog << "time_s,flow,rtt_ms\n";
+            }
+            g_rttSampleFile.open(base + "-rttsample.data", std::ios::out);
+            g_rttSampleFile << "# t flow mean_rtt_ms (RTT samples of the last 100 ms)\n";
+            g_binRttSum.assign(totalFlows, 0.0);
+            g_binRttCount.assign(totalFlows, 0);
+            Simulator::Schedule(MilliSeconds(100), &FlushRttBins);
+            if (std::getenv("TCP_DEBUG_STATE"))
+            {
+                g_stateFile.open(base + "-state.data", std::ios::out);
+            }
         }
     }
 
@@ -1324,6 +1456,100 @@ main(int argc, char* argv[])
                             : 0.0;
         r.lost = it.second.lostPackets;
         r.rxPackets = it.second.rxPackets;
+    }
+
+    if (evalJson)
+    {
+        double thrMbps = 0.0;
+        uint64_t lostPkts = 0, rxPkts = 0, retxPkts = 0;
+        for (uint32_t i = 0; i < totalFlows; i++)
+        {
+            thrMbps += results[i].throughput;
+            lostPkts += results[i].lost;
+            rxPkts += results[i].rxPackets;
+            retxPkts += g_retx[i];
+        }
+        std::vector<double> rtt;
+        for (const auto& s : g_rtt)
+        {
+            rtt.insert(rtt.end(), s.begin(), s.end());
+        }
+        double effCap = (capacityMbps > 1e-3) ? capacityMbps : thrMbps;
+        double effBaseRtt = (baseRttMs > 1e-3) ? baseRttMs : (2.0 * params.serverDelayMs + 15.0);
+        double rttAvg = effBaseRtt;
+        if (!rtt.empty())
+        {
+            double minR = *std::min_element(rtt.begin(), rtt.end());
+            double s = 0.0;
+            for (double x : rtt) s += x;
+            rttAvg = s / rtt.size();
+            if (baseRttMs <= 1e-3)
+            {
+                effBaseRtt = minR;
+            }
+        }
+        double qdAvg = std::max(rttAvg - effBaseRtt, 0.0);
+        double qdP95 = std::max(Percentile(rtt, 95) - effBaseRtt, 0.0);
+        double dropRate = (rxPkts + lostPkts > 0) ? (double)lostPkts / (rxPkts + lostPkts) : 0.0;
+        double util = (effCap > 1e-6) ? std::min(thrMbps / effCap, 1.5) : 0.0;
+        double estRtt = effBaseRtt + qdAvg;
+        double utilPower = (estRtt > 1e-6) ? (util / (estRtt / 1000.0)) : 0.0;
+        double normPower = utilPower * (effBaseRtt / 1000.0);
+        double tputPower = (estRtt > 1e-6) ? (thrMbps / (estRtt / 1000.0)) : 0.0;
+
+        std::ostringstream js;
+        js << std::fixed << std::setprecision(6);
+        js << "{\"duration_s\":" << std::max(simTime - 1.0, 1.0)
+           << ",\"capacity_mbps\":" << effCap
+           << ",\"throughput_mbps\":" << thrMbps
+           << ",\"utilization\":" << util
+           << ",\"qdelay_avg_ms\":" << qdAvg
+           << ",\"qdelay_p95_ms\":" << qdP95
+           << ",\"base_rtt_ms\":" << effBaseRtt
+           << ",\"est_rtt_ms\":" << estRtt
+           << ",\"util_power\":" << utilPower
+           << ",\"norm_power\":" << normPower
+           << ",\"tput_power\":" << tputPower
+           << ",\"drop_rate\":" << dropRate
+           << ",\"retrans_pkts\":" << retxPkts
+           << ",\"retrans_ratio\":" << ((rxPkts + retxPkts > 0) ? (double)retxPkts / (rxPkts + retxPkts) : 0.0)
+           << ",\"handovers\":" << g_handoverCount;
+        if (appMode && appRx)
+        {
+            std::vector<double> rcts = appRx->rctsMs;
+            double meanRct = 0.0, p50Rct = 0.0, p95Rct = 0.0, fctSlowdown = 0.0, mortiseQoe = 0.0;
+            if (!rcts.empty())
+            {
+                double qoeSum = 0.0, logSdSum = 0.0;
+                for (size_t i = 0; i < rcts.size(); i++)
+                {
+                    meanRct += rcts[i];
+                    uint32_t sz = (i < wkSizes.size()) ? wkSizes[i] : 1400U;
+                    double rctS = std::max(rcts[i] / 1000.0, 1e-6);
+                    double rThr = (static_cast<double>(sz) * 8.0) / (rctS * 1e6);
+                    qoeSum += (rThr * 0.5) / std::max(rcts[i], 1.0) * 100.0;
+                    double idealMs = std::max(effBaseRtt, 1.0) +
+                                     ((effCap > 1e-6) ? (static_cast<double>(sz) * 8.0 / (effCap * 1000.0)) : 0.0);
+                    logSdSum += std::log(std::max(rcts[i] / std::max(idealMs, 1e-3), 1.0));
+                }
+                meanRct /= rcts.size();
+                mortiseQoe = qoeSum / rcts.size();
+                fctSlowdown = std::exp(logSdSum / rcts.size());
+                std::vector<double> sr = rcts;
+                p50Rct = Percentile(sr, 50);
+                p95Rct = Percentile(sr, 95);
+            }
+            js << ",\"requests\":" << rcts.size()
+               << ",\"rct_mean_ms\":" << meanRct
+               << ",\"rct_p50_ms\":" << p50Rct
+               << ",\"rct_p95_ms\":" << p95Rct
+               << ",\"fct_slowdown\":" << fctSlowdown
+               << ",\"mortise_qoe\":" << mortiseQoe;
+        }
+        js << "}\n";
+        std::cout << js.str() << std::flush;
+        Simulator::Destroy();
+        return 0;
     }
 
     std::cout << "\n=== " << (capacityProbe ? "capacity probe" : (rttProbe ? "rtt probe" : cc))

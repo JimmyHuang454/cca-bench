@@ -1,0 +1,13 @@
+{
+  "_comment": "家庭光纤有线宽带：100 Mbps 稳态，20 ms 基础 RTT，无随机丢包",
+  "name": "wired-home",
+  "tech": "wired",
+  "profile": "outage",
+  "outage_duration_s": 0.0,
+  "bandwidth_mbps": 100.0,
+  "base_rtt_ms": 20.0,
+  "queues": ["150KB", "2MB"],
+  "loss_rate": 0.0,
+  "aqm": "none",
+  "duration_s": 60.0
+}
