@@ -40,17 +40,33 @@ def parse_downlink_log(
     max_s: float | None = None,
 ) -> dict[str, Any]:
     """Parse Mahimahi mm-link --downlink-log over [warmup_s, max_s] relative to first timestamp."""
-    entries: list[tuple[float, str, int, float]] = []
     first_ts: float | None = None
     last_ts: float | None = None
+    win_start_ts = 0.0
+    win_end_ts = math.inf
+    has_window = warmup_s > 0.0 or max_s is not None
+
+    win_delivered = 0
+    win_opportunity = 0
+    win_dropped = 0
+    win_act_start: float | None = None
+    win_act_end: float | None = None
+    qdelays_win: list[float] = []
+
+    all_delivered = 0
+    all_opportunity = 0
+    all_dropped = 0
+    all_act_start: float | None = None
+    all_act_end: float | None = None
+    qdelays_outside: list[float] = []
 
     with path.open("r", encoding="utf-8", errors="ignore") as f:
         for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
+            if not line or line[0] == "#":
                 continue
             parts = line.split()
-            if len(parts) < 3:
+            nparts = len(parts)
+            if nparts < 3:
                 continue
             try:
                 ts = float(parts[0])
@@ -59,16 +75,53 @@ def parse_downlink_log(
 
             if first_ts is None:
                 first_ts = ts
+                win_start_ts = first_ts + warmup_s * 1000.0
+                win_end_ts = (first_ts + max_s * 1000.0) if max_s is not None else math.inf
             last_ts = ts
 
             kind = parts[1]
-            if kind == "#" or kind == "-":
+            if kind == "#":
                 nbytes = int(parts[2])
-                qdelay = float(parts[3]) if (kind == "-" and len(parts) >= 4) else math.nan
-                entries.append((ts, kind, nbytes, qdelay))
+                if has_window:
+                    if all_act_start is None:
+                        all_act_start = ts
+                    all_act_end = ts
+                    all_opportunity += nbytes
+                if win_start_ts <= ts <= win_end_ts:
+                    if win_act_start is None:
+                        win_act_start = ts
+                    win_act_end = ts
+                    win_opportunity += nbytes
+            elif kind == "-":
+                nbytes = int(parts[2])
+                has_qd = nparts >= 4
+                qdelay = float(parts[3]) if has_qd else math.nan
+                if has_window:
+                    if all_act_start is None:
+                        all_act_start = ts
+                    all_act_end = ts
+                    all_delivered += nbytes
+                if win_start_ts <= ts <= win_end_ts:
+                    if win_act_start is None:
+                        win_act_start = ts
+                    win_act_end = ts
+                    win_delivered += nbytes
+                    if has_qd and not math.isnan(qdelay):
+                        qdelays_win.append(qdelay)
+                elif has_window and has_qd and not math.isnan(qdelay):
+                    qdelays_outside.append(qdelay)
             elif kind == "d":
-                nbytes = int(parts[3]) if len(parts) >= 4 else int(parts[2])
-                entries.append((ts, kind, nbytes, math.nan))
+                nbytes = int(parts[3]) if nparts >= 4 else int(parts[2])
+                if has_window:
+                    if all_act_start is None:
+                        all_act_start = ts
+                    all_act_end = ts
+                    all_dropped += nbytes
+                if win_start_ts <= ts <= win_end_ts:
+                    if win_act_start is None:
+                        win_act_start = ts
+                    win_act_end = ts
+                    win_dropped += nbytes
 
     if first_ts is None or last_ts is None or last_ts <= first_ts:
         return {
@@ -88,31 +141,20 @@ def parse_downlink_log(
 
     total_span_s = (last_ts - first_ts) / 1000.0
     # If the run finished too early (e.g., short legacy trace), skip warmup filter so metrics stay valid.
-    eff_warmup_s = warmup_s if total_span_s > warmup_s + 2.0 else 0.0
-    win_start_ts = first_ts + eff_warmup_s * 1000.0
-    win_end_ts = (first_ts + max_s * 1000.0) if (max_s is not None and total_span_s > eff_warmup_s + 2.0) else last_ts
-
-    delivered_bytes = 0
-    opportunity_bytes = 0
-    dropped_bytes = 0
-    qdelays: list[float] = []
-    act_start: float | None = None
-    act_end: float | None = None
-
-    for ts, kind, nbytes, qdelay in entries:
-        if ts < win_start_ts or ts > win_end_ts:
-            continue
-        if act_start is None:
-            act_start = ts
-        act_end = ts
-        if kind == "#":
-            opportunity_bytes += nbytes
-        elif kind == "-":
-            delivered_bytes += nbytes
-            if not math.isnan(qdelay):
-                qdelays.append(qdelay)
-        elif kind == "d":
-            dropped_bytes += nbytes
+    if has_window and total_span_s <= warmup_s + 2.0:
+        delivered_bytes = all_delivered
+        opportunity_bytes = all_opportunity
+        dropped_bytes = all_dropped
+        act_start = all_act_start
+        act_end = all_act_end
+        qdelays = qdelays_win + qdelays_outside
+    else:
+        delivered_bytes = win_delivered
+        opportunity_bytes = win_opportunity
+        dropped_bytes = win_dropped
+        act_start = win_act_start
+        act_end = win_act_end
+        qdelays = qdelays_win
 
     duration_s = (act_end - act_start) / 1000.0 if (act_start is not None and act_end is not None and act_end > act_start) else math.nan
     tput_mbps = (delivered_bytes * 8.0 / 1e6 / duration_s) if duration_s and duration_s > 0 else math.nan

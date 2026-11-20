@@ -11,6 +11,7 @@ Replaces embedded bash/YAML logic with testable Python subcommands:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import pathlib
@@ -18,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
@@ -547,8 +549,14 @@ def compact_shard_dir(shard_dir: pathlib.Path) -> int:
     return freed_bytes
 
 
-def fetch_and_compact_artifacts(run_id: str, repo: str, input_dir: pathlib.Path) -> int:
-    """Download results-* artifacts one by one, pre-aggregate, and delete raw logs to bound disk usage."""
+def fetch_and_compact_artifacts(
+    run_id: str,
+    repo: str,
+    input_dir: pathlib.Path,
+    jobs: int = 0,
+    min_free_gb: float = 8.0,
+) -> int:
+    """Download results-* artifacts in parallel with disk-space backpressure, pre-aggregate, and delete raw logs."""
     if not repo:
         raise RuntimeError("Missing GitHub repository (--repo or GITHUB_REPOSITORY) for --run-id download")
     names = list_run_result_artifacts(run_id, repo)
@@ -556,37 +564,72 @@ def fetch_and_compact_artifacts(run_id: str, repo: str, input_dir: pathlib.Path)
         raise RuntimeError(f"No non-expired results-* artifacts found for {repo} run {run_id}")
 
     input_dir.mkdir(parents=True, exist_ok=True)
+    workers = jobs if jobs > 0 else max(2, min(6, os.cpu_count() or 4))
+    workers = max(1, min(workers, len(names)))
+    min_free_bytes = int(max(0.0, min_free_gb) * (1024 ** 3))
+
+    cond = threading.Condition()
+    active = 0
+    done = 0
     total_freed = 0
-    print(f"Streaming {len(names)} artifacts from {repo} run {run_id}...", flush=True)
-    for idx, name in enumerate(names, 1):
+
+    free_gib = shutil.disk_usage(input_dir).free / (1024 ** 3)
+    print(
+        f"Streaming {len(names)} artifacts from {repo} run {run_id} "
+        f"(workers={workers}, min_free={min_free_gb:.1f} GiB, avail={free_gib:.1f} GiB)...",
+        flush=True,
+    )
+
+    def process_one(name: str) -> None:
+        nonlocal active, done, total_freed
+        with cond:
+            while active > 0 and min_free_bytes > 0 and shutil.disk_usage(input_dir).free < min_free_bytes:
+                cond.wait(timeout=1.0)
+            active += 1
+
         shard_dir = input_dir / name
-        if shard_dir.exists():
-            shutil.rmtree(shard_dir)
-        shard_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            if shard_dir.exists():
+                shutil.rmtree(shard_dir)
+            shard_dir.mkdir(parents=True, exist_ok=True)
 
-        dl_cmd = [
-            "gh", "run", "download", run_id,
-            "--repo", repo,
-            "--name", name,
-            "--dir", str(shard_dir),
-        ]
-        for attempt in range(3):
-            try:
-                subprocess.run(dl_cmd, check=True)
-                break
-            except subprocess.CalledProcessError:
-                if attempt == 2:
-                    raise
-                shutil.rmtree(shard_dir, ignore_errors=True)
-                shard_dir.mkdir(parents=True, exist_ok=True)
-                time.sleep(3 * (attempt + 1))
+            dl_cmd = [
+                "gh", "run", "download", run_id,
+                "--repo", repo,
+                "--name", name,
+                "--dir", str(shard_dir),
+            ]
+            for attempt in range(3):
+                try:
+                    subprocess.run(dl_cmd, check=True)
+                    break
+                except subprocess.CalledProcessError:
+                    shutil.rmtree(shard_dir, ignore_errors=True)
+                    if attempt == 2:
+                        raise
+                    shard_dir.mkdir(parents=True, exist_ok=True)
+                    time.sleep(3 * (attempt + 1))
 
-        freed = compact_shard_dir(shard_dir)
-        total_freed += freed
-        print(
-            f"[{idx}/{len(names)}] Compacted {name} (freed {freed / (1024 * 1024):.1f} MiB)",
-            flush=True,
-        )
+            freed = compact_shard_dir(shard_dir)
+            cur_free_gib = shutil.disk_usage(input_dir).free / (1024 ** 3)
+            with cond:
+                done += 1
+                total_freed += freed
+                print(
+                    f"[{done}/{len(names)}] Compacted {name} "
+                    f"(freed {freed / (1024 * 1024):.1f} MiB, free {cur_free_gib:.1f} GiB)",
+                    flush=True,
+                )
+        finally:
+            with cond:
+                active -= 1
+                cond.notify_all()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(process_one, name) for name in names]
+        for fut in concurrent.futures.as_completed(futures):
+            fut.result()
+
     print(
         f"Finished streaming {len(names)} artifacts (total freed: {total_freed / (1024 * 1024):.1f} MiB)",
         flush=True,
@@ -604,7 +647,13 @@ def cmd_summarize(args: argparse.Namespace) -> int:
     run_id = (args.run_id or "").strip()
     if run_id:
         repo = (args.repo or os.environ.get("GITHUB_REPOSITORY", "")).strip()
-        fetch_and_compact_artifacts(run_id, repo, input_dir)
+        fetch_and_compact_artifacts(
+            run_id,
+            repo,
+            input_dir,
+            jobs=args.jobs,
+            min_free_gb=args.min_free_gb,
+        )
 
     subprocess.run(
         [
@@ -638,7 +687,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="CI helper for Mahimahi Comparison workflow.")
+    parser = argparse.ArgumentParser(description="CI helper for CCAs Comparison workflow.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("plan")
@@ -659,6 +708,8 @@ def main() -> int:
     p_sum.add_argument("--out-dir", default="/tmp/summary")
     p_sum.add_argument("--run-id", default="", help="Optional GitHub Actions run ID to stream-download results-* artifacts from")
     p_sum.add_argument("--repo", default="", help="Optional GitHub owner/repo for --run-id (defaults to GITHUB_REPOSITORY)")
+    p_sum.add_argument("--jobs", type=int, default=0, help="Concurrent artifact download+parse workers (0 = auto from CPU count)")
+    p_sum.add_argument("--min-free-gb", type=float, default=8.0, help="Pause starting new parallel downloads when free disk drops below this GiB")
 
     args = parser.parse_args()
     return {
