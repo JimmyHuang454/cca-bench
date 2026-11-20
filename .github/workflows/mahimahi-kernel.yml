@@ -129,7 +129,7 @@ jobs:
           make -C "$RUNNER_TEMP/Mortise/algorithm/bpf-kern" build/mortise_copa.bpf.o CLANG=/usr/bin/clang
           python3 -m venv "$RUNNER_TEMP/mortise-venv"
           "$RUNNER_TEMP/mortise-venv/bin/pip" install numpy structlog scipy pandas
-          cargo build --release --locked --manifest-path "$RUNNER_TEMP/Mortise/mortise/Cargo.toml" --workspace
+          cargo build --release --locked --manifest-path "$RUNNER_TEMP/Mortise/mortise/Cargo.toml" -p traffic -p mortise-manager
 
       - name: Run Mahimahi with Linux TCP
         env:
