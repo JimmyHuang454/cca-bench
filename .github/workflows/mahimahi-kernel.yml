@@ -74,7 +74,7 @@ jobs:
           set -euxo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y build-essential git curl pkg-config \
-            clang llvm bpftool libelf-dev libbpf-dev zlib1g-dev libssl-dev \
+            clang llvm linux-tools-common linux-tools-generic libelf-dev libbpf-dev zlib1g-dev libssl-dev \
             autoconf automake autotools-dev libtool libtool-bin dnsmasq \
             xcb libxcb-composite0-dev libxcb-present-dev libcairo2-dev libpango1.0-dev \
             python3-venv python3-pip
@@ -120,7 +120,9 @@ jobs:
           git clone --depth 1 https://github.com/BobAnkh/Mortise.git "$RUNNER_TEMP/Mortise"
           sudo mkdir -p /home/vagrant
           sudo ln -s "$RUNNER_TEMP/Mortise/algorithm" /home/vagrant/algorithm
-          bpftool btf dump file /sys/kernel/btf/vmlinux format c > "$RUNNER_TEMP/Mortise/algorithm/bpf-kern/include/vmlinux.h"
+          BPFTOOL=$(find /usr/lib/linux-tools -type f -name bpftool | sort -V | tail -n 1)
+          test -n "$BPFTOOL"
+          "$BPFTOOL" btf dump file /sys/kernel/btf/vmlinux format c > "$RUNNER_TEMP/Mortise/algorithm/bpf-kern/include/vmlinux.h"
           python3 scripts/bench/ci_runner.py patch-mortise --mortise-dir "$RUNNER_TEMP/Mortise"
           make -C "$RUNNER_TEMP/Mortise/algorithm/bpf-kern" build/mortise_copa.bpf.o CLANG=/usr/bin/clang
           python3 -m venv "$RUNNER_TEMP/mortise-venv"
