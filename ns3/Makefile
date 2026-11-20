@@ -16,12 +16,13 @@ export JOBS
 # Benchmark suite configurable variables (override via `make bench SHARD=...`)
 # ---------------------------------------------------------------------------
 SHARD         ?= synth
-CCS           ?= copa_auto,copa_auto_nc,copa_auto_nc_j0,mortise_copa,bbr,bbr3,cubic,vegas,veno,yeah
+CCS           ?= copa_auto,copa_auto_v2,copa_auto_nc,copa_auto_nc_j0,mortise_copa,bbr,bbr3,cubic,vegas,veno,yeah
 WORKLOADS     ?= bulk,websearch
 REPEATS       ?= 1
 JITTER_US     ?= -1
 CLOCK_MS      ?= 1.0
 COPA_CLOCK_US ?= 1
+V2_MEASUREMENT_RTTS ?= 16
 QUEUES        ?=
 PARALLEL      ?= $(JOBS)
 RESUME        ?= 1
@@ -84,7 +85,7 @@ help:
 	@echo "=== Configurable Variables ==="
 	@echo "  SHARD=$(SHARD)  CCS=$(CCS)"
 	@echo "  WORKLOADS=$(WORKLOADS)  REPEATS=$(REPEATS)"
-	@echo "  JITTER_US=$(JITTER_US)  CLOCK_MS=$(CLOCK_MS)  COPA_CLOCK_US=$(COPA_CLOCK_US)"
+	@echo "  JITTER_US=$(JITTER_US)  CLOCK_MS=$(CLOCK_MS)  COPA_CLOCK_US=$(COPA_CLOCK_US)  V2_MEASUREMENT_RTTS=$(V2_MEASUREMENT_RTTS)"
 	@echo "  QUEUES=$(QUEUES)  PARALLEL=$(PARALLEL)  RESUME=$(RESUME)"
 	@echo "  OUT_DIR=$(OUT_DIR)"
 
@@ -95,6 +96,7 @@ test-core:
 	$(MAKE) -C $(KERNEL_DIR)/tcp_copa_auto test
 
 sync-bench:
+	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_v2.h" "$(CURDIR)/ns3-overlay/src/internet/model/copa_auto_v2.h"
 	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_core.h" "$(CURDIR)/ns3-overlay/src/internet/model/copa_auto_core.h"
 	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_math.h" "$(CURDIR)/ns3-overlay/src/internet/model/copa_auto_math.h"
 	cp -R "$(CURDIR)/ns3-overlay/." "$(NS3_ROOT)/"
@@ -157,6 +159,7 @@ bench: workloads
 		--jitter-us "$(JITTER_US)" \
 		--clock-ms "$(CLOCK_MS)" \
 		--copa-clock-us "$(COPA_CLOCK_US)" \
+		--v2-measurement-rtts "$(V2_MEASUREMENT_RTTS)" \
 		--parallel "$(PARALLEL)" \
 		--trace-dir "$(TRACE_DIR)" \
 		--lines-dir "$(LINES_DIR)" \

@@ -30,6 +30,12 @@ TcpCopaKernel::GetTypeId()
                           BooleanValue(true),
                           MakeBooleanAccessor(&TcpCopaKernel::m_adaptive),
                           MakeBooleanChecker())
+            .AddAttribute("V2", "Enable independent-period Copa-Auto v2",
+                          BooleanValue(false), MakeBooleanAccessor(&TcpCopaKernel::m_v2),
+                          MakeBooleanChecker())
+            .AddAttribute("MeasurementRtts", "V2 period length in SRTTs",
+                          UintegerValue(16), MakeUintegerAccessor(&TcpCopaKernel::m_measurementRtts),
+                          MakeUintegerChecker<uint32_t>(1, COPA_V2_MAX_ROUNDS))
             .AddAttribute("ModeSwitching",
                           "Enable Copa competitive mode switching",
                           BooleanValue(false),
@@ -72,6 +78,8 @@ TcpCopaKernel::TcpCopaKernel() = default;
 TcpCopaKernel::TcpCopaKernel(const TcpCopaKernel& o)
     : TcpCongestionOps(o),
       m_adaptive(o.m_adaptive),
+      m_v2(o.m_v2),
+      m_measurementRtts(o.m_measurementRtts),
       m_modeSwitching(o.m_modeSwitching),
       m_jitterUs(o.m_jitterUs),
       m_thetaMilli(o.m_thetaMilli),
@@ -128,13 +136,14 @@ TcpCopaKernel::EnsureInit(Ptr<TcpSocketState> tcb)
     uint32_t mss = std::max<uint32_t>(tcb->m_segmentSize, 536U);
     uint32_t initPkts = std::max<uint32_t>(tcb->m_cWnd.Get() / mss, 10U);
     struct copa_auto_cfg cfg{};
-    cfg.adaptive = m_adaptive;
-    cfg.mode_switching = m_modeSwitching;
+    cfg.adaptive = m_v2 ? false : m_adaptive;
+    cfg.mode_switching = m_v2 ? false : m_modeSwitching;
     cfg.theta_milli = m_thetaMilli;
     cfg.init_delta_q20 = m_initDeltaQ20;
     cfg.jitter_us = m_jitterUs;
     u64 now_us = QuantizeUs((u64)Simulator::Now().GetMicroSeconds(), m_copaClockUs);
     copa_state_init(&m_ca, cfg, &g_ns3_copa_kernel_board, now_us, initPkts);
+    if (m_v2) copa_v2_init(&m_v2State, m_measurementRtts);
     m_initialized = true;
 }
 
@@ -147,8 +156,12 @@ TcpCopaKernel::CongestionStateSet(Ptr<TcpSocketState> tcb,
     {
         u64 now_us = QuantizeUs((u64)Simulator::Now().GetMicroSeconds(), m_copaClockUs);
         bool persistent = (newState == TcpSocketState::CA_LOSS);
-        copa_on_loss(&m_ca, now_us, persistent);
-        if (persistent || (!m_ca.competitive && m_ca.cfg.adaptive))
+        if (m_v2 && !persistent) {
+            m_ca.slow_start = false;
+            m_ca.cwnd_q10 = std::max<u64>(m_ca.cwnd_q10 * 85 / 100, (u64)COPA_MIN_CWND_PKTS << 10);
+            copa_reset_velocity(&m_ca);
+        } else copa_on_loss(&m_ca, now_us, persistent);
+        if (persistent || (!m_ca.competitive && (m_ca.cfg.adaptive || m_v2)))
         {
             uint32_t mss = std::max<uint32_t>(tcb->m_segmentSize, 536U);
             u32 cwnd_pkts = std::max<u32>((u32)(m_ca.cwnd_q10 >> 10), COPA_MIN_CWND_PKTS);
@@ -173,7 +186,7 @@ TcpCopaKernel::CongControl(Ptr<TcpSocketState> tcb,
                       : 0ULL;
     u64 rtt_sample_us = lrtt.IsStrictlyPositive()
                             ? QuantizeUs((u64)lrtt.GetMicroSeconds(), m_copaClockUs)
-                            : (m_ca.cfg.adaptive ? 0ULL : srtt_us);
+                            : ((m_ca.cfg.adaptive || m_v2) ? 0ULL : srtt_us);
     if (!rtt_sample_us && !m_ca.cfg.adaptive)
     {
         return;
@@ -190,11 +203,13 @@ TcpCopaKernel::CongControl(Ptr<TcpSocketState> tcb,
 
     if (rs.m_bytesLoss > 0)
     {
-        copa_on_loss(&m_ca, now_us, false);
+        if (!m_v2) copa_on_loss(&m_ca, now_us, false);
     }
 
     u32 prev_delta_q20 = m_ca.delta_q20;
-    u32 new_cwnd = copa_on_ack(&m_ca, now_us, rtt_sample_us, srtt_us,
+    u32 new_cwnd = m_v2 ? copa_v2_on_ack(&m_v2State, &m_ca, now_us, rtt_sample_us, srtt_us,
+                                      acked_pkts, mss, rate_bps, app_limited, low_flight) :
+                     copa_on_ack(&m_ca, now_us, rtt_sample_us, srtt_us,
                                acked_pkts, mss, rate_bps, app_limited, low_flight);
     new_cwnd = std::max<u32>(new_cwnd, COPA_MIN_CWND_PKTS);
     tcb->m_cWnd = new_cwnd * mss;

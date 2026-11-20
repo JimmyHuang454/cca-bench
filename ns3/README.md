@@ -128,6 +128,7 @@ ns3/ns-3/build/scratch/ns3-dev-tcp-capacity-trace-optimized \
 | Mahimahi 链路发包门控（固定） | **`1 ms`（精确 `mm-link`）** | `MahimahiGate` 逐毫秒精确放行 1500B 包，与真实 Linux `mm-link` 1:1 等价 |
 | `CLOCK_MS` / `--clock-ms` / `--clockGranularityMs` | **`1.0 ms`** | `ns3::TcpSocketBase::ClockGranularity`，TCP 协议栈 RTO/RTT 定时器时钟（对标 Linux `HZ=1000`，可调 `0.1` 快时钟 / `4.0` 慢时钟） |
 | `COPA_CLOCK_US` / `--copa-clock-us` / `--copaClockUs` | **`1 µs`** | 喂给 `TcpCopaKernel` / `TcpMortiseCopa` 的时间戳与 RTT 量化粒度（`1` = 微秒高精度，`1000` / `4000` = 模拟 1–4 ms 慢时钟） |
+| `V2_MEASUREMENT_RTTS` / `--v2-measurement-rtts` | **`16`** | `copa_auto_v2` 的测量周期长度（单位：SRTT）；更改该值时请使用不同的 `OUT_DIR`，避免 `RESUME=1` 复用旧结果 |
 | `--bulk-secs` / `--stopTime` | **`60 s`**（`leo` 为 **`115 s`**） | Bulk 流仿真总时长 |
 | `--warmup-s` / `--warmup` | **`5.0 s`** | Bulk 指标统计前跳过的预热时长 |
 
@@ -246,3 +247,17 @@ Workflow 位于 [.github/workflows/ns3-bench.yml](../.github/workflows/ns3-bench
 3. **Overall Summary — `Composite Score`（↑，$\in (0, 1]$）**：
    $$\text{Composite Score} = \sqrt{\frac{\text{Norm Power}}{\text{FCT Slowdown}}}$$
    按 `(Trace Group, Queue)` 等权汇总并自动标出每列相对最优值的百分比差距（`Norm Power` / `Composite Score` 标 `-X.X%`，`FCT Slowdown` 标 `+X.X%`）。
+
+### Experimental Copa-Auto v2
+
+`copa_auto_v2` is included in the default `make bench` algorithms. Change the period with `make bench V2_MEASUREMENT_RTTS=8 OUT_DIR=...`. `copa-auto-v2` (or `copa_auto_v2`) selects the independent ns-3 `TcpCopaAutoV2` algorithm. It defaults to no competitive mode, no jitter probing, and a 16-SRTT measurement period. Each period independently finds its minimum RTT and maximum valid per-round delivery rate, derives utilization from the rate ratio, and fits k with a robust weighted absolute-error fit over the current period, downweighting observations near utilization 1. Rounds at utilization 1 are excluded from the fit. Period-local sample coverage, application limitation, and fitting error determine the delta-update gain (0.1–0.5). Periods with fewer than two usable k values do not update delta. Delta uses Q20 numerical representation; its representable positive range is approximately 0.000000954 to 4096, not the v1 algorithmic limits. The first valid RTT starts the first measurement period.
+
+Example (after `make build-bench`):
+
+```sh
+ns-3/build/scratch/ns3-dev-tcp-capacity-trace-optimized \
+  --ccs=copa-auto-v2 --profile=step --stopTime=20 --prefix=/tmp/copa-v2 \
+  --debugMs=1000 --ns3::TcpCopaAutoV2::MeasurementRtts=16
+```
+
+Period diagnostics, including sample count, utilization spread, fit error, confidence and gain, are printed to stderr when `--debugMs` is enabled. `MeasurementRtts` accepts 1 through 256; short periods may have insufficient samples for fitting. The maximum delivery rate is an estimate, and the period minimum RTT can include a persistent queue.

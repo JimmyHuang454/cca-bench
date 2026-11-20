@@ -124,7 +124,7 @@ bool
 IsAdaptiveCopaName(const std::string& name)
 {
     const std::string cc = BaseCc(name);
-    return cc == "copa-auto" || cc == "copa_auto" || cc == "copa_auto_nc" ||
+    return cc == "copa-auto-v2" || cc == "copa_auto_v2" || cc == "copa-auto" || cc == "copa_auto" || cc == "copa_auto_nc" ||
            cc == "copa_auto_nc_j0" || cc == "copa_auto_nc_j3" ||
            cc.rfind("copa_auto_theta", 0) == 0 || cc.rfind("copa_auto_nc_theta", 0) == 0;
 }
@@ -155,6 +155,15 @@ ConfigureCcFlow(uint32_t nodeId,
         const std::string path = "/NodeList/" + std::to_string(nodeId) +
                                  "/$ns3::TcpL4Protocol/SocketList/0/CongestionOps/$ns3::TcpMortiseCopa/";
         Config::Set(path + "CopaClockUs", UintegerValue(std::max<uint32_t>(copaClockUs, 1U)));
+        return;
+    }
+    if (cc == "copa-auto-v2" || cc == "copa_auto_v2")
+    {
+        const std::string path = "/NodeList/" + std::to_string(nodeId) +
+            "/$ns3::TcpL4Protocol/SocketList/0/CongestionOps/$ns3::TcpCopaAutoV2/";
+        Config::Set(path + "CopaClockUs", UintegerValue(std::max<uint32_t>(copaClockUs, 1U)));
+        if (flow == 0 && g_copaEstFile.is_open())
+            Config::ConnectWithoutContext(path + "Estimates", MakeCallback(&CopaEstimateTracer));
         return;
     }
     if (!IsCopaKernelName(name))
@@ -286,6 +295,10 @@ CcTypeName(const std::string& name)
     if (cc == "mortise_copa")
     {
         return "ns3::TcpMortiseCopa";
+    }
+    if (cc == "copa-auto-v2" || cc == "copa_auto_v2")
+    {
+        return "ns3::TcpCopaAutoV2";
     }
     if (IsCopaKernelName(name))
     {

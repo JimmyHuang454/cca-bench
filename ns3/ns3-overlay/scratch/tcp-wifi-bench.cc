@@ -62,6 +62,10 @@ CcTypeName(const std::string& name)
     if (cc == "hybla") return "ns3::TcpHybla";
     if (cc == "reno" || cc == "newreno") return "ns3::TcpLinuxReno";
     if (cc == "mortise_copa") return "ns3::TcpMortiseCopa";
+    if (cc == "copa-auto-v2" || cc == "copa_auto_v2")
+    {
+        return "ns3::TcpCopaAutoV2";
+    }
     if (IsCopaKernelName(name)) return "ns3::TcpCopaKernel";
     TypeId tid;
     NS_ABORT_MSG_UNLESS(TypeId::LookupByNameFailSafe(cc, &tid), "Unknown CC: " << cc);
@@ -77,6 +81,13 @@ ConfigureCc(uint32_t nodeId, std::string name, int32_t jitterUs, uint32_t copaCl
         Config::Set("/NodeList/" + std::to_string(nodeId) +
                         "/$ns3::TcpL4Protocol/SocketList/0/CongestionOps/$ns3::TcpMortiseCopa/CopaClockUs",
                     UintegerValue(std::max<uint32_t>(copaClockUs, 1U)));
+        return;
+    }
+    if (cc == "copa-auto-v2" || cc == "copa_auto_v2")
+    {
+        const std::string path = "/NodeList/" + std::to_string(nodeId) +
+            "/$ns3::TcpL4Protocol/SocketList/0/CongestionOps/$ns3::TcpCopaAutoV2/";
+        Config::Set(path + "CopaClockUs", UintegerValue(std::max<uint32_t>(copaClockUs, 1U)));
         return;
     }
     if (!IsCopaKernelName(name))

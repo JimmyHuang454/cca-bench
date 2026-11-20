@@ -8,7 +8,7 @@
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wgnu-statement-expression-from-macro-expansion"
 #endif
-#include "copa_auto_core.h"
+#include "copa_auto_v2.h"
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
@@ -40,6 +40,8 @@ class TcpCopaKernel : public TcpCongestionOps
     static uint64_t QuantizeUs(uint64_t valUs, uint32_t clockUs);
 
     bool m_adaptive{true};
+    bool m_v2{false};
+    uint32_t m_measurementRtts{16};
     bool m_modeSwitching{false};
     int32_t m_jitterUs{-1};
     uint32_t m_thetaMilli{500};
@@ -49,6 +51,7 @@ class TcpCopaKernel : public TcpCongestionOps
     u64 m_nextDebugUs{0};
     bool m_initialized{false};
     struct copa_auto_state m_ca{};
+    struct copa_v2_state m_v2State{};
     TracedCallback<double, double, double, double, double, double> m_estTrace;
 };
 

@@ -18,7 +18,7 @@
 #include <linux/ktime.h>
 #include <net/tcp.h>
 
-#include "copa_auto_core.h"
+#include "copa_auto_v2.h"
 
 static unsigned int theta_milli = 980;
 module_param(theta_milli, uint, 0644);
@@ -30,12 +30,17 @@ module_param(jitter_us, int, 0644);
 MODULE_PARM_DESC(jitter_us,
 		 "Jitter in us for copa_auto_nc (-1 = auto probe, >= 0 = manual fixed j, no j probe)");
 
+static unsigned int measurement_rtts = 16;
+module_param(measurement_rtts, uint, 0644);
+MODULE_PARM_DESC(measurement_rtts, "Copa v2 measurement period in SRTTs (1..256; applied to new connections)");
+
 static bool diagnose;
 module_param(diagnose, bool, 0644);
 
 struct tcp_copa_priv {
 	u64 next_sample_us;
 	struct copa_auto_state *ca;
+	struct copa_v2_state *v2;
 };
 
 static struct copa_probe_board g_copa_board;
@@ -76,6 +81,7 @@ static void tcp_copa_init_common(struct sock *sk, struct copa_auto_cfg cfg)
 
 	ca = kzalloc(sizeof(*ca), GFP_ATOMIC);
 	priv->ca = ca;
+	priv->v2 = NULL;
 	priv->next_sample_us = 0;
 	if (!ca)
 		return;
@@ -86,6 +92,18 @@ static void tcp_copa_init_common(struct sock *sk, struct copa_auto_cfg cfg)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
 	cmpxchg(&sk->sk_pacing_status, SK_PACING_NONE, SK_PACING_NEEDED);
 #endif
+}
+
+static void tcp_copa_init_v2(struct sock *sk)
+{
+    struct copa_auto_cfg cfg = { .adaptive = false, .mode_switching = false,
+        .jitter_us = 0, .theta_milli = 500, .init_delta_q20 = COPA_DELTA_INIT_Q20 };
+    struct tcp_copa_priv *priv = inet_csk_ca(sk);
+    tcp_copa_init_common(sk, cfg);
+    if (!priv->ca) return;
+    priv->v2 = kzalloc(sizeof(*priv->v2), GFP_ATOMIC);
+    if (!priv->v2) { kfree(priv->ca); priv->ca = NULL; return; }
+    copa_v2_init(priv->v2, READ_ONCE(measurement_rtts));
 }
 
 static void tcp_copa_init_auto(struct sock *sk)
@@ -177,6 +195,8 @@ static void tcp_copa_release(struct sock *sk)
 {
 	struct tcp_copa_priv *priv = inet_csk_ca(sk);
 
+	kfree(priv->v2);
+	priv->v2 = NULL;
 	if (priv->ca) {
 		kfree(priv->ca);
 		priv->ca = NULL;
@@ -206,9 +226,15 @@ static void tcp_copa_set_state(struct sock *sk, u8 new_state)
 	if (new_state == TCP_CA_Loss || new_state == TCP_CA_Recovery) {
 		u64 now_us = tcp_copa_now_us(tp);
 
-		copa_on_loss(priv->ca, now_us, new_state == TCP_CA_Loss);
+		if (priv->v2 && new_state != TCP_CA_Loss) {
+			priv->ca->slow_start = false;
+			priv->ca->cwnd_q10 = max_t(u64, priv->ca->cwnd_q10 * 85 / 100, (u64)COPA_MIN_CWND_PKTS << 10);
+			copa_reset_velocity(priv->ca);
+		} else {
+			copa_on_loss(priv->ca, now_us, new_state == TCP_CA_Loss);
+		}
 		if (new_state == TCP_CA_Loss ||
-		    (!priv->ca->competitive && priv->ca->cfg.adaptive)) {
+		    (!priv->ca->competitive && (priv->ca->cfg.adaptive || priv->v2))) {
 			u32 cwnd = max_t(u32, (u32)(priv->ca->cwnd_q10 >> 10),
 					 COPA_MIN_CWND_PKTS);
 			tcp_copa_set_cwnd(tp, min_t(u32, cwnd, tp->snd_cwnd_clamp));
@@ -236,7 +262,7 @@ static void tcp_copa_cong_control(struct sock *sk,
 
 	now_us = tcp_copa_now_us(tp);
 	srtt_us = tp->srtt_us >> 3;
-	rtt_sample_us = (rs && rs->rtt_us > 0) ? (u64)rs->rtt_us : (ca->cfg.adaptive ? 0 : srtt_us);
+	rtt_sample_us = (rs && rs->rtt_us > 0) ? (u64)rs->rtt_us : ((ca->cfg.adaptive || priv->v2) ? 0 : srtt_us);
 	if (!rtt_sample_us && !ca->cfg.adaptive)
 		return;
 	if (srtt_us == 0)
@@ -250,7 +276,10 @@ static void tcp_copa_cong_control(struct sock *sk,
 	}
 	app_limited = (rs && rs->is_app_limited) || (tp->app_limited != 0);
 
-	new_cwnd = copa_on_ack(ca, now_us, rtt_sample_us, srtt_us,
+	new_cwnd = priv->v2 ? copa_v2_on_ack(priv->v2, ca, now_us, rtt_sample_us, srtt_us,
+			       acked_pkts, mss, rate_bps, app_limited,
+			       rs && rs->is_app_limited && rs->prior_in_flight <= 4) :
+		   copa_on_ack(ca, now_us, rtt_sample_us, srtt_us,
 			       acked_pkts, mss, rate_bps, app_limited,
 			       rs && rs->is_app_limited && rs->prior_in_flight <= 4);
 	new_cwnd = clamp_t(u32, new_cwnd, COPA_MIN_CWND_PKTS, tp->snd_cwnd_clamp);
@@ -287,6 +316,7 @@ static struct tcp_congestion_ops sym __read_mostly = {		\
 	.set_state	= tcp_copa_set_state,			\
 }
 
+DEFINE_COPA_OPS(tcp_copa_v2_ops,         "copa_auto_v2",    tcp_copa_init_v2);
 DEFINE_COPA_OPS(tcp_copa_auto_ops,       "copa_auto",       tcp_copa_init_auto);
 DEFINE_COPA_OPS(tcp_copa_auto_nc_ops,    "copa_auto_nc",    tcp_copa_init_auto_nc);
 DEFINE_COPA_OPS(tcp_copa_auto_nc_j0_ops, "copa_auto_nc_j0", tcp_copa_init_auto_nc_j0);
@@ -296,6 +326,7 @@ DEFINE_COPA_OPS(tcp_copa_auto_t_ops,     "copa_auto_t",     tcp_copa_init_auto_t
 DEFINE_COPA_OPS(tcp_copa_orig_ops,       "copa_orig",       tcp_copa_init_orig);
 
 static struct tcp_congestion_ops * const copa_ops_list[] = {
+	&tcp_copa_v2_ops,
 	&tcp_copa_auto_ops,
 	&tcp_copa_auto_nc_ops,
 	&tcp_copa_auto_nc_j0_ops,

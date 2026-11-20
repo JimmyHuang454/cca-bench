@@ -342,6 +342,9 @@ def run_one_job(job: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     else:
         return None, f"[FAIL] unknown job kind {kind}"
 
+    if job["cc"] in ("copa_auto_v2", "copa-auto-v2"):
+        cmd.append(f"--ns3::TcpCopaAutoV2::MeasurementRtts={job['v2_measurement_rtts']}")
+
     t0 = time.monotonic()
     res = subprocess.run(cmd, capture_output=True, text=True)
     dt = time.monotonic() - t0
@@ -382,7 +385,7 @@ def main() -> int:
     parser.add_argument("--lte-bin", type=Path, default=None, help="Path to tcp-lte-highspeed-handover binary")
     parser.add_argument("--wifi-bin", type=Path, default=None, help="Path to tcp-wifi-bench binary")
     parser.add_argument("--shard", default="synth", help="Shard(s): wired, wifi, lines, lines-quick, 4g, 5g, leo, datasets, full")
-    parser.add_argument("--ccs", default="copa_auto,copa_auto_nc,copa_auto_nc_j0,mortise_copa,bbr,bbr3,cubic")
+    parser.add_argument("--ccs", default="copa_auto,copa_auto_v2,copa_auto_nc,copa_auto_nc_j0,mortise_copa,bbr,bbr3,cubic")
     parser.add_argument("--workloads", default="bulk,websearch")
     parser.add_argument("--workload-map", default="")
     parser.add_argument("--queues", default="", help="Optional comma-separated queue sizes (e.g. 150KB,2MB)")
@@ -394,6 +397,8 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--parallel", type=int, default=0, help="0 = CPU count")
     parser.add_argument("--jitter-us", type=int, default=-1)
+    parser.add_argument("--v2-measurement-rtts", type=int, choices=range(1, 257), default=16,
+                        metavar="N", help="Copa-Auto v2 measurement period in SRTTs (1..256)")
     parser.add_argument("--trace-dir", type=Path, default=REPO_ROOT / "datasets" / "traces")
     parser.add_argument("--lines-dir", type=Path, default=REPO_ROOT / "datasets" / "lines")
     parser.add_argument("--cap-cache", type=Path, default=REPO_ROOT / "results" / "cache" / "phy_cap_cache.json")
@@ -518,7 +523,7 @@ def main() -> int:
 
     print(
         f"ns-3 suite: shard={args.shard} ({len(sub_shards)} sub-shards) scenarios={len(scenario_entries)} "
-        f"ccs={ccs} workloads={workloads} repeats={repeats} clock_ms={args.clock_ms} copa_clock_us={args.copa_clock_us}",
+        f"ccs={ccs} workloads={workloads} repeats={repeats} clock_ms={args.clock_ms} copa_clock_us={args.copa_clock_us} v2_measurement_rtts={args.v2_measurement_rtts}",
         flush=True,
     )
     resume_note = f" ({matched_resumed} cached via --resume)" if matched_resumed else ""
@@ -581,6 +586,7 @@ def main() -> int:
                                     "warmup_s": args.warmup_s,
                                     "clock_ms": args.clock_ms,
                                     "copa_clock_us": args.copa_clock_us,
+                                    "v2_measurement_rtts": args.v2_measurement_rtts,
                                     "jitter_us": args.jitter_us,
                                     "cc": cc,
                                     "repeat": rep,
@@ -615,6 +621,7 @@ def main() -> int:
                                     "warmup_s": args.warmup_s,
                                     "clock_ms": args.clock_ms,
                                     "copa_clock_us": args.copa_clock_us,
+                                    "v2_measurement_rtts": args.v2_measurement_rtts,
                                     "jitter_us": args.jitter_us,
                                     "cc": cc,
                                     "repeat": rep,
@@ -653,6 +660,7 @@ def main() -> int:
                                     "warmup_s": args.warmup_s,
                                     "clock_ms": args.clock_ms,
                                     "copa_clock_us": args.copa_clock_us,
+                                    "v2_measurement_rtts": args.v2_measurement_rtts,
                                     "jitter_us": args.jitter_us,
                                     "cc": cc,
                                     "repeat": rep,
