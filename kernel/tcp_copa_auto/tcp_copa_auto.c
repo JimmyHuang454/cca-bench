@@ -24,7 +24,11 @@ module_param(theta_milli, uint, 0644);
 MODULE_PARM_DESC(theta_milli,
 		 "Target throughput weight theta*1000 for copa_auto_t (10..995)");
 
+static bool diagnose;
+module_param(diagnose, bool, 0644);
+
 struct tcp_copa_priv {
+	u64 next_sample_us;
 	struct copa_auto_state *ca;
 };
 
@@ -66,6 +70,7 @@ static void tcp_copa_init_common(struct sock *sk, struct copa_auto_cfg cfg)
 
 	ca = kzalloc(sizeof(*ca), GFP_ATOMIC);
 	priv->ca = ca;
+	priv->next_sample_us = 0;
 	if (!ca)
 		return;
 
@@ -224,6 +229,14 @@ static void tcp_copa_cong_control(struct sock *sk,
 			       acked_pkts, mss, rate_bps, app_limited);
 	new_cwnd = clamp_t(u32, new_cwnd, COPA_MIN_CWND_PKTS, tp->snd_cwnd_clamp);
 	tcp_copa_set_cwnd(tp, new_cwnd);
+	if (unlikely(READ_ONCE(diagnose)) && now_us >= priv->next_sample_us) {
+		priv->next_sample_us = now_us + 100000;
+		pr_info("copa_sample t=%llu sport=%u cwnd=%u out=%u notsent=%u rs_app=%d tp_app=%d ss=%d phase=%d pace=%lu ca_state=%u\n",
+			now_us, inet_sk(sk)->inet_num, new_cwnd, tp->packets_out,
+			tp->write_seq - tp->snd_nxt, rs && rs->is_app_limited,
+			tp->app_limited != 0, ca->slow_start, ca->drain_phase,
+			READ_ONCE(sk->sk_pacing_rate), inet_csk(sk)->icsk_ca_state);
+	}
 
 	pacing_rate = copa_pacing_rate_bps(ca, mss, now_us);
 	if (pacing_rate > 0) {

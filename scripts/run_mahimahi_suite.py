@@ -145,6 +145,8 @@ def resolve_shard_traces(
         if not found:
             raise ValueError(f"No bw_*.txt + delay_*.txt pairs found under {local_leo_dir}")
         return sorted(found.keys())
+    if shard in ("diag-52", "diag-111"):
+        return [f"5g_trace_{shard.split('-')[1]}_walking"]
     if shard in SHARDS:
         return SHARDS[shard]
     if shard in ("lumos-5g-all", "lumos-4g-all"):
