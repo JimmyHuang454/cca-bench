@@ -89,6 +89,8 @@ std::ofstream g_stateFile;      //!< Congestion state / in-flight of flow 0 (deb
 std::vector<Ptr<PacketSink>> g_sinks;   //!< Downlink sinks on the UE, one per flow
 std::vector<uint64_t> g_lastRxBytes;    //!< Last sampled received bytes, per flow
 std::vector<std::vector<double>> g_rtt; //!< RTT samples [ms], per flow
+std::vector<std::vector<double>> g_srtt; //!< Smoothed RTT updates for diagnostics
+std::ofstream g_rawRttLog; //!< Optional log of every valid ACK RTT sample
 std::vector<uint32_t> g_retx;           //!< Retransmitted segments, per flow
 Time g_lastSampleTime;                  //!< Time of the last throughput sample
 
@@ -410,7 +412,7 @@ RttTracer(uint32_t flow, Time oldval [[maybe_unused]], Time newval)
     {
         return;
     }
-    g_rtt[flow].push_back(ms);
+    g_srtt[flow].push_back(ms);
     if (g_rttFile.is_open())
     {
         g_rttFile << Simulator::Now().GetSeconds() << " " << flow << " " << ms << std::endl;
@@ -494,12 +496,18 @@ U32Tracer(std::string name, uint32_t oldval [[maybe_unused]], uint32_t newval)
  * @param newval new RTT sample
  */
 void
-LastRttTracer(uint32_t flow, Time oldval [[maybe_unused]], Time newval)
+LastRttTracer(uint32_t flow, Time newval)
 {
     if (newval.IsStrictlyPositive() && flow < g_binRttSum.size())
     {
         g_binRttSum[flow] += newval.GetSeconds() * 1000.0;
         g_binRttCount[flow]++;
+        g_rtt[flow].push_back(newval.GetSeconds() * 1000.0);
+        if (g_rawRttLog.is_open())
+        {
+            g_rawRttLog << std::setprecision(12) << Simulator::Now().GetSeconds() << ","
+                        << flow << "," << newval.GetSeconds() * 1000.0 << "\n";
+        }
     }
 }
 
@@ -592,7 +600,7 @@ ConnectSenderTraces(uint32_t nodeId, uint32_t flow)
         }
     }
     Config::ConnectWithoutContext(path + "RTT", MakeBoundCallback(&RttTracer, flow));
-    Config::ConnectWithoutContext(path + "LastRTT", MakeBoundCallback(&LastRttTracer, flow));
+    Config::ConnectWithoutContext(path + "RttSample", MakeBoundCallback(&LastRttTracer, flow));
     Config::ConnectWithoutContext(path + "Retransmission", MakeBoundCallback(&RetxTracer, flow));
 }
 
@@ -615,6 +623,7 @@ main(int argc, char* argv[])
     double flowStagger = 0.0;
     double bgMbps = 0.0;
     std::string prefix = "tcp-lte-highspeed";
+    bool rttSampleLog = false;
     double carLoss = 0.0;           // dB
     double tunnelStart = 0.0;       // m
     double tunnelLength = 0.0;      // m, 0 = no tunnel
@@ -654,6 +663,7 @@ main(int argc, char* argv[])
                  "exponential on and off times of mean 0.5 s, 2 * bgMbps when on [Mbit/s]",
                  bgMbps);
     cmd.AddValue("prefix", "Prefix of the output files", prefix);
+    cmd.AddValue("rttSampleLog", "Write every valid ACK RTT sample to CSV", rttSampleLog);
     cmd.AddValue("scenario",
                  "Resolved 3-D railway line written by scratch/preview-line.py --export "
                  "(cells, antennas, track, speed profile, tunnels, interference); "
@@ -1099,6 +1109,7 @@ main(int argc, char* argv[])
         g_sinks.push_back(sinkApp.Get(0)->GetObject<PacketSink>());
         g_lastRxBytes.push_back(0);
         g_rtt.emplace_back();
+        g_srtt.emplace_back();
         g_retx.push_back(0);
         sinkApp.Start(Seconds(1.0));
         sinkApp.Stop(Seconds(simTime));
@@ -1237,6 +1248,11 @@ main(int argc, char* argv[])
             g_copaEstFile << "# t j_ms k_ms rho r0_ms dq_target_ms delta\n";
         }
         g_rttFile.open(base + "-rtt.data", std::ios::out);
+        if (rttSampleLog)
+        {
+            g_rawRttLog.open(base + "-rtt-samples.csv");
+            g_rawRttLog << "time_s,flow,rtt_ms\n";
+        }
         g_rttSampleFile.open(base + "-rttsample.data", std::ios::out);
         g_rttSampleFile << "# t flow mean_rtt_ms (RTT samples of the last 100 ms)\n";
         g_binRttSum.assign(totalFlows, 0.0);
@@ -1321,7 +1337,8 @@ main(int argc, char* argv[])
     double sumSq = 0.0;
     std::ofstream json(base + "-metrics.json");
     json << std::fixed << std::setprecision(4);
-    json << "{\n  \"cc\": \"" << cc << "\", \"competitor\": \"" << competitor
+    json << "{\n  \"rtt_stats_version\": 2, \"rtt_source\": \"ack_rtt_samples\",\n"
+         << "  \"cc\": \"" << cc << "\", \"competitor\": \"" << competitor
          << "\", \"numFlows\": " << numFlows << ", \"speed\": " << speedKmh
          << ", \"enbSpacing\": " << enbSpacing << ", \"cells\": " << numberOfEnbs
          << ", \"carLoss\": " << carLoss << ", \"tunnelStart\": " << tunnelStart
@@ -1341,6 +1358,12 @@ main(int argc, char* argv[])
             rttMean += x;
         }
         rttMean = rtt.empty() ? 0.0 : rttMean / rtt.size();
+        double srttMean = 0.0;
+        for (double x : g_srtt[i])
+        {
+            srttMean += x;
+        }
+        srttMean = g_srtt[i].empty() ? 0.0 : srttMean / g_srtt[i].size();
         double p50 = Percentile(rtt, 50);
         double p95 = Percentile(rtt, 95);
         double p99 = Percentile(rtt, 99);
@@ -1355,12 +1378,21 @@ main(int argc, char* argv[])
              << "\", \"throughput_mbps\": " << r.throughput
              << ", \"mean_delay_ms\": " << r.meanDelayMs << ", \"lost\": " << r.lost
              << ", \"rx_packets\": " << r.rxPackets << ", \"retx\": " << g_retx[i]
+             << ", \"srtt_mean_ms\": " << srttMean << ", \"rtt_samples\": " << rtt.size()
              << ", \"rtt_mean_ms\": " << rttMean << ", \"rtt_p50_ms\": " << p50
              << ", \"rtt_p95_ms\": " << p95 << ", \"rtt_p99_ms\": " << p99 << "}"
              << (i + 1 < totalFlows ? "," : "") << "\n";
     }
     double jain = sumSq > 0 ? sum * sum / (totalFlows * sumSq) : 0.0;
-    json << "  ],\n  \"total_throughput_mbps\": " << sum << ", \"jain\": " << jain << "\n}\n";
+    std::vector<double> pooled;
+    for (const auto& samples : g_rtt)
+    {
+        pooled.insert(pooled.end(), samples.begin(), samples.end());
+    }
+    json << "  ],\n  \"total_throughput_mbps\": " << sum << ", \"jain\": " << jain
+         << ", \"rtt_p95_ms\": " << Percentile(pooled, 95)
+         << ", \"rtt_p99_ms\": " << Percentile(pooled, 99)
+         << ", \"rtt_samples\": " << pooled.size() << "\n}\n";
     json.close();
 
     std::cout << "total " << sum << " Mbps, Jain fairness " << jain << std::endl;

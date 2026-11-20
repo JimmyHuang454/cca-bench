@@ -223,6 +223,10 @@ TcpSocketBase::GetTypeId()
                             "RTT of the last (S)ACKed packet",
                             MakeTraceSourceAccessor(&TcpSocketBase::m_lastRttTrace),
                             "ns3::TracedValueCallback::Time")
+            .AddTraceSource("RttSample",
+                            "Every valid unsmoothed ACK RTT sample, including repeated values",
+                            MakeTraceSourceAccessor(&TcpSocketBase::m_rttSampleTrace),
+                            "ns3::Time::TracedCallback")
             .AddTraceSource("NextTxSequence",
                             "Next sequence number to send (SND.NXT)",
                             MakeTraceSourceAccessor(&TcpSocketBase::m_nextTxSequenceTrace),
@@ -3938,6 +3942,7 @@ TcpSocketBase::EstimateRtt(const TcpHeader& tcpHeader)
         {
             NS_LOG_DEBUG("Last RTT sample updated to: " << lastRtt);
             m_tcb->m_lastRtt = lastRtt;
+            m_rttSampleTrace(lastRtt);
         }
     }
 

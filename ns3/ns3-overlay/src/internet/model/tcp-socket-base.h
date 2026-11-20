@@ -385,6 +385,11 @@ class TcpSocketBase : public TcpSocket
     TracedCallback<Time, Time> m_lastRttTrace;
 
     /**
+     * @brief Every valid, unsmoothed ACK RTT sample, including consecutive equal values.
+     */
+    TracedCallback<Time> m_rttSampleTrace;
+
+    /**
      * @brief Callback function to hook to TcpSocketState pacing rate
      * @param oldValue old pacing rate value
      * @param newValue new pacing rate value

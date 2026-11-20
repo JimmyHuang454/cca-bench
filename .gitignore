@@ -1,5 +1,8 @@
-ns-3
-traces/
-results/
-smoke/
+ns3/ns-3
+ns3/traces/
+ns3/results/
+ns3/smoke/
+kernel/trace/
 __pycache__/
+*.pyc
+.DS_Store

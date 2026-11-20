@@ -1,0 +1,225 @@
+name: ns-3 CCAs Bench
+
+on:
+  push:
+    branches: ["master", "main", "codex/**"]
+    paths:
+      - .github/workflows/ns3-bench.yml
+      - ns3/tcp_copa_bench.cc
+      - ns3/ns3-overlay/**
+      - ns3/setup_ns3.sh
+      - kernel/tcp_copa_auto/**
+      - kernel/scripts/run_ns3_suite.py
+      - kernel/scripts/mahimahi_eval.py
+      - kernel/scripts/ci_runner.py
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Test suite mode (quick, rct, rct-datasets, smoke, full, lte, lumos-5g-all, lumos-4g-all, leo, datasets)"
+        required: true
+        default: "quick"
+        type: choice
+        options:
+          - quick
+          - rct
+          - rct-datasets
+          - smoke
+          - full
+          - lte
+          - nyc-subway
+          - lumos-5g
+          - lumos-5g-all
+          - lumos-4g-all
+          - lumos-all
+          - leo
+          - datasets
+      theta:
+        description: "Theta in [0.01, 0.99] (or comma-separated list, e.g. 0.9,0.98)"
+        required: true
+        default: "0.98"
+        type: string
+      jitter_us:
+        description: "jitter_us for copa_auto/copa_auto_nc (-1 = auto probe, >= 0 = manual fixed j in us)"
+        required: true
+        default: "-1"
+        type: string
+      repeats:
+        description: "Number of time-shifted repeats per configuration (default 1)"
+        required: true
+        default: "1"
+        type: string
+      parallel:
+        description: "Optional max concurrent ns-3 processes per runner (empty = CPU count)"
+        required: false
+        default: ""
+        type: string
+      queues:
+        description: "Optional queue sizes override, e.g. 150KB,2MB (empty = dataset default)"
+        required: false
+        default: ""
+        type: string
+      rct_workloads:
+        description: "Comma-separated RCT workloads (app,websearch,vl2,pageload)"
+        required: false
+        default: "app"
+        type: string
+      ns3_ccs:
+        description: "Optional CCs override (e.g. copa_auto,copa_auto_nc,copa_auto_nc_j0,mortise_copa,bbr,bbr3,cubic,vegas)"
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: ns3-bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      mode: ${{ steps.matrix.outputs.mode }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        env:
+          MODE: ${{ inputs.mode || 'quick' }}
+          RCT_WORKLOADS: ${{ inputs.rct_workloads || 'app' }}
+        run: python3 kernel/scripts/ci_runner.py plan
+
+  build-ns3:
+    name: Build ns-3 & unit tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout copa-delta-repro
+        uses: actions/checkout@v4
+
+      - name: Run kernel/tcp_copa_auto C unit tests
+        run: make -C kernel/tcp_copa_auto test
+
+      - name: Install ns-3 build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build g++ pkg-config python3
+
+      - name: Cache ns-3 source & optimized build
+        id: ns3-cache
+        uses: actions/cache@v4
+        with:
+          path: ns3/ns-3
+          key: ns3-opt-${{ runner.os }}-${{ hashFiles('ns3/setup_ns3.sh', 'ns3/ns3-overlay/**') }}
+          restore-keys: |
+            ns3-opt-${{ runner.os }}-
+
+      - name: Fetch ns-3 base commit & apply ns3-overlay (on cache miss)
+        if: steps.ns3-cache.outputs.cache-hit != 'true'
+        run: |
+          BASE=84a73f9c00abf5e5b8aa676e1775261fb717c3ac
+          if [ ! -d ns3/ns-3/.git ]; then
+            mkdir -p ns3/ns-3
+            git -C ns3/ns-3 init -q
+            git -C ns3/ns-3 remote add origin https://github.com/nsnam/ns-3-dev-git.git
+            git -C ns3/ns-3 fetch --depth 1 origin "$BASE"
+            git -C ns3/ns-3 checkout -q FETCH_HEAD
+          fi
+          cp -R ns3/ns3-overlay/. ns3/ns-3/
+
+      - name: Copy shared Copa-Auto C core & tcp_copa_bench.cc into ns3/ns-3/scratch
+        run: |
+          cp ns3/tcp_copa_bench.cc ns3/ns-3/scratch/tcp_copa_bench.cc
+          cp kernel/tcp_copa_auto/copa_auto_core.h ns3/ns-3/scratch/copa_auto_core.h
+          cp kernel/tcp_copa_auto/copa_auto_math.h ns3/ns-3/scratch/copa_auto_math.h
+
+      - name: Configure & build tcp_copa_bench
+        working-directory: ns3/ns-3
+        run: |
+          if [ ! -f cmake-cache/build.ninja ] && [ ! -f cmake-cache/Makefile ]; then
+            ./ns3 configure --build-profile=optimized --disable-python --disable-werror \
+              --enable-modules=core,network,internet,point-to-point,applications,traffic-control
+          fi
+          ./ns3 build tcp_copa_bench
+
+      - name: Package ns-3 benchmark binary and shared libs
+        run: |
+          mkdir -p /tmp/ns3-dist/lib
+          BIN=$(find ns3/ns-3/build/scratch -maxdepth 1 -type f -name '*tcp_copa_bench*' -executable | head -n1)
+          test -n "$BIN"
+          cp "$BIN" /tmp/ns3-dist/tcp_copa_bench
+          chmod +x /tmp/ns3-dist/tcp_copa_bench
+          cp -a ns3/ns-3/build/lib/libns3*.so* /tmp/ns3-dist/lib/ || true
+
+      - name: Upload ns-3 binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ns3-bench-bin
+          path: /tmp/ns3-dist
+          retention-days: 1
+
+  ns3-eval:
+    name: ns3 (${{ matrix.shard }}, ${{ matrix.workload }})
+    needs: [plan, build-ns3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: Checkout copa-delta-repro
+        uses: actions/checkout@v4
+
+      - name: Download ns-3 binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ns3-bench-bin
+          path: /tmp/ns3-dist
+
+      - name: Run ns-3 benchmark shard (${{ matrix.shard }}, ${{ matrix.workload }})
+        env:
+          LD_LIBRARY_PATH: /tmp/ns3-dist/lib
+          MODE: ${{ needs.plan.outputs.mode }}
+          THETA: ${{ inputs.theta || '0.98' }}
+          JITTER_US: ${{ inputs.jitter_us || '-1' }}
+          REPEATS: ${{ inputs.repeats || '1' }}
+          PARALLEL: ${{ inputs.parallel || '' }}
+          QUEUES: ${{ inputs.queues || '' }}
+          NS3_CCS: ${{ inputs.ns3_ccs || '' }}
+          SHARD: ${{ matrix.shard }}
+          WORKLOAD: ${{ matrix.workload }}
+        run: |
+          chmod +x /tmp/ns3-dist/tcp_copa_bench
+          python3 kernel/scripts/ci_runner.py run-ns3 --bin /tmp/ns3-dist/tcp_copa_bench --out-dir /tmp/ns3_out
+
+      - name: Upload shard results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: results-ns3-${{ matrix.shard }}-${{ matrix.workload }}
+          path: /tmp/ns3_out
+
+  summarize:
+    name: Summarize ns-3 results
+    needs: [plan, ns3-eval]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout copa-delta-repro
+        uses: actions/checkout@v4
+
+      - name: Download all shard results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: results-ns3-*
+          path: /tmp/all_results
+
+      - name: Generate comparison summary
+        env:
+          MODE: ${{ needs.plan.outputs.mode }}
+        run: |
+          python3 kernel/scripts/ci_runner.py summarize --input-dir /tmp/all_results --out-dir /tmp/summary
+
+      - name: Upload summary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ns3-comparison-summary
+          path: /tmp/summary

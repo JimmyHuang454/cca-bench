@@ -425,6 +425,8 @@ bool g_slewing = false;                     ///< A delay decrease is in progress
 std::vector<Ptr<PacketSink>> g_sinks;           ///< One sink per flow
 std::vector<uint64_t> g_lastRx;                 ///< Bytes at the last bin, per flow
 std::vector<std::vector<double>> g_rttSamples;  ///< All RTT samples [ms], per flow
+std::vector<std::vector<double>> g_srttSamples; ///< Smoothed RTT updates for diagnostics
+std::ofstream g_rawRttLog; ///< Optional log of every valid ACK RTT sample
 std::vector<double> g_binRttSum;                ///< RTT sum in the current bin, per flow
 std::vector<uint32_t> g_binRttCount;            ///< RTT samples in the current bin
 std::vector<double> g_binLastRttSum;            ///< Sum of RTT samples (last RTT) in the bin
@@ -755,12 +757,21 @@ EndWarmup()
  * @param newVal new RTT sample
  */
 void
-LastRttTrace(uint32_t flow, Time oldVal [[maybe_unused]], Time newVal)
+LastRttTrace(uint32_t flow, Time newVal)
 {
     if (newVal.IsStrictlyPositive())
     {
         g_binLastRttSum[flow] += newVal.GetSeconds() * 1000.0;
         g_binLastRttCount[flow]++;
+        if (Simulator::Now().GetSeconds() > g_warmup)
+        {
+            g_rttSamples[flow].push_back(newVal.GetSeconds() * 1000.0);
+            if (g_rawRttLog.is_open())
+            {
+                g_rawRttLog << std::setprecision(12) << Simulator::Now().GetSeconds() << ","
+                            << flow << "," << newVal.GetSeconds() * 1000.0 << "\n";
+            }
+        }
     }
 }
 
@@ -783,7 +794,7 @@ RttTrace(uint32_t flow, Time oldVal [[maybe_unused]], Time newVal)
     g_binRttCount[flow]++;
     if (Simulator::Now().GetSeconds() > g_warmup)
     {
-        g_rttSamples[flow].push_back(ms);
+        g_srttSamples[flow].push_back(ms);
     }
 }
 
@@ -835,7 +846,7 @@ ConnectTraces(uint32_t nodeId, uint32_t flow)
     std::string path =
         "/NodeList/" + std::to_string(nodeId) + "/$ns3::TcpL4Protocol/SocketList/0/";
     Config::ConnectWithoutContext(path + "RTT", MakeBoundCallback(&RttTrace, flow));
-    Config::ConnectWithoutContext(path + "LastRTT", MakeBoundCallback(&LastRttTrace, flow));
+    Config::ConnectWithoutContext(path + "RttSample", MakeBoundCallback(&LastRttTrace, flow));
     Config::ConnectWithoutContext(path + "Retransmission", MakeBoundCallback(&RetxTrace, flow));
     if (flow == 0)
     {
@@ -878,6 +889,7 @@ main(int argc, char* argv[])
     std::string delayTrace;
     double traceOffset = 0.0;
     std::string prefix = "tcp-capacity";
+    bool rttSampleLog = false;
     double stopTime = 60.0;
     double capacity = 20.0; // Mbit/s
     double capMin = 5.0;
@@ -958,6 +970,7 @@ main(int argc, char* argv[])
     cmd.AddValue("sndBuf", "TCP send buffer [bytes]", sndBufBytes);
     cmd.AddValue("seed", "RNG seed", seed);
     cmd.AddValue("run", "RNG run number", run);
+    cmd.AddValue("rttSampleLog", "Write every valid ACK RTT sample to CSV", rttSampleLog);
     cmd.AddValue("freshLoss",
                  "Rate samples report only freshly lost data (TcpSocketBase::FreshLossAccounting)",
                  freshLoss);
@@ -1276,6 +1289,7 @@ main(int argc, char* argv[])
     g_lastRx.assign(n, 0);
     g_rxAtWarmup.assign(n, 0);
     g_rttSamples.assign(n, {});
+    g_srttSamples.assign(n, {});
     g_binRttSum.assign(n, 0.0);
     g_binRttCount.assign(n, 0);
     g_binLastRttSum.assign(n, 0.0);
@@ -1284,6 +1298,11 @@ main(int argc, char* argv[])
 
     // ---- Outputs and schedule ---------------------------------------------
     g_series.open(prefix + "-timeseries.csv");
+    if (rttSampleLog)
+    {
+        g_rawRttLog.open(prefix + "-rtt-samples.csv");
+        g_rawRttLog << "time_s,flow,rtt_ms\n";
+    }
     g_series << "time_s,capacity_mbps,outage";
     for (uint32_t i = 0; i < n; i++)
     {
@@ -1337,7 +1356,8 @@ main(int argc, char* argv[])
 
     std::ofstream json(prefix + "-metrics.json");
     json << std::fixed << std::setprecision(4);
-    json << "{\n  \"ccs\": \"" << ccs << "\", \"profile\": \"" << profile
+    json << "{\n  \"rtt_stats_version\": 2, \"rtt_source\": \"ack_rtt_samples\",\n"
+         << "  \"ccs\": \"" << ccs << "\", \"profile\": \"" << profile
          << "\", \"run\": " << run << ", \"queue_bytes\": " << queueBytes << ", \"aqm\": \""
          << aqm << "\", \"disruption\": \"" << disruption
          << "\", \"hold_overflow_bytes\": " << g_dataGate->GetOverflowBytes()
@@ -1355,18 +1375,32 @@ main(int argc, char* argv[])
             mean += x;
         }
         mean = r.empty() ? 0.0 : mean / r.size();
+        double srttMean = 0.0;
+        for (double x : g_srttSamples[i])
+        {
+            srttMean += x;
+        }
+        srttMean = g_srttSamples[i].empty() ? 0.0 : srttMean / g_srttSamples[i].size();
         double p50 = Percentile(r, 50);
         double p95 = Percentile(r, 95);
         double p99 = Percentile(r, 99);
         json << "    {\"flow\": " << i << ", \"cc\": \"" << flows[i]
              << "\", \"throughput_mbps\": " << tput[i] << ", \"retx\": " << g_retx[i]
+             << ", \"srtt_mean_ms\": " << srttMean << ", \"rtt_samples\": " << r.size()
              << ", \"rtt_mean_ms\": " << mean << ", \"rtt_p50_ms\": " << p50
              << ", \"rtt_p95_ms\": " << p95 << ", \"rtt_p99_ms\": " << p99 << "}"
              << (i + 1 < n ? "," : "") << "\n";
         std::cout << "flow " << i << " " << flows[i] << ": " << std::setprecision(3) << tput[i]
                   << " Mbps, rtt p95 " << p95 << " ms, retx " << g_retx[i] << std::endl;
     }
-    json << "  ]\n}\n";
+    std::vector<double> pooled;
+    for (const auto& samples : g_rttSamples)
+    {
+        pooled.insert(pooled.end(), samples.begin(), samples.end());
+    }
+    json << "  ],\n  \"rtt_p95_ms\": " << Percentile(pooled, 95)
+         << ", \"rtt_p99_ms\": " << Percentile(pooled, 99)
+         << ", \"rtt_samples\": " << pooled.size() << "\n}\n";
     std::cout << "capacity " << avgCap << " Mbps, utilisation " << (avgCap > 0 ? sum / avgCap : 0)
               << ", Jain " << jain << std::endl;
 

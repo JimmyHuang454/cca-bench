@@ -487,6 +487,7 @@ class TcpCopa : public TcpCongestionOps
     Time m_roundStart;          //!< Start of the current round
     uint32_t m_rounds{0};       //!< Rounds since the end of the slow start
     double m_segDqSum{0};       //!< Sum of dq over the ACKs of the settled rounds [s]
+    double m_segStandDqSum{0};  //!< Sum of unconsumed standing dq in non-idle settled rounds [s]
     uint32_t m_segAcks{0};      //!< ACKs of the settled rounds
     uint32_t m_segIdle{0};      //!< Those whose packet did not queue
     double m_segMaxGap{0};      //!< Longest gap between ACKs in the half-period [s]

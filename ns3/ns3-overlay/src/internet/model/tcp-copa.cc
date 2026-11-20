@@ -370,6 +370,7 @@ TcpCopa::Reset()
     m_roundStart = Seconds(0);
     m_rounds = 0;
     m_segDqSum = 0;
+    m_segStandDqSum = 0;
     m_segAcks = 0;
     m_segIdle = 0;
     m_segMaxGap = 0;
@@ -812,6 +813,12 @@ TcpCopa::UpdateAdaptiveDelta(Ptr<TcpSocketState> tcb,
         const bool settling = probe && (m_rounds / m_halfRounds) % m_probeEvery == 0;
         if (!settling && m_rounds % m_halfRounds >= m_settleRounds)
         {
+            if (m_roundIdle == 0 && m_roundMinRttUs > rttMinUs)
+            {
+                const double rMinDq = (m_roundMinRttUs - rttMinUs) * 1e-6;
+                const double rStand = std::max(0.0, rMinDq - std::max(m_jitter, 0.0));
+                m_segStandDqSum += rStand * m_roundAcks;
+            }
             m_segDqSum += m_roundDqSum;
             m_segAcks += m_roundAcks;
             m_segIdle += m_roundIdle;
@@ -883,11 +890,47 @@ TcpCopa::UpdateAdaptiveDelta(Ptr<TcpSocketState> tcb,
                     // Total utilization from the idle fraction, then k = c / mu
                     // from dq = j + k rho / (1 - rho).
                     m_rho = std::clamp(1.0 - 1.0 * m_segIdle / m_segAcks, 0.05, 0.98);
-                    const double queueing = std::max(segDq - m_jitter, 1e-5);
+                    const double bwEst = EstimateBw(now, srtt);
+                    const double mss = (tcb && tcb->m_segmentSize > 0) ? tcb->m_segmentSize : 1448.0;
+                    const double bdpPkts = (bwEst > 0.0) ? (bwEst * (rttMinUs * 1e-6) / mss) : 0.0;
+                    const double pktTime =
+                        (bdpPkts > 1.0) ? ((rttMinUs * 1e-6) / bdpPkts) : 0.0;
+                    const double segStand = std::max(0.0, floorShift - m_jitter);
+                    const double roundStand =
+                        (m_segAcks > 0 && m_jitter <= 2.0 * pktTime)
+                            ? (m_segStandDqSum / m_segAcks)
+                            : 0.0;
+                    const double rawQ = std::max(0.0, segDq - m_jitter);
+                    const double maxStand =
+                        std::min(std::max(0.0, rawQ - 1.5 * pktTime), 8.0 * pktTime);
+                    const double standDq =
+                        std::clamp(std::max(segStand, roundStand), 0.0, maxStand);
+                    const double effDq = std::max(0.0, segDq - m_jitter - standDq);
+                    const double floorDq =
+                        (bdpPkts > 1.0 && m_jitter > 0.0 && m_rho < 0.95 &&
+                         segDq <= m_jitter + 0.15 * m_jitter)
+                            ? std::max(1e-5, 0.15 * m_jitter * (1.0 - m_rho))
+                            : 1e-5;
+                    const double queueing = std::max(effDq, floorDq);
                     const double k = queueing * (1 - m_rho) / m_rho;
-                    m_ratio = (m_ratio <= 0) ? k
-                                             : std::exp((1 - m_weight) * std::log(m_ratio) +
-                                                        m_weight * std::log(k));
+                    if (m_ratio <= 0)
+                    {
+                        m_ratio = k;
+                    }
+                    else
+                    {
+                        double w = m_weight;
+                        if (bdpPkts > 1.0 && m_jitter > 1e-3 && segDq <= m_jitter && k < m_ratio)
+                        {
+                            w = 0.25 * m_weight;
+                        }
+                        else if (bdpPkts > 1.0 && m_segIdle == 0 &&
+                                 standDq < 0.3 * std::max(rawQ, 1e-5) && k < m_ratio)
+                        {
+                            w = 0.5 * m_weight;
+                        }
+                        m_ratio = std::exp((1 - w) * std::log(m_ratio) + w * std::log(k));
+                    }
                     m_baseRtt = rttMinUs * 1e-6 + m_jitter;
                     m_dqTarget = m_jitter + std::sqrt(m_ratio * m_baseRtt);
                     // delta <- 1 / (lambda dq*) = delta dq / dq* at equilibrium.
@@ -905,9 +948,6 @@ TcpCopa::UpdateAdaptiveDelta(Ptr<TcpSocketState> tcb,
                     {
                         // dq below the target: the same additive step of 1/delta for every flow
                         // near equilibrium, scaling the far-below-target slope on high-BDP links.
-                        const double bwEst = EstimateBw(now, srtt);
-                        const double mss = (tcb && tcb->m_segmentSize > 0) ? tcb->m_segmentSize : 1448.0;
-                        const double bdpPkts = (bwEst > 0.0) ? (bwEst * (rttMinUs * 1e-6) / mss) : 0.0;
                         const double farFrac = std::clamp((bdpPkts - 150.0) / 500.0, 0.0, 1.0);
                         const double slope =
                             (-err > std::log(m_farRatio))
@@ -922,6 +962,7 @@ TcpCopa::UpdateAdaptiveDelta(Ptr<TcpSocketState> tcb,
                 }
             }
             m_segDqSum = 0;
+            m_segStandDqSum = 0;
             m_segAcks = 0;
             m_segIdle = 0;
             m_segMaxGap = 0;
@@ -1237,14 +1278,19 @@ TcpCopa::FinishDrain(Ptr<TcpSocketState> tcb, uint64_t rttMinUs)
     m_lastNearlyEmpty = now;
 
     const bool hasProbeDq = (m_drainKind == DRAIN_MEASURE_JITTER && m_drainProbeAcks > 0);
-    const double probeDq = hasProbeDq ? (m_drainProbeDqSum / m_drainProbeAcks) : 0.0;
+    const uint64_t shiftThreshUs = std::max<uint64_t>(5000, rttMinUs * 15 / 100);
+    double probeDq = hasProbeDq ? (m_drainProbeDqSum / m_drainProbeAcks) : 0.0;
+    if (hasProbeDq && !m_drainCongested && m_drainFlatRounds >= 2 && m_drainMinRttUs > rttMinUs &&
+        (m_drainMinRttUs - rttMinUs) > shiftThreshUs)
+    {
+        probeDq = std::max(0.0, probeDq - (m_drainMinRttUs - rttMinUs) * 1e-6);
+    }
     const bool plateauConverged =
         !m_drainCongested &&
         m_drainKind == DRAIN_REFRESH_RTT_MIN &&
         !m_drainHasSlot &&
         m_drainFlatRounds >= 2 &&
         m_drainMinRttUs > 0;
-    const uint64_t shiftThreshUs = std::max<uint64_t>(5000, rttMinUs * 15 / 100);
     const bool baselineRose =
         plateauConverged &&
         m_drainMinRttUs > rttMinUs &&
@@ -1631,6 +1677,10 @@ TcpCopa::UpdateMode(uint64_t dqUs, uint64_t rttMinUs, uint64_t rttMaxUs, Time sr
         {
             nearlyEmpty = (dqS < 0.1 * spanS);
         }
+        if (!m_competitive && (m_lastAppLimited || (m_dqTarget > 0.0 && dqS <= 1.15 * m_dqTarget)))
+        {
+            nearlyEmpty = true;
+        }
     }
     else
     {
@@ -1886,10 +1936,21 @@ TcpCopa::OnPacketAcked(Ptr<TcpSocketState> tcb, uint32_t ackedBytes)
     {
         // A probe/drain interrupted by the competitive mode is not restored
         AbortDrain();
-        // Additive increase of 1/delta: one packet per RTT.
-        const double ackedPkts = 1.0 * ackedBytes / tcb->m_segmentSize;
-        const double cwndPkts = std::max(1.0, 1.0 * tcb->m_cWnd.Get() / tcb->m_segmentSize);
-        m_delta = 1.0 / (1.0 / m_delta + ackedPkts / cwndPkts);
+        // Additive increase of 1/delta: one packet per RTT (capped on deep-buffer bloat).
+        const uint64_t bloatCeilUs = std::max<uint64_t>(90000, 3 * rttMinUs);
+        if (m_adaptive && m_delta < 0.05 && delayUs > bloatCeilUs)
+        {
+            if (delayUs > bloatCeilUs * 3 / 2)
+            {
+                m_delta = std::min(0.05, m_delta * 1.05);
+            }
+        }
+        else
+        {
+            const double ackedPkts = 1.0 * ackedBytes / tcb->m_segmentSize;
+            const double cwndPkts = std::max(1.0, 1.0 * tcb->m_cWnd.Get() / tcb->m_segmentSize);
+            m_delta = 1.0 / (1.0 / m_delta + ackedPkts / cwndPkts);
+        }
     }
 
     bool increaseCwnd;
@@ -1901,7 +1962,14 @@ TcpCopa::OnPacketAcked(Ptr<TcpSocketState> tcb, uint32_t ackedBytes)
     else
     {
         const double targetRate = (1.0 * tcb->m_segmentSize * 1e6) / (m_delta * delayUs);
-        const double currentRate = (1.0 * tcb->m_cWnd.Get() * 1e6) / rttStandingUs;
+        double effStandingUs = static_cast<double>(rttStandingUs);
+        if (!m_competitive && m_adaptive && (m_lastAppLimited || delayUs > 200000))
+        {
+            const double maxQUs =
+                std::max({1.5 * m_dqTarget * 1e6, 0.5 * static_cast<double>(rttMinUs), 20000.0});
+            effStandingUs = std::max(1.0, std::min(effStandingUs, rttMinUs + maxQUs));
+        }
+        const double currentRate = (1.0 * tcb->m_cWnd.Get() * 1e6) / effStandingUs;
         increaseCwnd = (targetRate >= currentRate);
     }
 
