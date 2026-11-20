@@ -5,7 +5,7 @@
 ## 目录结构
 
 ```text
-copa-auto-bench/
+CCAs-bench/
 ├── kernel/
 │   ├── tcp_copa_auto/           # Copa-Auto 内核 TCP 模块（copa_auto / _nc / _t90 / _t98 / _t / copa_orig）
 │   └── tcp_leocc/               # LeoCC 内核 TCP 模块（SpaceNetLab/LeoCC 移植至 Linux 6.x 主线）

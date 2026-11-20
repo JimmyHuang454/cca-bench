@@ -491,16 +491,125 @@ def cmd_run_kernel(args: argparse.Namespace) -> int:
             f.close()
 
 
+HEAVY_SHARD_PATTERNS = (
+    "*.downlink.log",
+    "*.server.log",
+    "*.iperf.json",
+    "server.log",
+    "manager.log",
+    "process_report.log",
+    "shard_eval.md",
+)
+
+
+def list_run_result_artifacts(run_id: str, repo: str, prefix: str = "results-") -> list[str]:
+    """List non-expired GitHub Actions artifacts for a workflow run matching prefix."""
+    endpoint = f"repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100"
+    out = subprocess.check_output(
+        [
+            "gh", "api", "--paginate", endpoint,
+            "--jq", f'.artifacts[] | select(.expired == false and (.name | startswith("{prefix}"))) | .name',
+        ],
+        text=True,
+    )
+    names: list[str] = []
+    seen: set[str] = set()
+    for line in out.splitlines():
+        name = line.strip()
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    return sorted(names)
+
+
+def compact_shard_dir(shard_dir: pathlib.Path) -> int:
+    """Pre-aggregate a downloaded shard into shard_eval.csv and remove large raw logs."""
+    subprocess.run(
+        [
+            sys.executable, str(SCRIPTS_DIR / "mahimahi_eval.py"),
+            "--input-dir", str(shard_dir),
+            "--out-csv", str(shard_dir / "shard_eval.csv"),
+            "--out-md", str(shard_dir / "shard_eval.md"),
+            "--min-rtt-ms", "20.0",
+            "--bulk-warmup-s", "5.0",
+        ],
+        check=True,
+    )
+    freed_bytes = 0
+    for pattern in HEAVY_SHARD_PATTERNS:
+        for path in shard_dir.rglob(pattern):
+            if path.is_file():
+                try:
+                    freed_bytes += path.stat().st_size
+                except OSError:
+                    pass
+                path.unlink(missing_ok=True)
+    return freed_bytes
+
+
+def fetch_and_compact_artifacts(run_id: str, repo: str, input_dir: pathlib.Path) -> int:
+    """Download results-* artifacts one by one, pre-aggregate, and delete raw logs to bound disk usage."""
+    if not repo:
+        raise RuntimeError("Missing GitHub repository (--repo or GITHUB_REPOSITORY) for --run-id download")
+    names = list_run_result_artifacts(run_id, repo)
+    if not names:
+        raise RuntimeError(f"No non-expired results-* artifacts found for {repo} run {run_id}")
+
+    input_dir.mkdir(parents=True, exist_ok=True)
+    total_freed = 0
+    print(f"Streaming {len(names)} artifacts from {repo} run {run_id}...", flush=True)
+    for idx, name in enumerate(names, 1):
+        shard_dir = input_dir / name
+        if shard_dir.exists():
+            shutil.rmtree(shard_dir)
+        shard_dir.mkdir(parents=True, exist_ok=True)
+
+        dl_cmd = [
+            "gh", "run", "download", run_id,
+            "--repo", repo,
+            "--name", name,
+            "--dir", str(shard_dir),
+        ]
+        for attempt in range(3):
+            try:
+                subprocess.run(dl_cmd, check=True)
+                break
+            except subprocess.CalledProcessError:
+                if attempt == 2:
+                    raise
+                shutil.rmtree(shard_dir, ignore_errors=True)
+                shard_dir.mkdir(parents=True, exist_ok=True)
+                time.sleep(3 * (attempt + 1))
+
+        freed = compact_shard_dir(shard_dir)
+        total_freed += freed
+        print(
+            f"[{idx}/{len(names)}] Compacted {name} (freed {freed / (1024 * 1024):.1f} MiB)",
+            flush=True,
+        )
+    print(
+        f"Finished streaming {len(names)} artifacts (total freed: {total_freed / (1024 * 1024):.1f} MiB)",
+        flush=True,
+    )
+    return len(names)
+
+
 def cmd_summarize(args: argparse.Namespace) -> int:
     mode = os.environ.get("MODE", "")
+    input_dir = pathlib.Path(args.input_dir)
     out_dir = pathlib.Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     summary_md = out_dir / "comparison_summary.md"
 
+    run_id = (args.run_id or "").strip()
+    if run_id:
+        repo = (args.repo or os.environ.get("GITHUB_REPOSITORY", "")).strip()
+        fetch_and_compact_artifacts(run_id, repo, input_dir)
+
     subprocess.run(
         [
             sys.executable, str(SCRIPTS_DIR / "mahimahi_eval.py"),
-            "--input-dir", args.input_dir,
+            "--input-dir", str(input_dir),
             "--out-csv", str(out_dir / "comparison_summary.csv"),
             "--out-md", str(summary_md),
             "--min-rtt-ms", "20.0",
@@ -511,7 +620,7 @@ def cmd_summarize(args: argparse.Namespace) -> int:
 
     rct_cmd = [
         sys.executable, str(SCRIPTS_DIR / "mahimahi_rct.py"),
-        "--input-dir", args.input_dir,
+        "--input-dir", str(input_dir),
         "--out-dir", str(out_dir),
     ]
     if mode in ("rct", "rct-datasets", "full", "lumos-5g-all", "lumos-4g-all", "lumos-all"):
@@ -548,6 +657,8 @@ def main() -> int:
     p_sum = sub.add_parser("summarize")
     p_sum.add_argument("--input-dir", default="/tmp/all_results")
     p_sum.add_argument("--out-dir", default="/tmp/summary")
+    p_sum.add_argument("--run-id", default="", help="Optional GitHub Actions run ID to stream-download results-* artifacts from")
+    p_sum.add_argument("--repo", default="", help="Optional GitHub owner/repo for --run-id (defaults to GITHUB_REPOSITORY)")
 
     args = parser.parse_args()
     return {

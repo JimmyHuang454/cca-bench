@@ -266,9 +266,73 @@ def mean_valid(rows: list[dict[str, Any]], key: str) -> float:
     return (sum(vals) / len(vals)) if vals else math.nan
 
 
+CSV_INT_FIELDS = {"requests", "retrans_pkts"}
+CSV_FLOAT_FIELDS = {
+    "duration_s",
+    "capacity_mbps",
+    "throughput_mbps",
+    "utilization",
+    "qdelay_avg_ms",
+    "qdelay_p95_ms",
+    "base_rtt_ms",
+    "est_rtt_ms",
+    "util_power",
+    "norm_power",
+    "tput_power",
+    "drop_rate",
+    "rct_mean_ms",
+    "rct_p50_ms",
+    "rct_p95_ms",
+    "retrans_ratio",
+    "mortise_qoe",
+    "quic_loss_ratio",
+    "quic_rtt_ms",
+}
+
+
+def record_key(row: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return (
+        str(row.get("stack", "")),
+        str(row.get("workload", "")),
+        str(row.get("trace", "")),
+        str(row.get("queue_bytes", "")),
+        str(row.get("cc", "")),
+        str(row.get("repeat", "1")),
+    )
+
+
+def load_shard_csv(path: Path) -> list[dict[str, Any]]:
+    """Load pre-aggregated per-shard evaluation rows written by mahimahi_eval.py."""
+    rows: list[dict[str, Any]] = []
+    with path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for raw in reader:
+            row: dict[str, Any] = {}
+            for k, v in raw.items():
+                if k is None:
+                    continue
+                if v is None or v == "":
+                    continue
+                if k in CSV_INT_FIELDS:
+                    try:
+                        row[k] = int(float(v))
+                    except ValueError:
+                        continue
+                elif k in CSV_FLOAT_FIELDS:
+                    try:
+                        row[k] = float(v)
+                    except ValueError:
+                        row[k] = math.nan
+                else:
+                    row[k] = v
+            if row:
+                rows.append(row)
+    return rows
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Analyze Mahimahi logs and RCT CSVs.")
-    parser.add_argument("--input-dir", required=True, type=Path, help="Directory with *.downlink.log and *.rct.csv")
+    parser.add_argument("--input-dir", required=True, type=Path, help="Directory with *.downlink.log, shard_eval.csv, and *.rct.csv")
     parser.add_argument("--out-csv", required=True, type=Path, help="Output summary CSV")
     parser.add_argument("--out-md", required=True, type=Path, help="Output summary Markdown")
     parser.add_argument("--min-rtt-ms", type=float, default=20.0, help="Base propagation RTT in ms")
@@ -278,6 +342,7 @@ def main() -> None:
 
     logs = sorted(args.input_dir.rglob("*.downlink.log"))
     records: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str, str, str, str, str]] = set()
 
     for log_path in logs:
         stem = log_path.name[: -len(".downlink.log")]
@@ -302,7 +367,19 @@ def main() -> None:
                 row["quic_loss_ratio"] = sdata["lost_packets"] / sdata["sent_packets"]
                 row["quic_rtt_ms"] = sdata.get("rtt_ms")
 
+        seen_keys.add(record_key(row))
         records.append(row)
+
+    out_csv_resolved = args.out_csv.resolve()
+    for shard_csv in sorted(args.input_dir.rglob("shard_eval.csv")):
+        if shard_csv.resolve() == out_csv_resolved:
+            continue
+        for row in load_shard_csv(shard_csv):
+            rk = record_key(row)
+            if rk in seen_keys:
+                continue
+            seen_keys.add(rk)
+            records.append(row)
 
     args.out_csv.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [

@@ -93,6 +93,11 @@ on:
         required: false
         default: "8M"
         type: string
+      summarize_run_id:
+        description: "Optional existing workflow run ID to summarize only (skips quinn-eval/kernel-eval; e.g. 44507925359)"
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: mahimahi-compare-${{ github.ref }}
@@ -116,7 +121,7 @@ jobs:
   quinn-eval:
     name: quinn (${{ matrix.shard }}, ${{ matrix.workload }})
     needs: plan
-    if: ${{ inputs.run_quinn == true }}
+    if: ${{ inputs.summarize_run_id == '' && inputs.run_quinn == true }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -178,7 +183,7 @@ jobs:
   kernel-eval:
     name: kernel (${{ matrix.shard }}, ${{ matrix.workload }})
     needs: plan
-    if: ${{ github.event_name == 'push' || inputs.run_kernel }}
+    if: ${{ inputs.summarize_run_id == '' && (github.event_name == 'push' || inputs.run_kernel) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     strategy:
@@ -276,21 +281,28 @@ jobs:
   summarize:
     name: Unified Comparison Summary
     needs: [plan, quinn-eval, kernel-eval]
-    if: ${{ !cancelled() && (needs.quinn-eval.result != 'skipped' || needs.kernel-eval.result != 'skipped') }}
+    if: ${{ !cancelled() && (inputs.summarize_run_id != '' || needs.quinn-eval.result != 'skipped' || needs.kernel-eval.result != 'skipped') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download all shard results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: results-*
-          path: /tmp/all_results
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h / /tmp
 
-      - name: Analyze and write summary
+      - name: Stream-download, analyze, and write summary
         env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
           MODE: ${{ needs.plan.outputs.mode }}
-        run: python3 scripts/ci_runner.py summarize --input-dir /tmp/all_results --out-dir /tmp/summary
+          TARGET_RUN_ID: ${{ inputs.summarize_run_id || github.run_id }}
+        run: |
+          python3 scripts/ci_runner.py summarize \
+            --run-id "$TARGET_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --input-dir /tmp/all_results \
+            --out-dir /tmp/summary
 
       - name: Upload unified comparison summary
         uses: actions/upload-artifact@v4
