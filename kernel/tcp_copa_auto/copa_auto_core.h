@@ -203,6 +203,11 @@ struct copa_auto_state {
     u64 drain_probe_dq_sum_us;
     u64 drain_probe_acks;
     u64 trusted_min_us;
+    u64 valid_after_us;
+    u64 loaded_since_us;
+    u64 low_window_us, low_min_us;
+    u32 low_samples, low_windows, raised_windows;
+    u64 raised_min_us, low_dq_sum_us;
     u64 last_app_idle_us;
     u64 drain_backoff_slots;
     u64 next_drain_slot;
@@ -213,6 +218,7 @@ struct copa_auto_state {
     bool has_jitter;
     u64 jitter_us;
     u64 ratio_us;          /* k = c / mu [us] */
+    u64 pending_k_us;
     u32 rho_milli;         /* [50, 980] */
     u64 base_rtt_us;
     u64 dq_target_us;
@@ -430,6 +436,50 @@ static inline void copa_record_aligned_probe(struct copa_auto_state *ca, u64 pro
     ca->aligned_probe_seen = true;
 }
 
+/* Aggregate independent low-flight standing minima. A single RTT can seed
+ * the floor, but cannot identify the mean excess above it. */
+static inline void copa_observe_low(struct copa_auto_state *ca, u64 now,
+                                    u64 rtt, bool low_flight)
+{
+    u64 base = ca->trusted_min_us;
+    u64 span = max_t(u64, base / 2, 1000);
+    if (!low_flight || !ca->low_samples || now - ca->low_window_us > 2 * span) {
+        ca->low_samples = 0;
+        ca->low_window_us = now;
+        ca->low_min_us = rtt;
+    }
+    if (!low_flight)
+        return;
+    ca->low_min_us = min_t(u64, ca->low_min_us, rtt);
+    ca->low_samples++;
+    if (ca->low_samples < 2 || now - ca->low_window_us < span)
+        return;
+    ca->low_samples = 0;
+    if (ca->low_min_us > base + ca->jitter_us + max_t(u64, 5000, base / 4)) {
+        ca->raised_min_us = ca->raised_windows ? min_t(u64, ca->raised_min_us, ca->low_min_us) : ca->low_min_us;
+        if (++ca->raised_windows >= 3) {
+            ca->trusted_min_us = ca->raised_min_us;
+            copa_minmax_reset(&ca->rtt_min, now, ca->trusted_min_us);
+            ca->raised_windows = 0;
+            ca->has_jitter = ca->first_probe_done = false;
+            ca->pending_k_us = ca->jitter_us = ca->ratio_us = ca->delta_run_q20 = 0;
+            ca->stable = ca->aligned_probe_seen = false;
+            ca->low_windows = ca->low_dq_sum_us = 0;
+            copa_reset_segment(ca);
+        }
+        return;
+    }
+    ca->raised_windows = 0;
+    ca->low_dq_sum_us += ca->low_min_us > base ? ca->low_min_us - base : 0;
+    if (++ca->low_windows == 3) {
+        u64 j = min_t(u64, ca->low_dq_sum_us / 3, COPA_MAX_JITTER_US);
+        ca->jitter_us = ca->has_jitter ? (3 * ca->jitter_us + j) / 4 : j;
+        ca->has_jitter = ca->first_probe_done = true;
+        ca->last_app_idle_us = now;
+        ca->low_windows = ca->low_dq_sum_us = 0;
+    }
+}
+
 static inline void copa_update_delta(struct copa_auto_state *ca,
                                      u64 seg_dq_us,
                                      u64 rtt_min_us,
@@ -474,7 +524,16 @@ static inline void copa_update_delta(struct copa_auto_state *ca,
     k_us = max_t(u64, div64_u64(queueing * (1000ULL - rho_milli), rho_milli), 1ULL);
 
     if (ca->ratio_us == 0) {
-        ratio_us = k_us;
+        if (rho_milli == 50 || rho_milli == 980)
+            return;
+        if (!ca->pending_k_us) {
+            ca->pending_k_us = k_us;
+            return;
+        }
+        ratio_us = (ca->pending_k_us + k_us) / 2;
+        ca->pending_k_us = 0;
+    } else if (rho_milli == 50 || rho_milli == 980) {
+        ratio_us = ca->ratio_us;
     } else {
         /* weight in milli: default 300 (0.30); left-censored 75; right-censored 150 */
         u32 w_milli = 300;
@@ -595,8 +654,6 @@ static inline void copa_finish_drain(struct copa_auto_state *ca,
             }
             if (ca->drain_has_slot)
                 copa_record_aligned_probe(ca, mean_dq, new_base);
-        } else if (!ca->first_probe_done) {
-            ca->first_probe_done = true;
         }
         ca->rounds -= ca->rounds % 8;
         copa_reset_segment(ca);
@@ -607,6 +664,7 @@ static inline void copa_finish_drain(struct copa_auto_state *ca,
             if (ca->has_probing_slot && ca->probing_slot == ca->drain_slot)
                 ca->has_probing_slot = false;
         }
+        ca->loaded_since_us = now_us;
         ca->drain_backoff_slots = 1;
     } else {
         u64 imp_tol = max_t(u64, 1000ULL, ca->drain_rtt_min_start_us / 50);
@@ -634,7 +692,8 @@ static inline void copa_finish_drain(struct copa_auto_state *ca,
         }
     }
 
-    if (ca->drain_saved_rate_bps > 0 && srtt_us > 0) {
+    if (ca->drain_saved_rate_bps > 0 && srtt_us > 0 &&
+        srtt_us <= 4 * max_t(u64, ca->standing_us, 1000)) {
         ca->drain_phase = COPA_PHASE_RECOVERING;
         ca->recover_until_us = now_us + srtt_us;
         ca->recover_rate_cap_bps = ca->drain_saved_rate_bps;
@@ -688,7 +747,7 @@ static inline void copa_start_drain(struct copa_auto_state *ca,
     ca->drain_has_slot = has_slot;
     ca->drain_slot = slot;
     ca->drain_start_us = now_us;
-    ca->drain_deadline_us = now_us + dl;
+    ca->drain_deadline_us = now_us + min_t(u64, dl, COPA_PROBE_DUR_MAX_US);
     ca->drain_idle_at_us = 0;
     ca->drain_measure_until_us = 0;
     ca->drain_rtt_min_start_us = rtt_min_us;
@@ -710,6 +769,10 @@ static inline void copa_on_loss(struct copa_auto_state *ca, u64 now_us, bool per
         ca->drain_congested = true;
 
     if (persistent) {
+        ca->valid_after_us = now_us;
+        ca->loaded_since_us = 0;
+        ca->low_samples = 0;
+        ca->seg_probe = true;
         ca->drain_phase = COPA_PHASE_NORMAL;
         ca->cwnd_q10 = (u64)COPA_MIN_CWND_PKTS << 10;
         ca->slow_start = true;
@@ -786,7 +849,7 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
                               u32 acked_pkts,
                               u32 mss,
                               u64 rate_bps,
-                              bool app_limited)
+                              bool app_limited, bool low_flight)
 {
     u64 prev_time = ca->last_time_us;
     u64 idle_thresh = max_t(u64, 4ULL * max_t(u64, srtt_us, 10000ULL), 300000ULL);
@@ -798,6 +861,31 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
     if (srtt_us == 0)
         srtt_us = rtt_sample_us;
     ca->srtt_us = srtt_us;
+
+    if (ca->cfg.adaptive) {
+        u64 base = ca->trusted_min_us;
+        if (base && now_us - prev_time >= max_t(u64, 300000, 8 * base)) {
+            /* A small RTT after an application pause is already fresh. */
+            ca->valid_after_us = rtt_sample_us > 4 * base ? now_us : prev_time;
+            ca->drain_phase = COPA_PHASE_NORMAL;
+            ca->loaded_since_us = 0;
+            ca->low_samples = 0;
+            ca->seg_probe = true;
+        }
+        if (!rtt_sample_us || (ca->valid_after_us &&
+            rtt_sample_us > now_us - ca->valid_after_us))
+            return (u32)(ca->cwnd_q10 >> 10);
+        if (!base || rtt_sample_us < base)
+            ca->trusted_min_us = rtt_sample_us;
+        if (app_limited || srtt_us > 4 * rtt_sample_us) {
+            ca->loaded_since_us = 0;
+        } else if (!ca->loaded_since_us) {
+            ca->loaded_since_us = now_us;
+        }
+        copa_observe_low(ca, now_us, rtt_sample_us, low_flight &&
+                         ca->drain_phase == COPA_PHASE_NORMAL && !ca->competitive &&
+                         srtt_us <= 4 * rtt_sample_us);
+    }
 
     /* Application-idle restart (BBR-style RestartFromIdle) */
     if (ca->cfg.adaptive && !ca->slow_start && !ca->competitive &&
@@ -825,7 +913,7 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
     if (ca->drain_phase == COPA_PHASE_RECOVERING && now_us >= ca->recover_until_us) {
         ca->drain_phase = COPA_PHASE_NORMAL;
     } else if (ca->drain_phase == COPA_PHASE_DRAINING && now_us >= ca->drain_deadline_us) {
-        u64 rm = copa_minmax_get(&ca->rtt_min);
+        u64 rm = ca->trusted_min_us;
         copa_finish_drain(ca, now_us, srtt_us, rm ? rm : ca->drain_rtt_min_start_us, mss);
     }
 
@@ -836,6 +924,8 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
                       : COPA_MIN_RTT_WIN_US;
 
     rtt_min_us = copa_minmax_running_min(&ca->rtt_min, min_rtt_win, now_us, rtt_sample_us);
+    if (ca->cfg.adaptive)
+        rtt_min_us = ca->trusted_min_us;
     standing_us = copa_minmax_running_min(&ca->rtt_standing, max_t(u64, srtt_us / 2, 1000ULL),
                                           now_us, rtt_sample_us);
     copa_minmax_running_max(&ca->rtt_max, max_t(u64, 4ULL * srtt_us, 1000ULL),
@@ -886,7 +976,7 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
             ca->in_app_idle = false;
         }
         ca->last_ack_us = now_us;
-        if (excluded)
+        if (excluded || srtt_us > 4 * rtt_sample_us)
             ca->seg_probe = true;
 
         /* Board coordination for aligned 20 s slots */
@@ -1024,9 +1114,6 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
             if (ca->drain_phase == COPA_PHASE_DRAINING) {
                 u64 elapsed = (now_us > ca->drain_start_us) ? (now_us - ca->drain_start_us) : 0;
                 u64 min_hold = max_t(u64, srtt_us, 20000ULL);
-                u64 budget = (ca->drain_deadline_us > ca->drain_start_us)
-                                 ? (ca->drain_deadline_us - ca->drain_start_us)
-                                 : 1;
                 bool sampling, done;
 
                 if (ca->drain_min_rtt_us == 0 || rtt_sample_us < ca->drain_min_rtt_us)
@@ -1059,7 +1146,7 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
                     }
                 }
                 sampling = (ca->drain_kind == COPA_DRAIN_MEASURE_J) &&
-                           (ca->drain_idle_at_us > 0 || elapsed >= budget / 2);
+                           ca->drain_idle_at_us > 0 && !ca->drain_congested;
                 if (sampling) {
                     ca->drain_probe_dq_sum_us += dq_us;
                     ca->drain_probe_acks++;
@@ -1079,7 +1166,9 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
                     ca->cwnd_q10 = max_t(u64, ca->cwnd_q10, (u64)COPA_MIN_CWND_PKTS << 10);
                     return (u32)(ca->cwnd_q10 >> 10);
                 }
-            } else if (ca->drain_phase == COPA_PHASE_NORMAL && !app_limited) {
+            } else if (ca->drain_phase == COPA_PHASE_NORMAL && ca->loaded_since_us &&
+                       now_us - ca->loaded_since_us >= max_t(u64, 3 * srtt_us, 200000) &&
+                       (!ca->last_app_idle_us || now_us - ca->last_app_idle_us >= COPA_DRAIN_SKIP_US)) {
                 if (ca->handover_drain_pending) {
                     ca->handover_drain_pending = false;
                     if (bdp_pkts > 0 && (ca->cwnd_q10 >> 10) < (bdp_pkts * 3) / 4) {

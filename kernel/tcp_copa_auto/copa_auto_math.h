@@ -150,7 +150,7 @@ static inline u64 copa_exp_q16(s64 x_q16)
     r = x_q16 - k * COPA_LN2_Q16; /* in Q16, |r| <= 22713 */
 
     /* Evaluate exp(r) in Q24 for high precision */
-    r <<= 8; /* Q24 */
+    r *= 256; /* Q24 */
     sum = 1LL << 24;
     term = r;
     sum += term;

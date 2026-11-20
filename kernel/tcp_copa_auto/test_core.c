@@ -92,7 +92,7 @@ static void test_slow_start_and_steady(void)
 	/* 50 ACKs with zero queueing: slow start should grow cwnd monotonically */
 	for (i = 0; i < 50; i++) {
 		now += 1000ULL;
-		cwnd = copa_on_ack(&ca, now, 30000ULL, 30000ULL, 1, 1448, 12500000ULL, false);
+		cwnd = copa_on_ack(&ca, now, 30000ULL, 30000ULL, 1, 1448, 12500000ULL, false, false);
 	}
 	assert(ca.slow_start == true);
 	assert(cwnd >= 50);
@@ -100,7 +100,7 @@ static void test_slow_start_and_steady(void)
 	/* Sustained 25 ms queueing (> jguard = 15 ms) should exit slow start */
 	for (i = 0; i < 40; i++) {
 		now += 2000ULL;
-		cwnd = copa_on_ack(&ca, now, 55000ULL, 40000ULL, 1, 1448, 12500000ULL, false);
+		cwnd = copa_on_ack(&ca, now, 55000ULL, 40000ULL, 1, 1448, 12500000ULL, false, false);
 	}
 	assert(ca.slow_start == false);
 	assert(cwnd >= COPA_MIN_CWND_PKTS);
@@ -133,13 +133,13 @@ static void test_restart_from_idle_and_k_estimation(void)
 	for (i = 0; i < 200; i++) {
 		u64 rtt = 30000ULL + ((i % 10 == 0) ? 0ULL : 4000ULL);
 		now += 5000ULL;
-		cwnd = copa_on_ack(&ca, now, rtt, 32000ULL, 2, 1448, 12500000ULL, false);
+		cwnd = copa_on_ack(&ca, now, rtt, 32000ULL, 2, 1448, 12500000ULL, false, false);
 	}
 	(void)cwnd;
 	/* Force exit slow start */
 	for (i = 0; i < 30; i++) {
 		now += 5000ULL;
-		copa_on_ack(&ca, now, 60000ULL, 45000ULL, 2, 1448, 12500000ULL, false);
+		copa_on_ack(&ca, now, 60000ULL, 45000ULL, 2, 1448, 12500000ULL, false, false);
 	}
 	assert(!ca.slow_start);
 
@@ -147,7 +147,7 @@ static void test_restart_from_idle_and_k_estimation(void)
 	for (i = 0; i < 600; i++) {
 		u64 rtt = 30000ULL + ((i % 6 == 0) ? 200ULL : 6000ULL);
 		now += 15000ULL;
-		copa_on_ack(&ca, now, rtt, 34000ULL, 2, 1448, 12500000ULL, false);
+		copa_on_ack(&ca, now, rtt, 34000ULL, 2, 1448, 12500000ULL, false, false);
 	}
 	assert(ca.ratio_us > 0);
 	assert(ca.dq_target_us > 0);
@@ -156,9 +156,9 @@ static void test_restart_from_idle_and_k_estimation(void)
 
 	/* App-limited then 500 ms idle -> RestartFromIdle should re-enter slow start */
 	now += 10000ULL;
-	copa_on_ack(&ca, now, 30000ULL, 30000ULL, 1, 1448, 12500000ULL, true);
+	copa_on_ack(&ca, now, 30000ULL, 30000ULL, 1, 1448, 12500000ULL, true, false);
 	now += 500000ULL;
-	cwnd = copa_on_ack(&ca, now, 30000ULL, 30000ULL, 1, 1448, 12500000ULL, false);
+	cwnd = copa_on_ack(&ca, now, 30000ULL, 30000ULL, 1, 1448, 12500000ULL, false, false);
 	assert(ca.slow_start == true);
 	assert(cwnd >= 10);
 
@@ -184,15 +184,66 @@ static void test_copa_orig_fixed_delta(void)
 	copa_state_init(&ca, cfg, &board, now, 10);
 	for (i = 0; i < 100; i++) {
 		now += 10000ULL;
-		copa_on_ack(&ca, now, 30000ULL + (i % 5) * 1000ULL, 32000ULL, 1, 1448, 1250000ULL, false);
+		copa_on_ack(&ca, now, 30000ULL + (i % 5) * 1000ULL, 32000ULL, 1, 1448, 1250000ULL, false, false);
 	}
 	assert(ca.delta_q20 == COPA_DELTA_MAX_Q20);
 	assert(ca.delta_run_q20 == 0);
 	printf("[PASS] test_copa_orig_fixed_delta\n");
 }
 
+static void test_passive_observations(void)
+{
+    struct copa_auto_state ca;
+    struct copa_auto_cfg cfg = { .adaptive = true, .theta_milli = 500,
+                                 .init_delta_q20 = COPA_DELTA_INIT_Q20 };
+    u64 now = 1000000;
+    int i;
+
+    copa_state_init(&ca, cfg, NULL, now, 10);
+    copa_on_ack(&ca, now, 20000, 20000, 1, 1448, 0, true, true);
+    assert(ca.trusted_min_us == 20000 && !ca.has_jitter && !ca.ratio_us);
+    for (i = 0; i < 3; i++) {
+        now += 100000;
+        copa_on_ack(&ca, now, 23000, 23000, 1, 1448, 0, true, true);
+        now += 11000;
+        copa_on_ack(&ca, now, 24000, 23000, 1, 1448, 0, true, true);
+    }
+    assert(ca.has_jitter && ca.jitter_us == 3000 && !ca.ratio_us);
+    for (i = 0; i < 3; i++) {
+        now += 100000;
+        copa_on_ack(&ca, now, 45000, 45000, 1, 1448, 0, true, true);
+        now += 11000;
+        copa_on_ack(&ca, now, 46000, 45000, 1, 1448, 0, true, true);
+    }
+    assert(ca.trusted_min_us == 45000 && !ca.has_jitter);
+    puts("[PASS] passive floor, jitter and sustained path change");
+}
+
+static void test_outage_samples(void)
+{
+    struct copa_auto_state ca;
+    struct copa_auto_cfg cfg = { .adaptive = true, .theta_milli = 500,
+                                 .init_delta_q20 = COPA_DELTA_INIT_Q20 };
+    u64 now = 1000000;
+
+    copa_state_init(&ca, cfg, NULL, now, 10);
+    copa_on_ack(&ca, now, 22000, 22000, 1, 1448, 0, false, false);
+    ca.slow_start = false;
+    now += 11000000;
+    copa_on_ack(&ca, now, 11000000, 9700000, 1, 1448, 0, false, false);
+    copa_on_ack(&ca, now + 1000, 0, 9700000, 1, 1448, 0, false, false);
+    copa_on_ack(&ca, now + 23000, 22000, 9700000, 1, 1448, 0, false, false);
+    assert(ca.trusted_min_us == 22000 && ca.standing_us == 22000);
+    assert(!ca.loaded_since_us && !ca.has_jitter && !ca.ratio_us);
+    assert(ca.drain_phase == COPA_PHASE_NORMAL);
+    assert(copa_pacing_rate_bps(&ca, 1448, now + 23000) > 100000);
+    puts("[PASS] outage, missing RTT and stale SRTT");
+}
+
 int main(void)
 {
+	test_passive_observations();
+	test_outage_samples();
 	test_math_ln_exp();
 	test_target_dq();
 	test_slow_start_and_steady();

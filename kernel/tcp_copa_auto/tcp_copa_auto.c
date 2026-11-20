@@ -211,8 +211,8 @@ static void tcp_copa_cong_control(struct sock *sk,
 
 	now_us = tcp_copa_now_us(tp);
 	srtt_us = tp->srtt_us >> 3;
-	rtt_sample_us = (rs && rs->rtt_us > 0) ? (u64)rs->rtt_us : srtt_us;
-	if (rtt_sample_us == 0)
+	rtt_sample_us = (rs && rs->rtt_us > 0) ? (u64)rs->rtt_us : (ca->cfg.adaptive ? 0 : srtt_us);
+	if (!rtt_sample_us && !ca->cfg.adaptive)
 		return;
 	if (srtt_us == 0)
 		srtt_us = rtt_sample_us;
@@ -226,7 +226,8 @@ static void tcp_copa_cong_control(struct sock *sk,
 	app_limited = (rs && rs->is_app_limited) || (tp->app_limited != 0);
 
 	new_cwnd = copa_on_ack(ca, now_us, rtt_sample_us, srtt_us,
-			       acked_pkts, mss, rate_bps, app_limited);
+			       acked_pkts, mss, rate_bps, app_limited,
+			       rs && rs->is_app_limited && rs->prior_in_flight <= 4);
 	new_cwnd = clamp_t(u32, new_cwnd, COPA_MIN_CWND_PKTS, tp->snd_cwnd_clamp);
 	tcp_copa_set_cwnd(tp, new_cwnd);
 

@@ -11,19 +11,21 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        trial: [3, 4, 5, observed-a, observed-b]
+        variant: [original, candidate]
+        shard: [diag-52, diag-111, diag-100, diag-constant]
     env:
-      TRIAL: ${{ matrix.trial }}
-      SHARD: diag-52
+      SHARD: ${{ matrix.shard }}
       MODE: full
       QUEUES: 2MB
       PARALLEL: 1
       REPEATS: 1
-      WORKLOAD: pageload
-      KERNEL_CCS: copa_auto,bbr
+      WORKLOAD: pageload,bulk
+      KERNEL_CCS: copa_auto
     steps:
       - name: Checkout copa-auto-bench
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -61,6 +63,9 @@ jobs:
       - name: Build & load custom kernel TCP modules (tcp_copa_auto, tcp_leocc)
         run: |
           make -C kernel/tcp_copa_auto test
+          if [[ "${{ matrix.variant }}" == original ]]; then
+            git restore --source=e33e1922416ef5d214800e1f56fbb57cc9bbcb43 -- kernel/tcp_copa_auto
+          fi
           make -C kernel/tcp_copa_auto
           sudo insmod kernel/tcp_copa_auto/tcp_copa_auto.ko
           if make -C kernel/tcp_leocc; then
@@ -94,9 +99,12 @@ jobs:
 
       - name: Record fixed-phase repetitions and diagnostic capture
         id: diag
-        run: bash scripts/kernel_rct_diagnosis.sh
+        run: |
+          python3 scripts/ci_runner.py run-kernel --out-dir /tmp/rct-diag
+          python3 scripts/mahimahi_eval.py --help >/dev/null
+          gzip -1 /tmp/rct-diag/*.downlink.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: kernel-rct-diagnosis-${{ matrix.trial }}
+          name: rct-${{ matrix.variant }}-${{ matrix.shard }}
           path: /tmp/rct-diag
