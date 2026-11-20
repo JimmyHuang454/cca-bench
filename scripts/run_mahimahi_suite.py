@@ -648,6 +648,7 @@ def main() -> int:
     parser.add_argument("--workloads", default="bulk,app", help="Comma-separated workloads (bulk,app,websearch,vl2,pageload)")
     parser.add_argument("--bulk-secs", type=int, default=45)
     parser.add_argument("--app-secs", type=int, default=200, help="Application observation window in seconds (0 = auto: span + 150s)")
+    parser.add_argument("--fixed-phase", action="store_true", help="Replay each repetition from the same trace origin")
     parser.add_argument("--repeats", type=int, default=1, help="Number of time-shifted repeats per configuration")
     parser.add_argument("--send-fairness", choices=["true", "false"], default="true")
     parser.add_argument("--stream-receive-window", default=None, help="Optional quinn --stream-receive-window (e.g. 8M)")
@@ -730,7 +731,7 @@ def main() -> int:
     replays_by_rep: dict[tuple[str, int], Replay] = {}
     for rep in range(1, args.repeats + 1):
         for trace, replay in base_replays.items():
-            replays_by_rep[(trace, rep)] = shift_replay(replay, args.trace_dir, rep, args.repeats)
+            replays_by_rep[(trace, rep)] = replay if args.fixed_phase else shift_replay(replay, args.trace_dir, rep, args.repeats)
 
     tasks = []
     for rep in range(1, args.repeats + 1):

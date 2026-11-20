@@ -18,7 +18,8 @@ jobs:
       MODE: full
       QUEUES: 2MB
       PARALLEL: 1
-      REPEATS: 1
+      REPEATS: 3
+      FIXED_PHASE: 1
       WORKLOAD: pageload,bulk
       KERNEL_CCS: copa_auto
     steps:
@@ -101,7 +102,6 @@ jobs:
         id: diag
         run: |
           python3 scripts/ci_runner.py run-kernel --out-dir /tmp/rct-diag
-          python3 scripts/mahimahi_eval.py --help >/dev/null
           gzip -1 /tmp/rct-diag/*.downlink.log
       - uses: actions/upload-artifact@v4
         if: always()

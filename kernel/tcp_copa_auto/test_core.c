@@ -219,6 +219,24 @@ static void test_passive_observations(void)
     puts("[PASS] passive floor, jitter and sustained path change");
 }
 
+static void test_bulk_write_boundaries(void)
+{
+    struct copa_auto_state ca;
+    struct copa_auto_cfg cfg = { .adaptive = true, .theta_milli = 500,
+                                 .init_delta_q20 = COPA_DELTA_INIT_Q20 };
+    u64 now = 1000000;
+    int i;
+
+    copa_state_init(&ca, cfg, NULL, now, 10);
+    ca.slow_start = false;
+    for (i = 0; i < 60 && ca.drain_phase == COPA_PHASE_NORMAL; i++) {
+        now += 5000;
+        copa_on_ack(&ca, now, 20000, 20000, 2, 1448, 2000000, i % 4 == 0, false);
+    }
+    assert(ca.drain_phase == COPA_PHASE_DRAINING);
+    puts("[PASS] sustained load across application write boundaries");
+}
+
 static void test_outage_samples(void)
 {
     struct copa_auto_state ca;
@@ -243,6 +261,7 @@ static void test_outage_samples(void)
 int main(void)
 {
 	test_passive_observations();
+	test_bulk_write_boundaries();
 	test_outage_samples();
 	test_math_ln_exp();
 	test_target_dq();

@@ -205,6 +205,8 @@ struct copa_auto_state {
     u64 trusted_min_us;
     u64 valid_after_us;
     u64 loaded_since_us;
+    u64 last_loaded_ack_us;
+    u64 passive_j_at_us;
     u64 low_window_us, low_min_us;
     u32 low_samples, low_windows, raised_windows;
     u64 raised_min_us, low_dq_sum_us;
@@ -475,7 +477,7 @@ static inline void copa_observe_low(struct copa_auto_state *ca, u64 now,
         u64 j = min_t(u64, ca->low_dq_sum_us / 3, COPA_MAX_JITTER_US);
         ca->jitter_us = ca->has_jitter ? (3 * ca->jitter_us + j) / 4 : j;
         ca->has_jitter = ca->first_probe_done = true;
-        ca->last_app_idle_us = now;
+        ca->passive_j_at_us = now;
         ca->low_windows = ca->low_dq_sum_us = 0;
     }
 }
@@ -877,10 +879,17 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
             return (u32)(ca->cwnd_q10 >> 10);
         if (!base || rtt_sample_us < base)
             ca->trusted_min_us = rtt_sample_us;
-        if (app_limited || srtt_us > 4 * rtt_sample_us) {
+        /* A write boundary can mark individual ACKs app-limited even while
+         * a bulk transfer keeps the bottleneck busy across many RTTs. */
+        if (srtt_us > 4 * rtt_sample_us ||
+            (ca->last_loaded_ack_us && now_us - ca->last_loaded_ack_us >
+             max_t(u64, 2 * ca->trusted_min_us, 50000))) {
             ca->loaded_since_us = 0;
-        } else if (!ca->loaded_since_us) {
-            ca->loaded_since_us = now_us;
+        }
+        if (!app_limited && srtt_us <= 4 * rtt_sample_us) {
+            ca->last_loaded_ack_us = now_us;
+            if (!ca->loaded_since_us)
+                ca->loaded_since_us = now_us;
         }
         copa_observe_low(ca, now_us, rtt_sample_us, low_flight &&
                          ca->drain_phase == COPA_PHASE_NORMAL && !ca->competitive &&
@@ -1166,9 +1175,9 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
                     ca->cwnd_q10 = max_t(u64, ca->cwnd_q10, (u64)COPA_MIN_CWND_PKTS << 10);
                     return (u32)(ca->cwnd_q10 >> 10);
                 }
-            } else if (ca->drain_phase == COPA_PHASE_NORMAL && ca->loaded_since_us &&
+            } else if (ca->drain_phase == COPA_PHASE_NORMAL && !app_limited && ca->loaded_since_us &&
                        now_us - ca->loaded_since_us >= max_t(u64, 3 * srtt_us, 200000) &&
-                       (!ca->last_app_idle_us || now_us - ca->last_app_idle_us >= COPA_DRAIN_SKIP_US)) {
+                       (!ca->passive_j_at_us || now_us - ca->passive_j_at_us >= COPA_DRAIN_SKIP_US)) {
                 if (ca->handover_drain_pending) {
                     ca->handover_drain_pending = false;
                     if (bdp_pkts > 0 && (ca->cwnd_q10 >> 10) < (bdp_pkts * 3) / 4) {

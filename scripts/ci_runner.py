@@ -481,6 +481,8 @@ def cmd_run_kernel(args: argparse.Namespace) -> int:
             "--bulk-workload", "/tmp/workloads/bulk.wk",
             "--out-dir", str(out_dir),
         ]
+        if os.environ.get("FIXED_PHASE") == "1":
+            cmd.append("--fixed-phase")
         print("Running:", " ".join(cmd), flush=True)
         return subprocess.run(cmd, cwd=mortise_root).returncode
     finally:
