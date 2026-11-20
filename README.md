@@ -49,7 +49,6 @@ sysctl net.ipv4.tcp_available_congestion_control
 | `quinn_ccs`                               | 空（按不同的 `mode` 默认）            | 覆写 QUIC (`quinn-perf`) 算法列表（仅 `run_quinn=true` 时生效）                                             |
 | `run_kernel`                              | `true`                                | 是否运行 Linux 内核 TCP 栈（`kernel-eval`）                                                                 |
 | `run_quinn`                               | `false`                               | 是否同时拉取 `quinn_repo` 编译并运行 QUIC 栈（`quinn-eval`）                                                |
-| `quinn_repo` / `quinn_ref`                | `spongebob888/quinn-jls` / `jls-main` | `run_quinn=true` 时拉取的 QUIC 仓库与分支                                                                   |
 | `send_fairness` / `stream_receive_window` | `false` / `8M`                        | 仅 QUIC 生效的传输参数                                                                                      |
 
 ### 评测模式（`mode`）
@@ -109,7 +108,7 @@ sysctl net.ipv4.tcp_available_congestion_control
 | :------------------- | :-------------------------------------------------------------------------- | :-------------------------------------------------------------------------------- |
 | `copa_auto`          | `tcp_copa_auto.ko`（本仓库）                                                | 自适应 $\delta$（默认 $\theta=0.50$），开启竞争模式切换                           |
 | `copa_auto_theta<X>` | `tcp_copa_auto.ko`（本仓库）                                                | 自定义 $\theta \in [0.01, 0.995]$，如 `copa_auto_theta0.9`、`copa_auto_theta0.98` |
-| `copa_auto_nc`       | `tcp_copa_auto.ko`（本仓库）                                                | 自适应 $\delta$（$\theta=0.50$），关闭竞争模式切换                                |
+| `copa_auto_nc`       | `tcp_copa_auto.ko`（本仓库）                                                | 自适应 $\delta$（默认 $\theta=0.50$），关闭竞争模式切换                                |
 | `copa_orig`          | `tcp_copa_auto.ko`（本仓库）                                                | 原版固定 $\delta=0.50$ Copa（现代 Linux 6.x 内核实现）                            |
 | `mortise_copa`       | eBPF（[BobAnkh/Mortise](https://github.com/BobAnkh/Mortise)）               | 官方 Mortise eBPF Copa                                                            |
 | `leocc`              | `tcp_leocc.ko`（[SpaceNetLab/LeoCC](https://github.com/SpaceNetLab/LeoCC)） | LEO 低轨卫星专用算法（仿真版适配 Linux 6.x，`leo` 分片默认自动加入）              |
@@ -137,7 +136,7 @@ sysctl net.ipv4.tcp_available_congestion_control
 
 #### 3. 常用 Actions 填写示例
 
-- **快速冒烟（纯内核 TCP）**：`mode=quick`，`theta=0.9`，`kernel_ccs` 留空，`run_kernel=true`，`run_quinn=false`
+- **快速验证（纯内核 TCP）**：`mode=quick`，`theta=0.9`，`kernel_ccs` 留空，`run_kernel=true`，`run_quinn=false`
 - **自定义内核全算法横向对比**：
   - `mode=rct-datasets`，`theta=0.9,0.98`，`repeats=3`，`rct_workloads=app,websearch,vl2,pageload`
   - `kernel_ccs=copa_auto,copa_auto_theta0.9,copa_auto_theta0.98,copa_auto_nc,copa_orig,mortise_copa,leocc,bbr,cubic,vegas,cdg,veno,yeah,hybla`

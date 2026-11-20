@@ -2,7 +2,7 @@ name: CCAs Bench
 
 on:
   push:
-    branches: ['codex/mahimahi-*']
+    branches: ["codex/mahimahi-*"]
     paths:
       - .github/workflows/mahimahi-compare.yml
       - scripts/**
@@ -71,7 +71,7 @@ on:
       quinn_repo:
         description: "GitHub repository for optional quinn-perf build (only used when run_quinn=true)"
         required: false
-        default: "spongebob888/quinn-jls"
+        default: "jimmyhuang454/quinn-jls"
         type: string
       quinn_ref:
         description: "Git branch/tag/SHA of quinn_repo (only used when run_quinn=true)"
@@ -129,8 +129,8 @@ jobs:
       - name: Checkout quinn-jls (for quinn-perf)
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.quinn_repo || 'spongebob888/quinn-jls' }}
-          ref: ${{ inputs.quinn_ref || 'jls-main' }}
+          repository: ${{ inputs.quinn_repo }}
+          ref: ${{ inputs.quinn_ref }}
           path: quinn-jls
 
       - name: Setup Rust toolchain
