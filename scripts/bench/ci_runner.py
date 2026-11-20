@@ -31,6 +31,7 @@ REPO_ROOT = SCRIPTS_ROOT.parent
 
 EXTRA_CONGESTION_VARIANTS: list[tuple[str, str]] = [
     ("CopaAuto", "copa_auto"),
+    ("CopaAutoV2", "copa_auto_v2"),
     ("CopaAutoNc", "copa_auto_nc"),
     ("CopaAutoT90", "copa_auto_t90"),
     ("CopaAutoT98", "copa_auto_t98"),
@@ -430,11 +431,18 @@ def cmd_run_kernel(args: argparse.Namespace) -> int:
         py_env = os.environ.copy()
         py_env["LOG_LEVEL"] = "warn"
         py_proc = subprocess.Popen(
-            ["/home/vagrant/mortise-venv/bin/python3", "process-report.py"],
+            [os.environ.get("MORTISE_PYTHON", "/home/vagrant/mortise-venv/bin/python3"), "process-report.py"],
             cwd=mortise_root, env=py_env, stdout=py_log, stderr=subprocess.STDOUT,
         )
         procs.append((py_proc, False))
-        time.sleep(2)
+        for _ in range(30):
+            if pathlib.Path("/tmp/mortise-py.sock").exists():
+                break
+            if py_proc.poll() is not None:
+                raise RuntimeError("Mortise process-report.py exited; inspect process_report.log")
+            time.sleep(1)
+        else:
+            raise RuntimeError("Mortise Python socket was not ready; inspect process_report.log")
 
         mgr_env = os.environ.copy()
         mgr_env["RUST_LOG"] = "info"
@@ -466,6 +474,12 @@ def cmd_run_kernel(args: argparse.Namespace) -> int:
 
         avail_ccs = read_available_kernel_ccs()
         ccs = resolve_kernel_ccs(mode, shard, theta, override, avail_ccs, copa_kmod)
+        print(f"Kernel congestion controls available: {sorted(avail_ccs)}", flush=True)
+        requested = [c.strip() for c in ccs.split(",") if c.strip()]
+        unavailable = [c for c in requested if c not in avail_ccs and
+                       not (c.startswith("copa_auto_theta") and "copa_auto_t" in avail_ccs)]
+        if unavailable:
+            raise RuntimeError(f"Requested kernel congestion controls unavailable: {unavailable}")
         cmd = [
             sys.executable, str(SCRIPTS_DIR / "run_mahimahi_suite.py"),
             "--stack", "kernel",

@@ -12,6 +12,8 @@ struct copa_v2_round {
 };
 struct copa_v2_state {
     struct copa_v2_round rounds[COPA_V2_MAX_ROUNDS];
+    /* Scratch is per-flow: do not put 4 KiB arrays on the kernel stack. */
+    u64 fit_ks[COPA_V2_MAX_ROUNDS], fit_weights[COPA_V2_MAX_ROUNDS];
     u32 count, period_rtts;
     u64 start_us, end_us, round_start_us, round_len_us, r0_us;
     u64 last_k_us, last_target_us, last_mean_dq_us, last_max_rate, last_r0_us;
@@ -37,7 +39,7 @@ static inline void copa_v2_init(struct copa_v2_state *v, u32 period_rtts)
  * from this period; no earlier k, rate or RTT enters the fit. */
 static inline bool copa_v2_finish(struct copa_v2_state *v, struct copa_auto_state *ca)
 {
-    u64 ks[COPA_V2_MAX_ROUNDS], weights[COPA_V2_MAX_ROUNDS];
+    u64 *ks = v->fit_ks, *weights = v->fit_weights;
     u64 max_rate = 0, dq_sum = 0, rho_sum = 0, total_weight = 0;
     u64 target, mean, factor, delta, residual_sum = 0, q_sum = 0;
     u32 i, n = 0, qn = 0, min_rho = 1000, max_rho = 0, quality, gain;

@@ -16,28 +16,21 @@ sudo insmod kernel/tcp_copa_auto/tcp_copa_auto.ko
 sysctl net.ipv4.tcp_available_congestion_control
 ```
 
-## 在 GitHub Actions 上运行
+## 在 GitHub Actions 上运行 Linux 内核测试
 
-0. Clone 本仓库到自己的账号下
-1. 打开仓库 **Actions** → 选择 **Mahimahi Comparison (copa-auto vs Mortise)** → 点击 **Run workflow**。
-2. 选择参数，可选项看下面
-3. 运行结束后在 **Summary** 查看 Markdown 汇总表格，或在 **Artifacts** 下载 `comparison-summary`（含 CSV/MD 与 RCT 明细）。
+工作流 [Mahimahi Linux Kernel Bench](../.github/workflows/mahimahi-kernel.yml) 在 Linux runner 上编译并加载 `tcp_copa_auto.ko`，加载 Mortise eBPF，并通过 Mahimahi 重放轨迹。先把代码和工作流提交并推送到 GitHub；在仓库 **Actions → Mahimahi Linux Kernel Bench → Run workflow** 中选择分支和参数。首次建议使用 `quick` 和 `parallel=1`。每个 shard 会上传 `results-kernel-*`；汇总上传为 `mahimahi-kernel-comparison-summary`。出现构建、模块加载、BPF 加载或测试失败时查看对应 job 日志和 shard artifact。
 
-### 可配置选项（Inputs）
+| 输入 | 默认值 | 说明 |
+|---|---|---|
+| `mode` | `quick` | `quick` 同时测试 bulk 和 app；`datasets` 测试 NYC subway、Lumos5G 和 Leo 的 bulk；`rct-datasets` 测试指定请求负载 |
+| `kernel_ccs` | `copa_auto_v2,copa_auto_nc,mortise_copa,bbr,cubic` | 要测试的 Linux TCP 拥塞算法，逗号分隔；必须在 runner 内核中可用 |
+| `measurement_rtts` | `16` | `copa_auto_v2` 的测量周期（1～256 SRTT，内核模块加载时设置） |
+| `repeats` | `1` | 每个配置的重复次数 |
+| `parallel` | `1` | 每台 runner 同时运行的实验数；1 可降低相互干扰 |
+| `queues` | 空 | 覆盖队列大小，如 `150KB,2MB`；空值使用数据集默认值 |
+| `rct_workloads` | `app,websearch` | `rct-datasets` 的请求负载 |
 
-| 选项                                      | 默认值                                | 说明                                                                                                        |
-| :---------------------------------------- | :------------------------------------ | :---------------------------------------------------------------------------------------------------------- |
-| `mode`                                    | `quick`                               | 评测模式，见下表                                                                                            |
-| `theta`                                   | `0.9`                                 | `copa_auto` 吞吐-延迟权衡参数 $\theta \in [0.01, 0.99]$；`rct-datasets` 支持逗号分隔多个值（如 `0.9,0.98`） |
-| `repeats`                                 | `1`                                   | 每个配置的时间偏移重复次数（>1 时汇总输出中位数与 min–max 区间）                                            |
-| `parallel`                                | 空（按 CPU 核数自动分配）             | 单机并发数（高带宽 5G/Leo 默认 `0.75×CPU` [2..16]，常规默认 `1.5×CPU` [2..24]）                             |
-| `queues`                                  | 空（按数据集自动匹配浅/深队列）       | 覆写队列大小，支持人类可读单位如 `150KB,2MB` 或 `2MB`                                                       |
-| `rct_workloads`                           | `app,websearch,vl2,pageload`          | `rct-datasets` 与 `full` 模式下要跑的请求负载                                                               |
-| `kernel_ccs`                              | 空（按不同的 `mode` 默认）            | 覆写 Linux 内核 TCP 栈算法列表（逗号分隔，支持 `{theta}` 占位符）                                           |
-| `quinn_ccs`                               | 空（按不同的 `mode` 默认）            | 覆写 QUIC (`quinn-perf`) 算法列表（仅 `run_quinn=true` 时生效）                                             |
-| `run_kernel`                              | `true`                                | 是否运行 Linux 内核 TCP 栈（`kernel-eval`）                                                                 |
-| `run_quinn`                               | `false`                               | 是否同时拉取 `quinn_repo` 编译并运行 QUIC 栈（`quinn-eval`）                                                |
-| `send_fairness` / `stream_receive_window` | `false` / `8M`                        | 仅 QUIC 生效的传输参数                                                                                      |
+以下模式和算法说明也涵盖脚本支持但**本工作流输入未开放**的历史选项。此工作流不运行 QUIC；具体可选 `mode` 以工作流下拉框为准。
 
 ### 评测模式（`mode`）
 
@@ -94,6 +87,7 @@ sysctl net.ipv4.tcp_available_congestion_control
 
 | 算法名               | 分类 / 来源                                                                 | 说明                                                                              |
 | :------------------- | :-------------------------------------------------------------------------- | :-------------------------------------------------------------------------------- |
+| `copa_auto_v2`       | `tcp_copa_auto.ko`（本仓库）                                                | v2 单周期估计，默认关闭竞争模式；周期由 `measurement_rtts` 控制                   |
 | `copa_auto`          | `tcp_copa_auto.ko`（本仓库）                                                | 自适应 $\delta$（默认 $\theta=0.50$），开启竞争模式切换                           |
 | `copa_auto_theta<X>` | `tcp_copa_auto.ko`（本仓库）                                                | 自定义 $\theta \in [0.01, 0.995]$，如 `copa_auto_theta0.9`、`copa_auto_theta0.98` |
 | `copa_auto_nc`       | `tcp_copa_auto.ko`（本仓库）                                                | 自适应 $\delta$（默认 $\theta=0.50$），关闭竞争模式切换                                |
