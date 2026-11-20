@@ -240,7 +240,7 @@ def parse_rct_csv(
     req_tput_mb_s = [(sz / 1e6) / (rct / 1000.0) for sz, rct in zip(sizes, rcts_ms)]
     qoe_vals = [v * (1.0 - penalty) for v in req_tput_mb_s]
 
-    rct_slowdown = math.nan
+    fct_slowdown = math.nan
     if isinstance(capacity_mbps, (int, float)) and not math.isnan(capacity_mbps) and capacity_mbps > 0:
         cap_bytes_per_ms = capacity_mbps * 1e6 / 8.0 / 1000.0
         log_sum = 0.0
@@ -248,7 +248,7 @@ def parse_rct_csv(
             ideal_ms = base_rtt_ms + (sz / cap_bytes_per_ms)
             sd = max(rct / ideal_ms, 1.0)
             log_sum += math.log(sd)
-        rct_slowdown = math.exp(log_sum / len(rcts_ms))
+        fct_slowdown = math.exp(log_sum / len(rcts_ms))
 
     return {
         "requests": len(rcts_ms),
@@ -257,7 +257,7 @@ def parse_rct_csv(
         "rct_p95_ms": percentile(sorted_rcts, 0.95),
         "retrans_pkts": retrans_pkts,
         "retrans_ratio": retrans_ratio,
-        "rct_slowdown": rct_slowdown,
+        "fct_slowdown": fct_slowdown,
         "mortise_qoe": sum(qoe_vals) / len(qoe_vals),
     }
 
@@ -287,6 +287,30 @@ def parse_meta_from_stem(stem: str) -> dict[str, str]:
         "cc": "",
         "repeat": "1",
     }
+
+
+def format_queue_size(raw: Any) -> str:
+    """Format queue size in bytes as KB/MB (e.g. 150000 -> 150KB, 2000000 -> 2MB)."""
+    s = str(raw).strip()
+    if not s or s == "-":
+        return "-"
+    try:
+        n = int(float(s))
+    except ValueError:
+        return s
+    if n >= 1_000_000:
+        return f"{n / 1_000_000.0:g}MB"
+    if n >= 1_000:
+        return f"{n / 1_000.0:g}KB"
+    return f"{n}B"
+
+
+def queue_sort_key(raw: Any) -> tuple[int, str]:
+    s = str(raw).strip()
+    try:
+        return (int(float(s)), s)
+    except ValueError:
+        return (10**18, s)
 
 
 def fmt_num(val: Any, digits: int = 2) -> str:
@@ -343,6 +367,7 @@ CSV_FLOAT_FIELDS = {
     "rct_p50_ms",
     "rct_p95_ms",
     "retrans_ratio",
+    "fct_slowdown",
     "rct_slowdown",
     "mortise_qoe",
     "quic_loss_ratio",
@@ -380,9 +405,13 @@ def load_shard_csv(path: Path) -> list[dict[str, Any]]:
                         continue
                 elif k in CSV_FLOAT_FIELDS:
                     try:
-                        row[k] = float(v)
+                        val_f = float(v)
                     except ValueError:
-                        row[k] = math.nan
+                        val_f = math.nan
+                    if k == "rct_slowdown":
+                        row.setdefault("fct_slowdown", val_f)
+                    else:
+                        row[k] = val_f
                 else:
                     row[k] = v
             if row:
@@ -474,7 +503,7 @@ def main() -> None:
         "rct_p95_ms",
         "retrans_pkts",
         "retrans_ratio",
-        "rct_slowdown",
+        "fct_slowdown",
         "mortise_qoe",
         "quic_loss_ratio",
         "quic_rtt_ms",
@@ -507,16 +536,16 @@ def main() -> None:
         "",
         "## 1. Bulk Saturated Flows (Kleinrock Power & Delay-Utilization Tradeoff)",
         "",
-        "| Trace Group | Queue (B) | Stack | CC | N | Cap (Mbps) | Thr (Mbps) | Util | QDelay Avg (ms) | QDelay P95 (ms) | Power (Util/s) | Norm Power | Drop |",
+        "| Trace Group | Queue | Stack | CC | N | Cap (Mbps) | Thr (Mbps) | Util | QDelay Avg (ms) | QDelay P95 (ms) | Power (Util/s) | Norm Power | Drop |",
         "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    for gk in sorted(bulk_groups.keys()):
+    for gk in sorted(bulk_groups.keys(), key=lambda x: (x[0], queue_sort_key(x[1]), x[2], x[3])):
         grp, q, stk, cc = gk
         grows = bulk_groups[gk]
         lines.append(
             "| {grp} | {q} | {stk} | {cc} | {n} | {cap} | {thr} | {util} | {qd} | {qdp95} | {pwr} | {npwr} | {drop} |".format(
                 grp=grp,
-                q=q,
+                q=format_queue_size(q),
                 stk=stk,
                 cc=cc,
                 n=len(grows),
@@ -533,18 +562,18 @@ def main() -> None:
 
     lines.extend([
         "",
-        "## 2. File Download Workload (`app.wk`: RCT Slowdown & Mortise QoE)",
+        "## 2. File Download Workload (`app.wk`: FCT Slowdown & Mortise QoE)",
         "",
-        "| Trace Group | Queue (B) | Stack | CC | N | Thr (Mbps) | QDelay Avg (ms) | Drop | Mean RCT (ms) | P95 RCT (ms) | RCT Slowdown | Mortise QoE |",
+        "| Trace Group | Queue | Stack | CC | N | Thr (Mbps) | QDelay Avg (ms) | Drop | Mean RCT (ms) | P95 RCT (ms) | FCT Slowdown | Mortise QoE |",
         "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ])
-    for gk in sorted(app_groups.keys()):
+    for gk in sorted(app_groups.keys(), key=lambda x: (x[0], queue_sort_key(x[1]), x[2], x[3])):
         grp, q, stk, cc = gk
         grows = app_groups[gk]
         lines.append(
             "| {grp} | {q} | {stk} | {cc} | {n} | {thr} | {qd} | {drop} | {rct} | {rct95} | {sd} | {qoe} |".format(
                 grp=grp,
-                q=q,
+                q=format_queue_size(q),
                 stk=stk,
                 cc=cc,
                 n=len(grows),
@@ -553,13 +582,13 @@ def main() -> None:
                 drop=fmt_num(mean_valid(grows, "drop_rate"), 4),
                 rct=fmt_num(mean_valid(grows, "rct_mean_ms")),
                 rct95=fmt_num(mean_valid(grows, "rct_p95_ms")),
-                sd=fmt_num(mean_valid(grows, "rct_slowdown"), 2),
+                sd=fmt_num(mean_valid(grows, "fct_slowdown"), 2),
                 qoe=fmt_num(mean_valid(grows, "mortise_qoe")),
             )
         )
 
     # Overall Summary: equal weight per (Trace Group, Queue)
-    # Composite Score = sqrt(Norm Power / RCT Slowdown) in (0, 1] (higher is better)
+    # Composite Score = sqrt(Norm Power / FCT Slowdown) in (0, 1] (higher is better)
     cc_bulk: dict[tuple[str, str], list[float]] = {}
     cc_app: dict[tuple[str, str], list[float]] = {}
     for (_, _, stk, cc), grows in bulk_groups.items():
@@ -567,7 +596,7 @@ def main() -> None:
         if not math.isnan(v):
             cc_bulk.setdefault((stk, cc), []).append(v)
     for (_, _, stk, cc), grows in app_groups.items():
-        v = mean_valid(grows, "rct_slowdown")
+        v = mean_valid(grows, "fct_slowdown")
         if not math.isnan(v) and v > 0:
             cc_app.setdefault((stk, cc), []).append(v)
 
@@ -617,9 +646,9 @@ def main() -> None:
 
         lines.extend([
             "",
-            "## 3. Overall Summary (Normalized Power, RCT Slowdown & Composite Score)",
+            "## 3. Overall Summary (Normalized Power, FCT Slowdown & Composite Score)",
             "",
-            "| Stack | CC | Bulk Groups | Norm Power (↑) | App Groups | RCT Slowdown (↓) | Composite Score (↑) |",
+            "| Stack | CC | Bulk Groups | Norm Power (↑) | App Groups | FCT Slowdown (↓) | Composite Score (↑) |",
             "|---|---|---:|---:|---:|---:|---:|",
         ])
         for r in summary_rows:

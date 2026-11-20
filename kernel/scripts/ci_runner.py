@@ -763,7 +763,7 @@ def main() -> int:
     p_kern.add_argument("--out-dir", default="/tmp/kernel_out")
 
     p_ns3 = sub.add_parser("run-ns3")
-    p_ns3.add_argument("--bin", default="/tmp/ns3-bin/ns3-dev-tcp_copa_bench-default")
+    p_ns3.add_argument("--bin", default="/tmp/ns3-bin/ns3-dev-tcp_ccas_bench-default")
     p_ns3.add_argument("--out-dir", default="/tmp/ns3_out")
 
     p_sum = sub.add_parser("summarize")

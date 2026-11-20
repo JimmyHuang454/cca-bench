@@ -22,13 +22,16 @@ BIN_MS       ?= 5.0
 CLOCK_MS     ?= 1.0
 QUEUES       ?=
 PARALLEL     ?= $(JOBS)
+RESUME       ?= 1
+TRACE_DIR    ?= $(CURDIR)/traces/cache
 WORKLOAD_DIR ?= $(CURDIR)/results/workloads
 OUT_DIR      ?= $(CURDIR)/results/bench/$(SHARD)
 SUMMARY_DIR  ?= $(OUT_DIR)/summary
-BENCH_BIN    ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp_copa_bench-optimized
+BENCH_BIN    ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp_ccas_bench-optimized
 
 WORKLOAD_MAP := app=$(WORKLOAD_DIR)/app.wk,websearch=$(WORKLOAD_DIR)/websearch.wk,vl2=$(WORKLOAD_DIR)/vl2.wk,pageload=$(WORKLOAD_DIR)/pageload.wk
 QUEUES_FLAG  := $(if $(QUEUES),--queues $(QUEUES),)
+RESUME_FLAG  := $(if $(filter 1 true yes,$(RESUME)),--resume,)
 
 # Legacy trace paths
 LTE_TRACES := traces/mahimahi/Verizon-LTE-driving.down
@@ -41,9 +44,9 @@ LEO_TRACES := traces/leocc/4.8K.zip
 
 help:
 	@echo "=== Copa-Auto ns-3 Benchmark Targets ==="
-	@echo "  make setup-bench     Clone ns-3 base + overlay, configure 6-module optimized build, build tcp_copa_bench"
+	@echo "  make setup-bench     Clone ns-3 base + overlay, configure 6-module optimized build, build tcp_ccas_bench"
 	@echo "  make test-core       Run C unit tests for kernel/tcp_copa_auto/copa_auto_core.h"
-	@echo "  make build-bench     Sync copa_auto_core.h + tcp_copa_bench.cc and rebuild tcp_copa_bench"
+	@echo "  make build-bench     Sync copa_auto_core.h + tcp_ccas_bench.cc and rebuild tcp_ccas_bench"
 	@echo "  make workloads       Generate websearch/vl2/pageload .wk files (and download app.wk if missing)"
 	@echo "  make bench           Run run_ns3_suite.py + mahimahi_eval.py for SHARD=$(SHARD)"
 	@echo "  make bench-synth     Shortcut: make bench SHARD=synth"
@@ -73,7 +76,8 @@ test-core:
 
 sync-bench:
 	@mkdir -p "$(NS3_ROOT)/scratch"
-	cp "$(CURDIR)/tcp_copa_bench.cc" "$(NS3_ROOT)/scratch/tcp_copa_bench.cc"
+	cp "$(CURDIR)/tcp_ccas_bench.cc" "$(NS3_ROOT)/scratch/tcp_ccas_bench.cc"
+	cp "$(CURDIR)/mortise_copa_ns3.h" "$(NS3_ROOT)/scratch/mortise_copa_ns3.h"
 	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_core.h" "$(NS3_ROOT)/scratch/copa_auto_core.h"
 	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_math.h" "$(NS3_ROOT)/scratch/copa_auto_math.h"
 
@@ -89,10 +93,10 @@ setup-bench:
 	$(MAKE) sync-bench
 	cd "$(NS3_ROOT)" && ./ns3 configure --build-profile=optimized --disable-python --disable-werror \
 		--enable-modules=core,network,internet,point-to-point,applications,traffic-control
-	cd "$(NS3_ROOT)" && ./ns3 build tcp_copa_bench
+	cd "$(NS3_ROOT)" && ./ns3 build tcp_ccas_bench
 
 build-bench: sync-bench
-	cd "$(NS3_ROOT)" && ./ns3 build tcp_copa_bench
+	cd "$(NS3_ROOT)" && ./ns3 build tcp_ccas_bench
 
 workloads:
 	@mkdir -p "$(WORKLOAD_DIR)"
@@ -117,7 +121,9 @@ bench: workloads
 		--bin-ms "$(BIN_MS)" \
 		--clock-ms "$(CLOCK_MS)" \
 		--parallel "$(PARALLEL)" \
+		--trace-dir "$(TRACE_DIR)" \
 		$(QUEUES_FLAG) \
+		$(RESUME_FLAG) \
 		--out-dir "$(OUT_DIR)"
 	$(MAKE) summary OUT_DIR="$(OUT_DIR)" SUMMARY_DIR="$(SUMMARY_DIR)"
 

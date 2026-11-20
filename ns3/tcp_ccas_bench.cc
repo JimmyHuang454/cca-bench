@@ -35,6 +35,7 @@
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #endif
+#include "mortise_copa_ns3.h"
 
 namespace ns3
 {
@@ -452,6 +453,43 @@ static bool LoadWorkloadFile(const std::string& path,
     return !arrSec.empty();
 }
 
+class FifoPointToPointChannel : public PointToPointChannel
+{
+  public:
+    static TypeId GetTypeId()
+    {
+        static TypeId tid = TypeId("ns3::FifoPointToPointChannel")
+                                .SetParent<PointToPointChannel>()
+                                .SetGroupName("PointToPoint")
+                                .AddConstructor<FifoPointToPointChannel>();
+        return tid;
+    }
+
+    bool TransmitStart(Ptr<const Packet> p, Ptr<PointToPointNetDevice> src, Time txTime) override
+    {
+        uint32_t wire = (src == GetSource(0)) ? 0 : 1;
+        Time now = Simulator::Now();
+        Time arrive = now + txTime + GetDelay();
+        if (arrive < m_lastArrival[wire])
+        {
+            arrive = m_lastArrival[wire] + NanoSeconds(1);
+        }
+        m_lastArrival[wire] = arrive;
+        Time relDelay = arrive - now;
+        Simulator::ScheduleWithContext(GetDestination(wire)->GetNode()->GetId(),
+                                       relDelay,
+                                       &PointToPointNetDevice::Receive,
+                                       GetDestination(wire),
+                                       p->Copy());
+        return true;
+    }
+
+  private:
+    Time m_lastArrival[2] = {Seconds(0), Seconds(0)};
+};
+
+NS_OBJECT_ENSURE_REGISTERED(FifoPointToPointChannel);
+
 static void SetBottleDelay(Ptr<PointToPointChannel> ch, double oneWayMs)
 {
     ch->SetAttribute("Delay", TimeValue(MilliSeconds(std::max(oneWayMs, 0.5))));
@@ -549,17 +587,16 @@ int main(int argc, char* argv[])
     {
         Config::SetDefault("ns3::TcpL4Protocol::SocketType", TypeIdValue(TcpLinuxReno::GetTypeId()));
     }
+    else if (cc == "mortise_copa")
+    {
+        Config::SetDefault("ns3::TcpL4Protocol::SocketType", TypeIdValue(TcpMortiseCopa::GetTypeId()));
+        Config::SetDefault("ns3::TcpSocketState::EnablePacing", BooleanValue(true));
+    }
     else
     {
         Config::SetDefault("ns3::TcpL4Protocol::SocketType", TypeIdValue(TcpCopaKernel::GetTypeId()));
         Config::SetDefault("ns3::TcpSocketState::EnablePacing", BooleanValue(true));
-        if (cc == "mortise_copa")
-        {
-            Config::SetDefault("ns3::TcpCopaKernel::Adaptive", BooleanValue(false));
-            Config::SetDefault("ns3::TcpCopaKernel::ModeSwitching", BooleanValue(true));
-            Config::SetDefault("ns3::TcpCopaKernel::InitDeltaQ20", UintegerValue(41943U));
-        }
-        else if (cc == "copa_orig")
+        if (cc == "copa_orig")
         {
             Config::SetDefault("ns3::TcpCopaKernel::Adaptive", BooleanValue(false));
             Config::SetDefault("ns3::TcpCopaKernel::ModeSwitching", BooleanValue(true));
@@ -621,11 +658,30 @@ int main(int argc, char* argv[])
     access.SetQueue("ns3::DropTailQueue", "MaxSize", StringValue("4000p"));
     NetDeviceContainer d01 = access.Install(nodes.Get(0), nodes.Get(1));
 
-    PointToPointHelper bottle;
-    bottle.SetDeviceAttribute("DataRate", DataRateValue(DataRate((uint64_t)(rateMbps * 1e6))));
-    bottle.SetChannelAttribute("Delay", TimeValue(MilliSeconds(bottleOneWayMs)));
-    bottle.SetQueue("ns3::DropTailQueue", "MaxSize", StringValue(std::to_string(queueBytes) + "B"));
-    NetDeviceContainer d12 = bottle.Install(nodes.Get(1), nodes.Get(2));
+    Ptr<PointToPointNetDevice> bDev = CreateObject<PointToPointNetDevice>();
+    bDev->SetAddress(Mac48Address::Allocate());
+    bDev->SetDataRate(DataRate((uint64_t)(rateMbps * 1e6)));
+    Ptr<DropTailQueue<Packet>> bQueueObj = CreateObject<DropTailQueue<Packet>>();
+    bQueueObj->SetMaxSize(QueueSize(std::to_string(queueBytes) + "B"));
+    bDev->SetQueue(bQueueObj);
+    nodes.Get(1)->AddDevice(bDev);
+
+    Ptr<PointToPointNetDevice> uDev = CreateObject<PointToPointNetDevice>();
+    uDev->SetAddress(Mac48Address::Allocate());
+    uDev->SetDataRate(DataRate((uint64_t)(rateMbps * 1e6)));
+    Ptr<DropTailQueue<Packet>> uQueueObj = CreateObject<DropTailQueue<Packet>>();
+    uQueueObj->SetMaxSize(QueueSize(std::to_string(queueBytes) + "B"));
+    uDev->SetQueue(uQueueObj);
+    nodes.Get(2)->AddDevice(uDev);
+
+    Ptr<FifoPointToPointChannel> bCh = CreateObject<FifoPointToPointChannel>();
+    bCh->SetAttribute("Delay", TimeValue(MilliSeconds(bottleOneWayMs)));
+    bDev->Attach(bCh);
+    uDev->Attach(bCh);
+
+    NetDeviceContainer d12;
+    d12.Add(bDev);
+    d12.Add(uDev);
 
     InternetStackHelper stack;
     stack.Install(nodes);
@@ -637,9 +693,6 @@ int main(int argc, char* argv[])
     Ipv4InterfaceContainer i12 = ipv4.Assign(d12);
     Ipv4GlobalRoutingHelper::PopulateRoutingTables();
 
-    Ptr<PointToPointNetDevice> bDev = DynamicCast<PointToPointNetDevice>(d12.Get(0));
-    Ptr<PointToPointNetDevice> uDev = DynamicCast<PointToPointNetDevice>(d12.Get(1));
-    Ptr<PointToPointChannel> bCh = DynamicCast<PointToPointChannel>(bDev->GetChannel());
     Ptr<Queue<Packet>> bQueue = bDev->GetQueue();
 
     QTracker qt;
@@ -783,7 +836,7 @@ int main(int argc, char* argv[])
     double tputPower = estRttMs > 0.0 ? thrMbps / (estRttMs / 1000.0) : 0.0;
 
     size_t reqDone = 0;
-    double meanRct = 0.0, p50Rct = 0.0, p95Rct = 0.0, rctSlowdown = 0.0, mortiseQoe = 0.0;
+    double meanRct = 0.0, p50Rct = 0.0, p95Rct = 0.0, fctSlowdown = 0.0, mortiseQoe = 0.0;
     if (mode != "bulk")
     {
         const auto& done = appClient->DoneSec();
@@ -812,7 +865,7 @@ int main(int argc, char* argv[])
             std::sort(rctsMs.begin(), rctsMs.end());
             p50Rct = PercentileSorted(rctsMs, 0.50);
             p95Rct = PercentileSorted(rctsMs, 0.95);
-            rctSlowdown = std::exp(logSdSum / rctsMs.size());
+            fctSlowdown = std::exp(logSdSum / rctsMs.size());
             mortiseQoe = qoeSum / rctsMs.size();
         }
     }
@@ -839,7 +892,7 @@ int main(int argc, char* argv[])
            << ",\"rct_p95_ms\":" << p95Rct
            << ",\"retrans_pkts\":" << qt.droppedPkts
            << ",\"retrans_ratio\":" << drop
-           << ",\"rct_slowdown\":" << rctSlowdown
+           << ",\"fct_slowdown\":" << fctSlowdown
            << ",\"mortise_qoe\":" << mortiseQoe;
     }
     js << "}\n";

@@ -10,7 +10,7 @@
 
 ```text
 ns3/
-├── tcp_copa_bench.cc       # 统一 ns-3 评测入口（Bulk + Mortise .wk + Mahimahi/LeoCC 轨迹）
+├── tcp_ccas_bench.cc       # 统一 ns-3 评测入口（Bulk + Mortise .wk + Mahimahi/LeoCC 轨迹）
 ├── ns-3/                   # ns-3 源码与构建目录（gitignored，由 setup_ns3.sh 或下方命令初始化）
 ├── ns3-overlay/            # ns-3 定制扩展（含 TcpBbrV2、TcpBbrV3、tcp-capacity-trace 等）
 ├── setup_ns3.sh            # 原版 ns-3 全量初始化脚本
@@ -33,13 +33,13 @@ ns3/
 make setup-bench
 ```
 
-等价于拉取 ns-3 基线 commit（`84a73f9c00abf5e5b8aa676e1775261fb717c3ac`）、覆盖 `ns3-overlay/`、同步 `copa_auto_core.h` / `copa_auto_math.h` / `tcp_copa_bench.cc`，并以 6 模块 `optimized` 编译（速度比 debug 快 3–5 倍）。编译产物路径：`ns3/ns-3/build/scratch/ns3-dev-tcp_copa_bench-optimized`。
+等价于拉取 ns-3 基线 commit（`84a73f9c00abf5e5b8aa676e1775261fb717c3ac`）、覆盖 `ns3-overlay/`、同步 `copa_auto_core.h` / `copa_auto_math.h` / `tcp_ccas_bench.cc`，并以 6 模块 `optimized` 编译（速度比 debug 快 3–5 倍）。编译产物路径：`ns3/ns-3/build/scratch/ns3-dev-tcp_ccas_bench-optimized`。
 
 ### 2.2 修改 `copa_auto_core.h` 后的快速测试与增量重编译（~1–2 秒）
 
 ```bash
 make test-core     # 跑 C 核心单元测试（kernel/tcp_copa_auto）
-make build-bench   # 同步头文件并增量重编 tcp_copa_bench
+make build-bench   # 同步头文件并增量重编 tcp_ccas_bench
 ```
 
 ---
@@ -87,10 +87,10 @@ make clean-bench
 
 > `SHARD` 支持单个分片、逗号拼接（如 `lte,leo,nyc-subway`）及复合别名：`full`（全部 44 分片）、`datasets`（6 大类代表）、`rct-datasets`、`lumos-5g-all`（16 分片）、`lumos-4g-all`（18 分片）、`lumos-all`（34 分片）。
 
-### 3.2 单次调试运行 `tcp_copa_bench`
+### 3.2 单次调试运行 `tcp_ccas_bench`
 
 ```bash
-ns3/ns-3/build/scratch/ns3-dev-tcp_copa_bench-optimized \
+ns3/ns-3/build/scratch/ns3-dev-tcp_ccas_bench-optimized \
   --cc=copa_auto_nc \
   --mode=bulk \
   --downTrace=ns3/traces/mahimahi/ATT-LTE-driving.down \
@@ -106,7 +106,7 @@ ns3/ns-3/build/scratch/ns3-dev-tcp_copa_bench-optimized \
 
 ### 3.3 时钟粒度与时间参数（默认值一览）
 
-| 参数（`run_ns3_suite.py` / `tcp_copa_bench`） | 默认值 | 含义与作用 |
+| 参数（`run_ns3_suite.py` / `tcp_ccas_bench`） | 默认值 | 含义与作用 |
 | :--- | :--- | :--- |
 | ns-3 内部事件调度精度（固定） | **`1 ns`** | `ns3::Time::NS`，ns-3 默认离散事件时间分辨率 |
 | `copa_auto_core.h` 时间戳精度（固定） | **`1 µs`** | `Simulator::Now().GetMicroSeconds()`，与 Linux 内核 `tcp_jiffies32` / `srtt_us` 对齐 |
@@ -150,7 +150,7 @@ Workflow 位于 [.github/workflows/ns3-bench.yml](../.github/workflows/ns3-bench
 | `copa_auto_theta<X>` | 自定义 $\theta \in [0.01, 0.995]$，开启竞争模式（如 `copa_auto_theta0.9`、`copa_auto_theta0.98`） |
 | `copa_auto_nc_theta<X>` | 自定义 $\theta \in [0.01, 0.995]$，关闭竞争模式 |
 | `copa_orig` | 原版固定 $\delta=0.50$ Copa（开启竞争模式） |
-| `mortise_copa` | 激进固定 $\delta=0.04$ Copa（开启竞争模式，对标 Mortise eBPF Copa） |
+| `mortise_copa` | **1:1 移植自官方 `BobAnkh/Mortise` `mortise_copa.bpf.c`**（[mortise_copa_ns3.h](mortise_copa_ns3.h)，$\delta=0.04$、`srtt/2` 更新、TCPCoop/Loss 切换） |
 
 ### 5.2 ns-3 原生基线算法
 
@@ -205,9 +205,9 @@ Workflow 位于 [.github/workflows/ns3-bench.yml](../.github/workflows/ns3-bench
 1. **Bulk — `Norm Power`（↑，无量纲 $\in [0, 1]$）**：
    $$\text{Norm Power} = \text{Util} \cdot \frac{R_0}{R_0 + \overline{d_q}}$$
    同时考核链路利用率与排队延迟控制。
-2. **`app.wk` — `RCT Slowdown`（↓，$\ge 1.0\text{x}$）与 `Mortise QoE`（↑）**：
-   $$\text{RCT Slowdown} = \exp\!\left(\frac{1}{N}\sum_{i=1}^{N}\ln\max\!\left(\frac{\text{RCT}_i}{R_0 + S_i/C},\; 1\right)\right)$$
+2. **`app.wk` — `FCT Slowdown`（↓，$\ge 1.0\text{x}$）与 `Mortise QoE`（↑）**：
+   $$\text{FCT Slowdown} = \exp\!\left(\frac{1}{N}\sum_{i=1}^{N}\ln\max\!\left(\frac{\text{FCT}_i}{R_0 + S_i/C},\; 1\right)\right)$$
    以物理最快完成时间为基准取几何平均慢化比，同时兼顾小文件响应、大文件吞吐与长尾方差；并保留原版 `Mortise QoE` 便于与论文直接对标。
 3. **Overall Summary — `Composite Score`（↑，$\in (0, 1]$）**：
-   $$\text{Composite Score} = \sqrt{\frac{\text{Norm Power}}{\text{RCT Slowdown}}}$$
-   按 `(Trace Group, Queue)` 等权汇总并自动标出每列相对最优值的百分比差距（`Norm Power` / `Composite Score` 标 `-X.X%`，`RCT Slowdown` 标 `+X.X%`）。
+   $$\text{Composite Score} = \sqrt{\frac{\text{Norm Power}}{\text{FCT Slowdown}}}$$
+   按 `(Trace Group, Queue)` 等权汇总并自动标出每列相对最优值的百分比差距（`Norm Power` / `Composite Score` 标 `-X.X%`，`FCT Slowdown` 标 `+X.X%`）。
