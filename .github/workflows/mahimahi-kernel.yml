@@ -123,6 +123,7 @@ jobs:
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/bpftool.tar.gz" https://github.com/libbpf/bpftool/releases/download/v7.8.1/bpftool-v7.8.1-amd64.tar.gz
           echo "112026bbdf48d0d00ccfc4926e59878d47943f97c197f959f110abe29c898ddc  $RUNNER_TEMP/bpftool.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/bpftool.tar.gz" -C "$RUNNER_TEMP" bpftool
+          chmod +x "$RUNNER_TEMP/bpftool"
           "$RUNNER_TEMP/bpftool" btf dump file /sys/kernel/btf/vmlinux format c > "$RUNNER_TEMP/Mortise/algorithm/bpf-kern/include/vmlinux.h"
           python3 scripts/bench/ci_runner.py patch-mortise --mortise-dir "$RUNNER_TEMP/Mortise"
           make -C "$RUNNER_TEMP/Mortise/algorithm/bpf-kern" build/mortise_copa.bpf.o CLANG=/usr/bin/clang
