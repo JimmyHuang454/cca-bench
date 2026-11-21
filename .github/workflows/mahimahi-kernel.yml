@@ -51,7 +51,7 @@ on:
       max_shards:
         description: "Max parallel GitHub Actions runners"
         type: string
-        default: "8"
+        default: "20"
         required: true
 
 permissions:
@@ -103,7 +103,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y build-essential git curl pkg-config \
             clang llvm libelf-dev libbpf-dev zlib1g-dev libssl-dev \
-            autoconf automake autotools-dev libtool libtool-bin \
+            autoconf automake autotools-dev libtool libtool-bin dnsmasq \
             xcb libxcb-composite0-dev libxcb-present-dev libcairo2-dev libpango1.0-dev
           test -r /sys/kernel/btf/vmlinux
 
@@ -153,10 +153,7 @@ jobs:
              "$RUNNER_TEMP/Mortise/mortise/target/release/server" \
              "$RUNNER_TEMP/Mortise/mortise/target/release/manager" \
              "$RUNNER_TEMP/tools/Mortise/mortise/target/release/"
-          cp -a "$RUNNER_TEMP/Mortise/mortise/"*.py "$RUNNER_TEMP/tools/Mortise/mortise/"
-          if [ -d "$RUNNER_TEMP/Mortise/mortise/config" ]; then
-            cp -a "$RUNNER_TEMP/Mortise/mortise/config" "$RUNNER_TEMP/tools/Mortise/mortise/"
-          fi
+          find "$RUNNER_TEMP/Mortise/mortise" -mindepth 1 -maxdepth 1 ! -name target -exec cp -a {} "$RUNNER_TEMP/tools/Mortise/mortise/" \;
 
       - name: Upload built tools artifact
         uses: actions/upload-artifact@v4

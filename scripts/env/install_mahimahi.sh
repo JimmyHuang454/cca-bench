@@ -41,7 +41,7 @@ if [[ "$setuid_install" -eq 1 ]]; then
 fi
 
 revision=69df6406e9985a764b4d52b506cd6ee77596ffb2
-sudo apt-get install -y -qq apache2-bin apache2-dev ssl-cert protobuf-compiler libprotobuf-dev
+sudo apt-get install -y -qq dnsmasq apache2-bin apache2-dev ssl-cert protobuf-compiler libprotobuf-dev
 curl -fsSL --retry 3 "https://codeload.github.com/SpaceNetLab/LeoCC/tar.gz/$revision" \
     | tar -xz --strip-components=1 -C "$source_dir"
 cd "$source_dir/leoreplayer/replayer"
