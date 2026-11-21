@@ -25,13 +25,13 @@ class ConversionTest(unittest.TestCase):
                     patch('sys.argv', ['trace_to_lines.py']), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(module.main(), 0)
             dest = root / 'datasets/lines/lumos/5g_trace_100_walking'
-            self.assertEqual((dest / '5g_trace_100_walking.down.txt').read_text(),
+            self.assertEqual((dest / 'down.txt').read_text(),
                              '0,1\n1,0\n2,1\n3,0\n4,1\n5,0\n')
-            self.assertEqual((dest / '5g_trace_100_walking.up.txt').read_text(),
-                             (dest / '5g_trace_100_walking.down.txt').read_text())
-            self.assertEqual((dest / '5g_trace_100_walking.up.delay.txt').read_text(),
+            self.assertEqual((dest / 'up.txt').read_text(),
+                             (dest / 'down.txt').read_text())
+            self.assertEqual((dest / 'up.delay.txt').read_text(),
                              '0,20\n# end_ms=5\n')
-            self.assertEqual((dest / '5g_trace_100_walking.down.delay.txt').read_text(),
+            self.assertEqual((dest / 'down.delay.txt').read_text(),
                              '0,20\n# end_ms=5\n')
 
     def test_script_configuration_directory_and_single_pair(self):
@@ -46,12 +46,12 @@ class ConversionTest(unittest.TestCase):
             with patch.multiple(module, ROOT=root, DATASET_DIR=dataset), \
                     patch('sys.argv', ['trace_to_lines.py']), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(module.main(), 0)
-            self.assertTrue((root / 'datasets/lines/example/a/a.up.txt').is_file())
+            self.assertTrue((root / 'datasets/lines/example/a/up.txt').is_file())
             with patch.multiple(module, ROOT=root, DATASET_DIR=None, UPLINK_TRACE=up,
                                 DOWNLINK_TRACE=down, DELAY_TRACE=delay), \
                     patch('sys.argv', ['trace_to_lines.py']), contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(module.main(), 0)
-            self.assertTrue((root / 'datasets/lines/converted/a/a.down.delay.txt').is_file())
+            self.assertTrue((root / 'datasets/lines/converted/a/down.delay.txt').is_file())
 
     def test_capacity_boundaries_and_gaps(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -64,6 +64,21 @@ class ConversionTest(unittest.TestCase):
             output = io.StringIO()
             module.write_capacity(trace, output)
             self.assertEqual(output.getvalue(), '0,0\n1,2\n2,1\n4,0\n')
+
+    def test_existing_legacy_output_is_not_mixed_with_new_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / 'traces' / 'sample'
+            dataset.mkdir(parents=True)
+            (dataset / 'one.up').write_text('0\n')
+            (dataset / 'one.down').write_text('0\n')
+            output = root / 'datasets/lines/sample/one'
+            output.mkdir(parents=True)
+            (output / 'one.up.txt').write_text('existing\n')
+            with patch.object(module, 'ROOT', root), patch('sys.argv', ['trace_to_lines.py', str(dataset)]), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(module.main(), 1)
+            self.assertFalse((output / 'down.txt').exists())
 
     def test_delay_and_bad_inputs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -90,9 +105,9 @@ class ConversionTest(unittest.TestCase):
             with patch.object(module, 'ROOT', root), patch('sys.argv', ['trace_to_lines.py', str(dataset)]), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(module.main(), 0)
                 target = root / 'datasets/lines/sample/one'
-                self.assertEqual((target / 'one.up.txt').read_text(), '0,1\n1,0\n2,1\n3,0\n')
-                self.assertEqual((target / 'one.up.delay.txt').read_text(), '0,20\n10,25\n# end_ms=20\n')
-                self.assertEqual((target / 'one.down.delay.txt').read_text(), (target / 'one.up.delay.txt').read_text())
+                self.assertEqual((target / 'up.txt').read_text(), '0,1\n1,0\n2,1\n3,0\n')
+                self.assertEqual((target / 'up.delay.txt').read_text(), '0,20\n10,25\n# end_ms=20\n')
+                self.assertEqual((target / 'down.delay.txt').read_text(), (target / 'up.delay.txt').read_text())
                 self.assertEqual(module.main(), 1)
 
     def test_leo_and_batch_validation(self):
@@ -109,9 +124,9 @@ class ConversionTest(unittest.TestCase):
                 (dataset / 'bad.down').unlink()
                 self.assertEqual(module.main(), 0)
                 dest = root / 'datasets/lines/leocc/bw_a'
-                self.assertEqual((dest / 'bw_a.up.txt').read_text(), (dest / 'bw_a.down.txt').read_text())
-                self.assertEqual((dest / 'bw_a.up.delay.txt').read_text(), '0,20\n# end_ms=10\n')
-                self.assertEqual((dest / 'bw_a.down.delay.txt').read_text(), (dest / 'bw_a.up.delay.txt').read_text())
+                self.assertEqual((dest / 'up.txt').read_text(), (dest / 'down.txt').read_text())
+                self.assertEqual((dest / 'up.delay.txt').read_text(), '0,20\n# end_ms=10\n')
+                self.assertEqual((dest / 'down.delay.txt').read_text(), (dest / 'up.delay.txt').read_text())
 
 
 if __name__ == '__main__':

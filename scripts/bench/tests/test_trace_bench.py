@@ -21,6 +21,47 @@ spec.loader.exec_module(bench)
 
 
 class TraceBenchTests(unittest.TestCase):
+    def test_mixed_packet_and_mbps_capacity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            up, down = root / 'up.txt', root / 'down.txt'
+            up.write_text('0,2\n1000,40m\n2000,50.11m\n3000,0\n')
+            down.write_text('0,10\n3000,0\n')
+            end, points = bench.parse_line(up)
+            self.assertEqual(end, 3000)
+            self.assertEqual(points[0][1], 2)
+            self.assertAlmostEqual(points[2][1] * 12, 50.11)
+            for bad in ('0,2.5\n1000,0\n', '0,NaNm\n1000,0\n', '0,40mbps\n1000,0\n'):
+                up.write_text(bad)
+                with self.assertRaises(ValueError):
+                    bench.parse_line(up)
+            up.write_text('0,2\n1000,40m\n2000,50.11m\n3000,0\n')
+            if not bench.BINARY.is_file():
+                self.skipTest('build tcp-trace-bench first')
+            result = subprocess.run([str(bench.BINARY), '--profile=lines', f'--upTrace={up}',
+                                     f'--downTrace={down}', '--stopTime=3', '--ccs=cubic',
+                                     '--segmentSize=1448', '--evalJson=1'],
+                                    text=True, capture_output=True, check=True)
+            data = json.loads(result.stdout)
+            self.assertAlmostEqual(data['capacity_mbps'], (24 + 40 + 50.11) / 3, places=5)
+            self.assertGreater(data['throughput_mbps'], 10)
+
+    def test_discover_fixed_names_and_legacy_scenarios(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene = root / 'wired_fixed'
+            scene.mkdir()
+            for direction in ('up', 'down'):
+                (scene / f'{direction}.txt').write_text('0,1\n100,0\n')
+                (scene / f'{direction}.delay.txt').write_text('0,5\n# end_ms=100\n')
+            scenario = bench.discover(scene)[0]
+            self.assertEqual(scenario['name'], 'wired_fixed')
+            self.assertEqual(set(scenario['files']), {'up', 'down', 'up_delay', 'down_delay'})
+            self.assertEqual(bench.discover(root), [scenario])
+            (scene / 'down.txt').unlink()
+            with self.assertRaisesRegex(ValueError, 'missing up/down'):
+                bench.discover(root)
+
     def test_discover_dataset_and_individual_scenario(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -190,6 +231,9 @@ class TraceBenchTests(unittest.TestCase):
                                 BINARY=binary, CCS=['cubic'], WORKLOADS=['bulk', 'tiny'], REPEATS=1):
                 self.assertEqual(bench.main(), 0)
             report = next((root / 'results').rglob('report.md')).read_text()
+            self.assertIn('TCP 数据段大小：1448 字节', report)
+            metadata = json.loads(next((root / 'results').rglob('metadata.json')).read_text())
+            self.assertEqual(metadata['tcp_segment_size_bytes'], 1448)
             self.assertIn('Norm Power', report)
             self.assertIn('tiny', report)
             csv = next((root / 'results').rglob('runs.csv')).read_text()
@@ -226,6 +270,22 @@ class TraceBenchTests(unittest.TestCase):
             bulk_table = report.split('## bulk', 1)[1].split('## ', 1)[0]
             self.assertNotIn('持续时间 s', bulk_table)
             self.assertNotIn('从传输开始统计，不设置预热', report)
+
+    def test_leocc_cubic_workloads_complete_with_ethernet_mss(self):
+        if not bench.BINARY.is_file():
+            self.skipTest('build tcp-trace-bench first')
+        lines = ROOT / 'datasets/lines/leocc'
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            with patch.multiple(bench, LINES_DIR=lines, RESULTS_DIR=output,
+                                CCS=['cubic'], WORKLOADS=['websearch', 'pageload', 'app'], REPEATS=1):
+                self.assertEqual(bench.main(), 0)
+            with next(output.rglob('runs.csv')).open(newline='') as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(len(rows), 3)
+            for row in rows:
+                self.assertEqual(row['status'], 'success', row['workload'])
+                self.assertEqual(row['requests'], row['requests_expected'])
 
     def test_report_lists_different_bulk_durations_by_scenario(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -310,6 +370,7 @@ class TraceBenchTests(unittest.TestCase):
 
             def simulate(controller, cmd, timeout):
                 nonlocal active, peak
+                self.assertIn('--segmentSize=1448', cmd)
                 with lock:
                     active += 1
                     peak = max(peak, active)

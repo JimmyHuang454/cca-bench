@@ -45,13 +45,17 @@ std::vector<LinePoint> ReadLine(const std::string& file, bool capacity)
         ++lineNo;
         if (line.empty() || line[0] == '#') continue;
         std::istringstream input(line);
-        int64_t ms; double value; char comma; std::string extra;
-        NS_ABORT_MSG_UNLESS((input >> ms >> comma >> value) && comma == ',' && !(input >> extra)
+        int64_t ms; double value; char comma;
+        bool parsed = static_cast<bool>(input >> ms >> comma >> value);
+        bool mbps = capacity && input.peek() == 'm';
+        if (mbps) input.get();
+        input >> std::ws;
+        NS_ABORT_MSG_UNLESS(parsed && comma == ',' && input.eof()
             && ms >= 0 && std::isfinite(value) && value >= 0
-            && (!capacity || (std::floor(value) == value && value <= 1000000))
+            && (!capacity || (mbps ? value <= 12000000 : (std::floor(value) == value && value <= 1000000)))
             && (points.empty() ? ms == 0 : ms > points.back().ms),
             "Invalid lines file " << file << ":" << lineNo);
-        points.push_back({ms, value});
+        points.push_back({ms, mbps ? value / 12.0 : value});
     }
     NS_ABORT_MSG_IF(points.empty(), "Empty lines file " << file);
     return points;

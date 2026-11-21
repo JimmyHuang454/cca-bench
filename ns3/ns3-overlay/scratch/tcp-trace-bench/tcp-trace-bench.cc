@@ -400,14 +400,14 @@ main(int argc, char* argv[])
     double accessDelayMs = 5.0;
     uint32_t queueBytes = 500000;
     std::string aqm = "none";
-    double minRtoMs = 200.0;
+    double minRtoMs = 0.0; // 0 means use the ns-3 default.
     double flowStagger = 0.0;
-    uint32_t segmentSize = 1448;
-    uint32_t sndBufBytes = 1U << 26;
+    uint32_t segmentSize = 0;
+    uint32_t sndBufBytes = 0;
     uint32_t seed = 1;
     uint32_t run = 1;
-    bool freshLoss = true;
-    double clockGranularityMs = 1.0;
+    std::string freshLoss;
+    double clockGranularityMs = 0.0;
     uint32_t copaClockUs = 1;
     int32_t jitterUs = -1;
     uint32_t debugMs = 0;
@@ -474,7 +474,7 @@ main(int argc, char* argv[])
                  "Rate samples report only freshly lost data (TcpSocketBase::FreshLossAccounting)",
                  freshLoss);
     cmd.AddValue("clockGranularityMs",
-                 "TCP ClockGranularity in ms (default 1.0)",
+                 "TCP ClockGranularity in ms (0 = ns-3 default)",
                  clockGranularityMs);
     cmd.AddValue("copaClockUs",
                  "Copa timestamp/RTT quantization in us (1=us, 1000=1ms slow clock)",
@@ -648,22 +648,21 @@ main(int argc, char* argv[])
         NS_FATAL_ERROR("Unknown profile '" << profile << "'");
     }
 
-    // ---- TCP defaults ------------------------------------------------------
-    Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue(segmentSize));
-    Config::SetDefault("ns3::TcpSocket::SndBufSize", UintegerValue(sndBufBytes));
-    Config::SetDefault("ns3::TcpSocket::RcvBufSize", UintegerValue(1U << 26));
-    Config::SetDefault("ns3::TcpSocketBase::Sack", BooleanValue(true));
-    Config::SetDefault("ns3::TcpSocketBase::ClockGranularity",
-                       TimeValue(MilliSeconds(std::max(clockGranularityMs, 0.001))));
-    Config::SetDefault("ns3::TcpSocketBase::MinRto", TimeValue(MilliSeconds(minRtoMs)));
-    Config::SetDefault("ns3::TcpSocketBase::FreshLossAccounting", BooleanValue(freshLoss));
-    // Linux gives up after ~15 min of retries; ns-3's 6 retries would drop a
-    // sender that probes a broken path at a fixed interval.
-    Config::SetDefault("ns3::TcpSocket::DataRetries", UintegerValue(100));
-    Config::SetDefault("ns3::TcpSocketState::EnablePacing", BooleanValue(true));
-    Config::SetDefault("ns3::TcpSocketState::MaxPacingRate", DataRateValue(DataRate("10Gbps")));
-    Config::SetDefault("ns3::TcpL4Protocol::RecoveryType",
-                       TypeIdValue(TcpPrrRecovery::GetTypeId()));
+    // Leave TCP defaults untouched unless the caller explicitly overrides them.
+    if (segmentSize) Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue(segmentSize));
+    if (sndBufBytes) Config::SetDefault("ns3::TcpSocket::SndBufSize", UintegerValue(sndBufBytes));
+    if (clockGranularityMs > 0) Config::SetDefault("ns3::TcpSocketBase::ClockGranularity", TimeValue(MilliSeconds(clockGranularityMs)));
+    if (minRtoMs > 0) Config::SetDefault("ns3::TcpSocketBase::MinRto", TimeValue(MilliSeconds(minRtoMs)));
+    if (!freshLoss.empty())
+    {
+        NS_ABORT_MSG_IF(freshLoss != "0" && freshLoss != "1" && freshLoss != "true" && freshLoss != "false", "Invalid --freshLoss");
+        Config::SetDefault("ns3::TcpSocketBase::FreshLossAccounting", BooleanValue(freshLoss == "1" || freshLoss == "true"));
+    }
+    TypeId::AttributeInformation tcpAttribute;
+    TcpSocket::GetTypeId().LookupAttributeByName("SegmentSize", &tcpAttribute);
+    segmentSize = DynamicCast<const UintegerValue>(tcpAttribute.initialValue)->Get();
+    TcpSocketBase::GetTypeId().LookupAttributeByName("MinRto", &tcpAttribute);
+    minRtoMs = DynamicCast<const TimeValue>(tcpAttribute.initialValue)->Get().GetSeconds() * 1000.0;
 
     // ---- Topology ----------------------------------------------------------
     NodeContainer senders;

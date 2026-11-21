@@ -22,14 +22,16 @@ ROOT = Path(__file__).resolve().parents[2]
 
 # Select a dataset directory or one of its scenario directories.
 # Edit these settings, then run this script or `make bench`.
-LINES_DIR = ROOT / 'datasets/lines/leocc'
-WORKLOADS = ['bulk', 'websearch', 'pageload', 'app']
+LINES_DIR = ROOT / 'datasets/lines/basic'
+# WORKLOADS = ['bulk', 'websearch', 'pageload', 'app']
+WORKLOADS = ['bulk']
 CCS = ['cubic', 'bbr', 'copa_auto_nc','copa']
 REPEATS = 2
 RESUME = True  # False: rerun all combinations and replace their results.
 MAX_WORKERS = os.cpu_count() or 1  # Maximum concurrent ns-3 processes; 1 runs serially.
 WORKLOAD_DRAIN_TIMEOUT_S = 60.0
 DEFAULT_ONE_WAY_DELAY_MS = 10.0
+TCP_SEGMENT_SIZE_BYTES = 1448  # IPv4 + TCP timestamps with a 1500-byte MTU.
 BINARY = ROOT / 'ns3/ns-3/build/scratch/tcp-trace-bench/ns3-dev-tcp-trace-bench-optimized'
 RESULTS_DIR = ROOT / 'results/trace-bench'
 
@@ -56,10 +58,16 @@ def parse_line(path: Path, delay: bool = False) -> tuple[int, list[tuple[int, fl
                         raise ValueError(f'{path}:{number}: invalid end marker') from None
                 continue
             try:
-                t, value = text.split(',')
-                t, value = int(t), float(value)
-                if t < 0 or not math.isfinite(value) or value < 0 or (not delay and (not value.is_integer() or value > 1_000_000)):
+                t, raw_value = text.split(',')
+                raw_value = raw_value.strip()
+                mbps = not delay and raw_value.endswith('m')
+                if mbps and raw_value[:-1] != raw_value[:-1].rstrip():
                     raise ValueError
+                t, value = int(t), float(raw_value[:-1] if mbps else raw_value)
+                if t < 0 or not math.isfinite(value) or value < 0 or (not delay and ((not mbps and not value.is_integer()) or value > (12_000_000 if mbps else 1_000_000))):
+                    raise ValueError
+                if mbps:
+                    value /= 12.0
                 if (not points and t != 0) or (points and t <= points[-1][0]):
                     raise ValueError
             except ValueError:
@@ -82,6 +90,12 @@ def discover(directory: Path) -> list[dict]:
         raise ValueError(f'dataset directory not found: {directory}')
     up = {(p.parent, p.name[:-len('.up.txt')]): p for p in directory.rglob('*.up.txt')}
     down = {(p.parent, p.name[:-len('.down.txt')]): p for p in directory.rglob('*.down.txt')}
+    for direction, files in (('up', up), ('down', down)):
+        for p in directory.rglob(f'{direction}.txt'):
+            key = (p.parent, p.parent.name)
+            if key in files:
+                raise ValueError(f'ambiguous {direction} capacity files in {p.parent}')
+            files[key] = p
     missing = set(up) ^ set(down)
     if missing:
         raise ValueError(f'missing up/down capacity for: {", ".join(str(parent / name) for parent, name in sorted(missing))}')
@@ -94,8 +108,11 @@ def discover(directory: Path) -> list[dict]:
             raise ValueError(f'duplicate scenario name: {name}')
         seen.add(name)
         files = {'up': up[parent, name], 'down': down[parent, name]}
+        if (files['up'].name == 'up.txt') != (files['down'].name == 'down.txt'):
+            raise ValueError(f'mixed capacity file naming in {parent}')
         for direction in ('up', 'down'):
-            p = parent / f'{name}.{direction}.delay.txt'
+            fixed_names = files[direction].name == f'{direction}.txt'
+            p = parent / (f'{direction}.delay.txt' if fixed_names else f'{name}.{direction}.delay.txt')
             if p.is_file():
                 files[direction + '_delay'] = p
         ends = [parse_line(p, key.endswith('_delay'))[0] for key, p in files.items()]
@@ -426,6 +443,7 @@ def write_report(output: Path, scenarios: list[dict], rows: list[dict], work: di
     expected = len(scenarios) * len(CCS) * len(WORKLOADS) * REPEATS
     text = ['# TCP Trace Bench 实验报告', '', f'- 数据集：{LINES_DIR}',
             f'- 算法：{", ".join(CCS)}', f'- 负载：{", ".join(WORKLOADS)}',
+            f'- TCP 数据段大小：{TCP_SEGMENT_SIZE_BYTES} 字节',
             f'- 每组重复：{REPEATS}；计划：{expected}；已运行或恢复：{len(rows)}；成功：{ok}；失败或未完成：{len(rows)-ok}']
     if 'bulk' in WORKLOADS:
         durations = {s['duration_s'] for s in scenarios}
@@ -514,7 +532,9 @@ def main() -> int:
                     'workload_drain_timeout_s': WORKLOAD_DRAIN_TIMEOUT_S,
                     'scenarios': [{'name': s['name'], 'duration_s': s['duration_s'],
                                    'files': {k: {'path': str(v), 'sha256': digest(v)} for k, v in s['files'].items()}} for s in scenarios],
-                    'binary_sha256': digest(BINARY), 'queue_bytes_per_direction': 500000, 'tcp_send_buffer_bytes': 67108864}
+                    'binary_sha256': digest(BINARY), 'queue_bytes_per_direction': 500000,
+                    'tcp_segment_size_bytes': TCP_SEGMENT_SIZE_BYTES,
+                    'tcp_configuration': 'ns-3 defaults except segment size; congestion-control implementations may enable pacing'}
         atomic_write(output / 'metadata.json', json.dumps(metadata, indent=2) + '\n')
         scenario_hashes = {s['name']: {k: v['sha256'] for k, v in s['files'].items()}
                            for s in metadata['scenarios']}
@@ -532,7 +552,8 @@ def main() -> int:
                                   else work[wk]['span_s'] + WORKLOAD_DRAIN_TIMEOUT_S + 0.001)
                         cmd = [str(BINARY), '--profile=lines', f'--upTrace={files["up"]}', f'--downTrace={files["down"]}',
                                f'--stopTime={stop_s}', f'--ccs={cc}', f'--run={repeat}',
-                               f'--defaultDelayMs={DEFAULT_ONE_WAY_DELAY_MS}', '--evalJson=1']
+                               f'--defaultDelayMs={DEFAULT_ONE_WAY_DELAY_MS}',
+                               f'--segmentSize={TCP_SEGMENT_SIZE_BYTES}', '--evalJson=1']
                         for direction in ('up', 'down'):
                             if direction + '_delay' in files:
                                 cmd.append(f'--{direction}DelayFile={files[direction + "_delay"]}')

@@ -101,20 +101,20 @@ def directory_jobs(directory: Path, dest: Path) -> list[ConversionJob]:
         if lumos:
             # Lumos has measured downlink only; use that same schedule in both
             # directions as an explicit symmetric approximation.
-            jobs.extend([ConversionJob(down, scene_dir / f'{name}.down.txt', 'capacity'),
-                         ConversionJob(down, scene_dir / f'{name}.up.txt', 'copy')])
+            jobs.extend([ConversionJob(down, scene_dir / 'down.txt', 'capacity'),
+                         ConversionJob(down, scene_dir / 'up.txt', 'copy')])
         elif up.is_file():
-            jobs.extend([ConversionJob(up, scene_dir / f'{name}.up.txt', 'capacity'),
-                         ConversionJob(down, scene_dir / f'{name}.down.txt', 'capacity')])
+            jobs.extend([ConversionJob(up, scene_dir / 'up.txt', 'capacity'),
+                         ConversionJob(down, scene_dir / 'down.txt', 'capacity')])
         else:
             raise ValueError(f'missing uplink file: {up}')
         delay = down.with_suffix('.delay')
         if delay.is_file():
-            jobs.extend([ConversionJob(delay, scene_dir / f'{name}.up.delay.txt', 'delay'),
-                         ConversionJob(delay, scene_dir / f'{name}.down.delay.txt', 'delay')])
+            jobs.extend([ConversionJob(delay, scene_dir / 'up.delay.txt', 'delay'),
+                         ConversionJob(delay, scene_dir / 'down.delay.txt', 'delay')])
         elif lumos:
-            jobs.extend([ConversionJob(down, scene_dir / f'{name}.up.delay.txt', 'constant-delay'),
-                         ConversionJob(down, scene_dir / f'{name}.down.delay.txt', 'constant-delay')])
+            jobs.extend([ConversionJob(down, scene_dir / 'up.delay.txt', 'constant-delay'),
+                         ConversionJob(down, scene_dir / 'down.delay.txt', 'constant-delay')])
     # LeoCC examples use one bandwidth trace in both directions.
     leo_files = sorted(directory.glob('bw_*.txt'))
     if (directory / 'leo-bw.txt').is_file():
@@ -126,10 +126,10 @@ def directory_jobs(directory: Path, dest: Path) -> list[ConversionJob]:
             raise ValueError(f'missing LeoCC delay file: {delay}')
         name = bw.stem
         scene_dir = dest / name
-        jobs.extend([ConversionJob(bw, scene_dir / f'{name}.up.txt', 'capacity'),
-                     ConversionJob(bw, scene_dir / f'{name}.down.txt', 'capacity'),
-                     ConversionJob(delay, scene_dir / f'{name}.up.delay.txt', 'delay'),
-                     ConversionJob(delay, scene_dir / f'{name}.down.delay.txt', 'delay')])
+        jobs.extend([ConversionJob(bw, scene_dir / 'up.txt', 'capacity'),
+                     ConversionJob(bw, scene_dir / 'down.txt', 'capacity'),
+                     ConversionJob(delay, scene_dir / 'up.delay.txt', 'delay'),
+                     ConversionJob(delay, scene_dir / 'down.delay.txt', 'delay')])
     if not jobs:
         raise ValueError(f'{directory}: no .up/.down pairs or bw_*.txt traces found')
     return jobs
@@ -162,17 +162,20 @@ def main() -> int:
                 raise ValueError('downlink trace is required')
             name = args.downlink.stem
             dest = ROOT / 'datasets' / 'lines' / 'converted' / name
-            jobs = [ConversionJob(args.uplink, dest / f'{name}.up.txt', 'capacity'),
-                    ConversionJob(args.downlink, dest / f'{name}.down.txt', 'capacity')]
+            jobs = [ConversionJob(args.uplink, dest / 'up.txt', 'capacity'),
+                    ConversionJob(args.downlink, dest / 'down.txt', 'capacity')]
             if args.delay is not None:
-                jobs.extend([ConversionJob(args.delay, dest / f'{name}.up.delay.txt', 'delay'),
-                             ConversionJob(args.delay, dest / f'{name}.down.delay.txt', 'delay')])
+                jobs.extend([ConversionJob(args.delay, dest / 'up.delay.txt', 'delay'),
+                             ConversionJob(args.delay, dest / 'down.delay.txt', 'delay')])
         targets = [job.target for job in jobs]
         if len(set(targets)) != len(targets):
             raise ValueError('multiple inputs map to the same output filename')
         for target in targets:
             if target.exists():
                 raise ValueError(f'output already exists: {target}')
+            legacy = target.parent / f'{target.parent.name}.{target.name}'
+            if legacy.exists():
+                raise ValueError(f'legacy output already exists: {legacy}')
         dest.mkdir(parents=True, exist_ok=True)
         # Convert and validate the entire batch before publishing any files.
         with tempfile.TemporaryDirectory(prefix='.trace-to-lines-', dir=dest) as temp:

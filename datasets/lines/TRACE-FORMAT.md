@@ -14,7 +14,7 @@ python3 scripts/data/trace_to_lines.py
 python3 scripts/data/trace_to_lines.py input.up input.down [delay.txt]
 ```
 
-输出位于 `datasets/lines/converted/`，以输入的下行文件名为场景名，分别生成 `<场景>.up.txt`、`<场景>.down.txt`，提供延迟时再生成 `<场景>.up.delay.txt` 和 `<场景>.down.delay.txt`。
+输出位于 `datasets/lines/converted/<场景名>/`，以输入的下行文件名为场景名，分别生成 `up.txt`、`down.txt`，提供延迟时再生成 `up.delay.txt` 和 `down.delay.txt`。
 
 也可转换整个数据集：
 
@@ -28,19 +28,32 @@ python3 scripts/data/trace_to_lines.py datasets/traces/cellular-traces-2018
 
 ```text
 datasets/lines/lumos/5g_trace_100_walking/
-  5g_trace_100_walking.up.txt
-  5g_trace_100_walking.down.txt
-  5g_trace_100_walking.up.delay.txt
-  5g_trace_100_walking.down.delay.txt
+  up.txt
+  down.txt
+  up.delay.txt
+  down.delay.txt
 ```
 
-单组文件转换的输出目录同样是 `datasets/lines/converted/<场景名>/`。bench 的 `LINES_DIR` 可以指定数据集目录或单个场景目录；也兼容旧的平铺文件布局。
+单组文件转换的输出目录同样是 `datasets/lines/converted/<场景名>/`。bench 的 `LINES_DIR` 可以指定数据集目录或单个场景目录；也兼容旧的带场景名前缀的文件。
 
 Lumos 的 `.down` 表示下载方向；目前 `tcp-trace-bench` 的数据固定走 `.up`，ACK 走 `.down`。当前上下行使用相同时间序列，因此数据可经过由下行轨迹生成的容量变化；这不能模拟独立的真实上行或下载方向特有的非对称行为。
 
 ## 容量
 
 每行 `时间点,发包机会数`，时间单位 ms，机会数是从该时间点起每 1 ms 可发送的 1500 字节机会数。连续相同的值合并，区间左闭右开。
+
+容量值也可带小写 `m` 后缀，表示 Mbps，可以使用小数；同一个文件可以混用两种写法。例如：
+
+```text
+0,10
+1000,20
+3000,40m
+4000,50.11m
+5000,60
+6000,0
+```
+
+其中 `1000,20` 表示每毫秒 20 个 1500 字节发包机会，`3000,40m` 表示 40 Mbps，`4000,50.11m` 表示 50.11 Mbps。容量每毫秒换算为字节额度，小数部分跨毫秒累计以保留精度；未使用的整数额度不会留到下一个毫秒。该后缀仅用于容量文件，延迟文件仍以 ms 表示。
 
 ```text
 0,1

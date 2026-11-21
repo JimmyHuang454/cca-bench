@@ -129,6 +129,7 @@ TcpCopaAutoV2::QuantizeUs(uint64_t valUs, uint32_t clockUs)
 void
 TcpCopaAutoV2::EnsureInit(Ptr<TcpSocketState> tcb)
 {
+    tcb->m_pacing = true;
     if (m_initialized)
     {
         return;

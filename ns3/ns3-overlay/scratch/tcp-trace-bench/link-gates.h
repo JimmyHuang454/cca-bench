@@ -211,9 +211,9 @@ class MahimahiGate : public ErrorModel
     }
 
     /** @return opportunities since the previous call */
-    uint64_t TakeOpportunities()
+    double TakeOpportunities()
     {
-        const uint64_t c = m_opportunities;
+        const double c = m_opportunities;
         m_opportunities = 0;
         return c;
     }
@@ -297,7 +297,7 @@ class MahimahiGate : public ErrorModel
     {
         if (m_lineMode)
         {
-            m_batch = static_cast<uint32_t>(PeriodicLineValue(m_line, m_tick));
+            m_batch = PeriodicLineValue(m_line, m_tick);
             Simulator::ScheduleWithContext(m_dev->GetNode()->GetId(),
                 MilliSeconds(m_tick) - Simulator::Now(), &MahimahiGate::Opportunity, this);
             ++m_tick;
@@ -326,7 +326,9 @@ class MahimahiGate : public ErrorModel
     void Opportunity()
     {
         m_opportunities += m_batch;
-        uint64_t left = 1500 * m_batch;
+        const double bytes = 1500.0 * m_batch + m_fractionalBytes;
+        uint64_t left = static_cast<uint64_t>(std::floor(bytes + 1e-9));
+        m_fractionalBytes = std::max(0.0, bytes - left);
         while (left > 0 && !m_buffer.empty())
         {
             Ptr<Packet> p = m_buffer.front();
@@ -362,7 +364,8 @@ class MahimahiGate : public ErrorModel
     Ptr<PointToPointNetDevice> m_dev;   ///< Gated device
     std::vector<int64_t> m_ms;          ///< Opportunities [ms]
     std::vector<int64_t> m_delays;      ///< One-way delay per 10 ms [ms]
-    uint32_t m_batch{0};                ///< Opportunities of the next event
+    double m_batch{0};                  ///< 1500-byte opportunities of the next event
+    double m_fractionalBytes{0};        ///< Fractional-byte rounding remainder
     Time m_lastArrival;                 ///< Latest arrival already scheduled
     double m_loss{0.0};                 ///< Random loss probability
     std::deque<Time> m_enqTimes;        ///< Enqueue timestamps matching m_buffer
@@ -377,7 +380,7 @@ class MahimahiGate : public ErrorModel
     uint32_t m_sentOfHead{0};           ///< Bytes of the head packet already sent
     size_t m_next{0};                   ///< Next entry of the trace
     int64_t m_baseMs{0};                ///< Simulation time of trace time 0 [ms]
-    uint64_t m_opportunities{0};        ///< Opportunities since the last query
+    double m_opportunities{0};          ///< Opportunities since the last query
     bool m_reinject{false};             ///< Delivering a packet
 };
 
