@@ -1,6 +1,6 @@
-# CCAs-bench
+# Linux Kernel TCP Bench（Mahimahi + `datasets/lines`）
 
-基于 Mahimahi 的多数据集自动化对比评测框架。
+基于 Mahimahi（增强版 LeoReplayer）与 Mortise 的 Linux 内核 TCP 拥塞控制自动化对比框架，直接复用仓库内 [datasets/lines](../datasets/lines/TRACE-FORMAT.md) 数据集与 [datasets/workloads](../datasets/workloads/FORMAT.md) 负载文件，与 ns-3 `tcp-trace-bench` 保持一致的数据源、方向语义、队列缓冲与排名口径。
 
 ## 本地验证内核核心单测
 
@@ -18,133 +18,53 @@ sysctl net.ipv4.tcp_available_congestion_control
 
 ## 在 GitHub Actions 上运行 Linux 内核测试
 
-工作流 [Mahimahi Linux Kernel Bench](../.github/workflows/mahimahi-kernel.yml) 在 Linux runner 上编译并加载 `tcp_copa_auto.ko`，加载 Mortise eBPF，并通过 Mahimahi 重放轨迹。先把代码和工作流提交并推送到 GitHub；在仓库 **Actions → Mahimahi Linux Kernel Bench → Run workflow** 中选择分支和参数。首次建议使用 `quick` 和 `parallel=1`。每个 shard 会上传 `results-kernel-*`；汇总上传为 `mahimahi-kernel-comparison-summary`。出现构建、模块加载、BPF 加载或测试失败时查看对应 job 日志和 shard artifact。
+工作流 [Mahimahi Linux Kernel Bench](../.github/workflows/mahimahi-kernel.yml) 包含 4 个阶段：`plan → build → kernel-eval (matrix) → summarize`。
+- `build` 阶段一次性编译并缓存增强版 Mahimahi 与 Mortise（Rust `client`/`server`/`manager` + Linux 6.10+ 4-arg ABI 补丁后的 `mortise_copa.bpf.o`），打包分发给所有并行 runner；
+- `kernel-eval` 阶段按场景预估耗时自动均衡分片（LPT 装箱），编译并加载 `tcp_copa_auto.ko`（若包含 `leocc` 则自动编译加载 `tcp_leocc.ko`），自动 `modprobe` 主线算法（`bbr`、`vegas`、`westwood`、`illinois`、`veno`、`yeah`、`hybla`、`cdg`）；
+- `summarize` 阶段汇总全部 shard 的 `shard_runs.csv`，输出与 ns-3 `tcp-trace-bench` 同构的 `runs.csv`、`metadata.json`、`report.md`（同步展示在 GitHub Actions Summary 页面，并上传 `mahimahi-kernel-lines-summary` artifact）。
+
+### 工作流输入参数
 
 | 输入 | 默认值 | 说明 |
 |---|---|---|
-| `mode` | `quick` | `quick` 同时测试 bulk 和 app；`datasets` 测试 NYC subway、Lumos5G 和 Leo 的 bulk；`rct-datasets` 测试指定请求负载 |
-| `kernel_ccs` | `copa_auto_v2,copa_auto_nc,mortise_copa,bbr,cubic` | 要测试的 Linux TCP 拥塞算法，逗号分隔；必须在 runner 内核中可用 |
-| `measurement_rtts` | `16` | `copa_auto_v2` 的测量周期（1～256 SRTT，内核模块加载时设置） |
+| `dataset` | `basic` | 数据集：`basic`（27 场景）、`leocc`（1 场景）、`cellular-traces-2018`（2 场景）、`lumos`（26 场景）或 `all` |
+| `scenarios` | 空 | 可选逗号分隔场景名过滤，空值表示运行整个 `dataset`（如 `elevator,bandwidth_drop_severe` 或 `5g_trace_100_walking`） |
+| `workloads` | `bulk,app` | 逗号分隔负载，支持 `bulk`、`app`、`websearch`、`pageload`、`vl2`（直接读取 `datasets/workloads/*.wk`） |
+| `kernel_ccs` | `copa_auto_v2,copa_auto_nc,mortise_copa,bbr,cubic` | 逗号分隔 Linux TCP 拥塞算法名 |
+| `queues` | `500KB` | Mahimahi 瓶颈链路队列（每方向，默认 `500KB` 对齐 ns-3 `tcp-trace-bench`；端主机保持 Linux 默认参数；支持多队列如 `150KB,500KB,2MB` 或 `infinite`） |
+| `measurement_rtts` | `16` | `copa_auto_v2` 的测量周期（1～256 SRTT，加载 `tcp_copa_auto.ko` 时设置） |
 | `repeats` | `1` | 每个配置的重复次数 |
-| `parallel` | `1` | 每台 runner 同时运行的实验数；1 可降低相互干扰 |
-| `queues` | 空 | 覆盖队列大小，如 `150KB,2MB`；空值使用数据集默认值 |
-| `rct_workloads` | `app,websearch` | `rct-datasets` 的请求负载 |
+| `max_bulk_s` | `0` | Bulk 最大运行秒数（`0` 表示按 `lines` 全长运行；如对 800s 的 `lumos` 可填 `120` 截断） |
+| `workload_timeout_s` | `300` | 单个 workload 的最大实际运行秒数，超时或未完成全部请求按 `timeout` 计 0 分 |
+| `max_shards` | `8` | 最大并发 GitHub Actions runner 数（每台 runner 固定 `parallel=1` 以避免 Mahimahi 调度抖动） |
 
-以下模式和算法说明也涵盖脚本支持但**本工作流输入未开放**的历史选项。此工作流不运行 QUIC；具体可选 `mode` 以工作流下拉框为准。
+### 方向映射与延迟回放语义
 
-### 评测模式（`mode`）
+- **显式方向映射**：
+  - `datasets/lines` 中 `up.txt` + `up.delay.txt` 为 TCP 数据方向、`down.txt` + `down.delay.txt` 为 TCP ACK 方向；
+  - Mortise 架构中 `server` 位于 Mahimahi 外侧、`client` 位于 Mahimahi 内侧，数据由 `server → client`（Mahimahi **downlink**）发送、ACK 由 `client → server`（Mahimahi **uplink**）返回；
+  - 转换脚本 [lines_to_mahimahi.py](../scripts/data/lines_to_mahimahi.py) 自动将 `lines/up.*` 映射到 Mahimahi `downlink`、`lines/down.*` 映射到 Mahimahi `uplink`，确保非对称带宽、单向断连和非对称延迟场景与 ns-3 语义完全一致。
+- **动态与非对称延迟**：
+  - [install_mahimahi.sh](../scripts/env/install_mahimahi.sh) 为 LeoReplayer `mm-delay` 补丁增加了 `--downlink-delay <file>` 双方向独立动态延迟支持，并将 `DelayQueue` 改为单调时间戳保序 FIFO 队列（延迟骤降或同毫秒突发不会造成乱序），且不再额外注入随机丢包。
+- **队列与预热**：
+  - Linux 端主机保持默认 TCP 缓冲与 qdisc；`mm-link` 瓶颈队列默认每方向 `500KB`、`bulk` 预热 `0s`，与 ns-3 `tcp-trace-bench` 保持同口径。
 
-| `mode`                            | 数据集分片（Shard）                                                                          | 负载                                  | 默认队列                            | 说明                               |
-| :-------------------------------- | :------------------------------------------------------------------------------------------- | :------------------------------------ | :---------------------------------- | :--------------------------------- |
-| `quick`                           | `smoke`（`ATT-LTE-driving-2016`）                                                            | `bulk`, `app`                         | `150 KB`                            | 快速验证（约 2–4 分钟）            |
-| `rct`                             | `smoke`（`ATT-LTE-driving-2016`）                                                            | `app`                                 | `2 MB`                              | LTE `app.wk` RCT 专项对比          |
-| `rct-datasets`                    | `lte`, `nyc-rct`, `lumos-rct`, `leo`                                                         | `rct_workloads`（默认 4 种）          | LTE/NYC/Leo `2 MB`，5G `16 MB`      | 学界多数据集 × 多负载 RCT 全套评测 |
-| `smoke`                           | `smoke`                                                                                      | `bulk`, `app`                         | `150 KB, 2 MB`                      | 单 trace 双队列完整默认算法集      |
-| `datasets`                        | `nyc-subway`, `lumos-5g`, `leo`                                                              | `bulk`                                | 4G `150 KB`，5G/Leo `2 MB`          | 多场景 Bulk 吞吐与延迟对比         |
-| `lumos-5g-all`                    | `lumos-5g-s1-of-16` .. `s16-of-16`（16 分片并行）                                            | `bulk`, `app`                         | `bulk: 2 MB`，`app: 16 MB`          | **Lumos5G 5G 全集（121 条）**      |
-| `lumos-4g-all`                    | `lumos-4g-s1-of-18` .. `s18-of-18`（18 分片并行）                                            | `bulk`, `app`                         | `2 MB`                              | **Lumos5G 4G 全集（175 条）**      |
-| `lumos-all`                       | 以上 34 分片并行                                                                             | `bulk`, `app`                         | 5G `2 MB / 16 MB`，4G `2 MB`        | **Lumos5G 5G + 4G 全集（296 条）** |
-| `nyc-subway` / `lumos-5g` / `leo` | 对应单个分片                                                                                 | `bulk`（或 `bulk, app`）              | 按数据集浅/深双队列                 | 单独跑某一类真实轨迹               |
-| `full`                            | 全部 **44 个分片**（LTE + NYC + Synth + Leo + Lumos 5G 16 片 + 4G 18 片，共 **329 条轨迹**） | `bulk` + `rct_workloads`（默认 5 种） | **按各数据集浅/深双队列**（见下表） | **仓库全数据集 × 全负载完整评测**  |
+### 可选 Linux 内核 TCP 拥塞控制算法
 
-### 各数据集队列配置与依据
+| 算法名 | 来源 | 说明 |
+|---|---|---|
+| `copa_auto_v2` | `tcp_copa_auto.ko`（本仓库） | v2 单周期估计，周期由 `measurement_rtts` 控制 |
+| `copa_auto` | `tcp_copa_auto.ko`（本仓库） | 自适应 $\delta$（$\theta=0.50$），开启竞争模式切换 |
+| `copa_auto_theta<X>` | `tcp_copa_auto.ko`（本仓库） | 自定义 $\theta \in [0.01, 0.995]$，如 `copa_auto_theta0.9`、`copa_auto_theta0.98` |
+| `copa_auto_nc` / `copa_auto_nc_j0` | `tcp_copa_auto.ko`（本仓库） | 自适应 $\delta$，关闭竞争模式切换 |
+| `copa_orig` | `tcp_copa_auto.ko`（本仓库） | 固定 $\delta=0.50$ Copa |
+| `mortise_copa` | eBPF（[BobAnkh/Mortise](https://github.com/BobAnkh/Mortise)） | Mortise eBPF Copa |
+| `leocc` | `tcp_leocc.ko`（本仓库） | LEO 低轨卫星专用算法（选择时自动编译加载） |
+| `bbr` / `cubic` / `vegas` / `cdg` / `veno` / `yeah` / `illinois` / `westwood` / `hybla` / `reno` | Linux 主线内置 | 自动按需 `modprobe` 加载 |
 
-不同网络场景的 BDP（带宽 × 时延积）跨度超过 100 倍，默认按各数据集的典型 BDP 与原论文设定自动匹配 **浅队列（~0.5–1× BDP）** 与 **深队列（~4–10× BDP，测 bufferbloat）**，也可通过 `queues` 输入项手动覆写（如 `150KB,2MB`）：
+### 常用 Actions 填写示例
 
-| 数据集                            | 典型带宽 & RTT         | 1× BDP 约  | 默认浅 / 深队列   | 依据                                                                                                                                                           |
-| :-------------------------------- | :--------------------- | :--------- | :---------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Mahimahi LTE / NYC 4G / Synth** | 5–40 Mbps, 40 ms       | 25–200 KB  | `150 KB` / `2 MB` | Mortise / Copa 论文常用浅队（~100 包）与深队（~1300 包）                                                                                                       |
-| **Lumos5G 4G**                    | 20–60 Mbps, 40 ms      | 100–300 KB | `150 KB` / `2 MB` | 同 4G 蜂窝量级                                                                                                                                                 |
-| **Lumos5G 5G**                    | 100–800 Mbps, 40 ms    | 0.5–4 MB   | `2 MB` / `16 MB`  | 5G 毫米波高 BDP 场景，避免浅队过小导致非拥塞丢包                                                                                                               |
-| **LeoCC Starlink**                | 50–200 Mbps, 40–100 ms | 0.5–2.5 MB | `2 MB` / `75 MB`  | `2 MB` 受限缓冲对照 + `75 MB` 对齐 [LeoCC 官方 `leoreplayer`](https://github.com/SpaceNetLab/LeoCC/blob/main/leoreplayer/README.md) 下行 50,000 包实测超深缓存 |
-
-### 数据集（Datasets）
-
-| 数据集                    | 场景特征                                        | 包含的 Trace（对应 Shard）                                                                                                                                                                         | 来源                                                                                |
-| :------------------------ | :---------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------- |
-| **Mahimahi Cellular LTE** | 蜂窝驾车、高抖动（15–40 ms）、带宽波动          | `ATT-LTE-driving-2016`、`ATT-LTE-driving`、`TMobile-LTE-driving`、`Verizon-LTE-driving`（`lte`；`smoke` 仅第 1 条）                                                                                | [ravinet/mahimahi](https://github.com/ravinet/mahimahi/tree/master/traces)          |
-| **NYC 4G（NYU）**         | 城市定点 / 步行 / 公交与出租车移动蜂窝          | 定点 5 条（`nyc-stat`）、步行 12 条（`nyc-walk-1/2/3`）、驾车 6 条（`nyc-drive-1/2`）                                                                                                              | [Soheil-ab/Cellular-Traces-NYC](https://github.com/Soheil-ab/Cellular-Traces-NYC)   |
-| **NYC 4G Subway（2018）** | 地铁场景（无交叉流 / 有交叉流）                 | `nyc2018-4g-subway-no-cross`、`nyc2018-4g-subway-with-cross`（`nyc-subway`；`nyc-rct` 精选 3 条）                                                                                                  | [Soheil-ab/Cellular-Traces-2018](https://github.com/Soheil-ab/Cellular-Traces-2018) |
-| **Lumos5G（SIGCOMM'21）** | 商业 5G 毫米波 + 4G 步行/驾车、超高带宽、大 BDP | **5G 全集 121 条**（`lumos-5g-all`）+ **4G 全集 175 条**（`lumos-4g-all`）；`lumos-all` 跑全部 **296 条**；抽样 `lumos-5g` 2 条、`lumos-rct` 1 条                                                  | [SIGCOMM21-5G/artifact](https://github.com/SIGCOMM21-5G/artifact)                   |
-| **LeoCC Starlink**        | LEO 低轨卫星 15 秒级切换、RTT 跳变 + 带宽切换   | GitHub 仓库自带官方示例全含：`leo-starlink-example-fixed`、`leo-starlink-example-dynamic`（`leo`，使用 `leoreplayer`）；作者另在清华云盘提供 8 类 × 600 条扩展集（可上传至本仓库 Releases 后接入） | [SpaceNetLab/LeoCC](https://github.com/SpaceNetLab/LeoCC)                           |
-| **合成轨迹（Synth）**     | 稳态与阶跃带宽基准（参考 Mortise Fig. 9）       | `synth-48mbps`（48 Mbps）、`synth-step`（7.5 → 13 → 6 Mbps）（`synth`）                                                                                                                            | [`scripts/run_mahimahi_suite.py`](scripts/run_mahimahi_suite.py)                    |
-
-### 流量负载（Workloads）
-
-| Workload        | 流量特征                                                    | 规模                                | 来源                                                                                                                                 |
-| :-------------- | :---------------------------------------------------------- | :---------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------- |
-| **`bulk`**      | 持续饱和流（连续 2 MB 块），测稳态吞吐、RTT、排队延迟与 QoE | 默认 30–45s（LeoCC 115s）           | 工作流自动生成                                                                                                                       |
-| **`app`**       | 混合中小对象请求，Mortise 论文原版 RCT 基准                 | 92 请求，跨度 149.3s，总计 58.30 MB | [BobAnkh/Mortise (`app.wk`)](https://github.com/BobAnkh/Mortise/blob/main/mortise/workload/app.wk)                                   |
-| **`websearch`** | 经典重尾分布（大量几 KB 小查询 + 少数几 MB 大对象）         | 80 请求，跨度 95.9s，总计 29.10 MB  | DCTCP ([SIGCOMM'10](https://dl.acm.org/doi/10.1145/1851182.1851192))，由 [`scripts/gen_workloads.py`](scripts/gen_workloads.py) 生成 |
-| **`vl2`**       | 极端双峰重尾（极多超小 RPC + 极少数超大传输）               | 80 请求，跨度 89.9s，总计 10.91 MB  | VL2 ([SIGCOMM'09](https://dl.acm.org/doi/10.1145/1592568.1592576))，由 [`scripts/gen_workloads.py`](scripts/gen_workloads.py) 生成   |
-| **`pageload`**  | 突发式网页资源簇（HTML/CSS/JS/图片成批到达 + 思考间隔）     | 80 请求，跨度 48.7s，总计 19.91 MB  | HTTP/3 网页加载模型，由 [`scripts/gen_workloads.py`](scripts/gen_workloads.py) 生成                                                  |
-
-### 可选拥塞控制算法（通过 `kernel_ccs` / `quinn_ccs` 自由挑选）
-
-在 GitHub Actions 触发界面中，留空 `kernel_ccs` / `quinn_ccs` 会按 `mode` 跑默认算法集；填入逗号分隔的算法名即可**只跑你指定的算法组合**（支持 `{theta}` 占位符，会自动替换为 `theta` 输入框的首个值）。
-
-#### 1. Linux 内核 TCP 栈（`kernel_ccs`，`run_kernel=true`）
-
-| 算法名               | 分类 / 来源                                                                 | 说明                                                                              |
-| :------------------- | :-------------------------------------------------------------------------- | :-------------------------------------------------------------------------------- |
-| `copa_auto_v2`       | `tcp_copa_auto.ko`（本仓库）                                                | v2 单周期估计，默认关闭竞争模式；周期由 `measurement_rtts` 控制                   |
-| `copa_auto`          | `tcp_copa_auto.ko`（本仓库）                                                | 自适应 $\delta$（默认 $\theta=0.50$），开启竞争模式切换                           |
-| `copa_auto_theta<X>` | `tcp_copa_auto.ko`（本仓库）                                                | 自定义 $\theta \in [0.01, 0.995]$，如 `copa_auto_theta0.9`、`copa_auto_theta0.98` |
-| `copa_auto_nc`       | `tcp_copa_auto.ko`（本仓库）                                                | 自适应 $\delta$（默认 $\theta=0.50$），关闭竞争模式切换                                |
-| `copa_orig`          | `tcp_copa_auto.ko`（本仓库）                                                | 原版固定 $\delta=0.50$ Copa（现代 Linux 6.x 内核实现）                            |
-| `mortise_copa`       | eBPF（[BobAnkh/Mortise](https://github.com/BobAnkh/Mortise)）               | 官方 Mortise eBPF Copa                                                            |
-| `leocc`              | `tcp_leocc.ko`（[SpaceNetLab/LeoCC](https://github.com/SpaceNetLab/LeoCC)） | LEO 低轨卫星专用算法（仿真版适配 Linux 6.x，`leo` 分片默认自动加入）              |
-| `bbr`                | Linux 主线内置                                                              | Google 官方 BBRv1                                                                 |
-| `cubic`              | Linux 主线内置                                                              | Linux 默认丢包型基线                                                              |
-| `vegas`              | Linux 主线内置                                                              | 经典基于排队延迟算法                                                              |
-| `cdg`                | Linux 主线内置                                                              | CAIA Delay-Gradient（基于延迟梯度）                                               |
-| `veno`               | Linux 主线内置                                                              | 混合丢包+排队估计（无线链路优化）                                                 |
-| `yeah`               | Linux 主线内置                                                              | YeAH-TCP（快慢双模混合算法）                                                      |
-| `illinois`           | Linux 主线内置                                                              | 延迟调制 AIMD 混合算法                                                            |
-| `westwood`           | Linux 主线内置                                                              | 基于带宽估计（无线丢包场景）                                                      |
-| `hybla`              | Linux 主线内置                                                              | 高 RTT 补偿（卫星 / LeoCC 场景）                                                  |
-| `reno`               | Linux 主线内置                                                              | 经典 NewReno                                                                      |
-
-各 `mode` 留空 `kernel_ccs` 时的默认算法集：
-
-- `quick` / `datasets`：`copa_auto,copa_auto_nc,copa_auto_theta<theta>,mortise_copa`（`leo` 分片自动附加 `leocc`）
-- `rct`：`copa_auto,copa_auto_theta0.9,copa_auto_theta0.98,copa_orig,mortise_copa`
-- `rct-datasets`：`copa_auto,copa_auto_theta<theta...>,copa_auto_nc,copa_orig,mortise_copa,bbr,cubic,vegas,cdg`（`leo` 分片自动附加 `leocc`）
-- `smoke` / `full` / `lumos-*-all` 等：`copa_auto,copa_auto_nc,copa_auto_theta<theta>,copa_orig,mortise_copa,bbr,cubic`
-
-#### 2. QUIC 用户态栈（`quinn_ccs`，需勾选 `run_quinn=true`）
-
-- 可选算法：`copa-auto`、`copa-auto-theta<X>`、`copa-auto-nc`、`copa`、`copa-nc`、`bbr1`、`bbr2`、`bbr3`、`cubic`、`new-reno`
-
-#### 3. 常用 Actions 填写示例
-
-- **快速验证（纯内核 TCP）**：`mode=quick`，`theta=0.9`，`kernel_ccs` 留空，`run_kernel=true`，`run_quinn=false`
-- **自定义内核全算法横向对比**：
-  - `mode=rct-datasets`，`theta=0.9,0.98`，`repeats=3`，`rct_workloads=app,websearch,vl2,pageload`
-  - `kernel_ccs=copa_auto,copa_auto_theta0.9,copa_auto_theta0.98,copa_auto_nc,copa_orig,mortise_copa,leocc,bbr,cubic,vegas,cdg,veno,yeah,hybla`
-- **卫星场景专项对比**：
-  - `mode=leo`，`kernel_ccs=copa_auto,copa_auto_theta0.98,leocc,mortise_copa,bbr,cubic,hybla`
-- **补充看 QUIC 侧 BBRv1/v2/v3**：
-  - 勾选 `run_quinn=true`，`quinn_ccs=copa-auto,copa-auto-theta0.98,bbr1,bbr2,bbr3,cubic`
-
----
-
-## 本地运行外置 LeoCC Starlink 数据集
-
-下载清华云盘 Starlink 轨迹集（A–H 目录，每条轨迹包含 `bw_*.txt` 与 `delay_*.txt`）后，在 Linux 机器上加载 `tcp_copa_auto.ko` 与 `tcp_leocc.ko`，然后直接通过 `--shard local-leo --local-leo-dir` 运行：
-
-```bash
-python3 scripts/run_mahimahi_suite.py \
-  --stack kernel \
-  --shard local-leo \
-  --local-leo-dir /path/to/starlink_traces/A \
-  --ccs copa_auto,copa_auto_theta0.98,leocc,mortise_copa,bbr,cubic \
-  --queues 2000000 \
-  --workloads bulk,app \
-  --bulk-secs 115 --app-secs 0 --parallel 2 \
-  --bin /path/to/mortise/target/release/client \
-  --trace-dir /tmp/traces \
-  --app-workload /tmp/workloads/app.wk \
-  --bulk-workload /tmp/workloads/bulk.wk \
-  --out-dir /tmp/local_leo_out
-```
+- **快速冒烟验证**：`dataset=basic`，`scenarios=elevator,bandwidth_drop_severe`，`workloads=bulk,app`，`max_shards=2`
+- **完整 `basic` 27 场景对比**：`dataset=basic`，`scenarios=`（留空），`workloads=bulk,websearch,pageload,app`，`max_shards=12`
+- **Starlink `leocc` 专项**：`dataset=leocc`，`kernel_ccs=copa_auto_v2,copa_auto_nc,mortise_copa,leocc,bbr,cubic,hybla`，`workloads=bulk,websearch,pageload,app`
+- **Lumos 5G 抽样快速对比**：`dataset=lumos`，`scenarios=5g_trace_100_walking,5g_trace_103_driving`，`max_bulk_s=120`，`queues=500KB,2MB`

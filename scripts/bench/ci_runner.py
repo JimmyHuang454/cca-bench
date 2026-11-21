@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""CI orchestration helper for Mahimahi Comparison GitHub Actions workflow.
+"""CI orchestration helper for Mahimahi / ns-3 GitHub Actions workflows.
 
 Replaces embedded bash/YAML logic with testable Python subcommands:
   - plan          : compute GitHub Actions matrix JSON and effective mode
   - patch-mortise : patch Mortise BPF ABI (Linux >= 6.10) & CongestionOpt enum
-  - run-quinn     : prepare workloads and invoke run_mahimahi_suite.py (--stack quinn)
   - run-kernel    : start Mortise daemons, prepare workloads, run --stack kernel
-  - summarize     : run mahimahi_eval.py + mahimahi_rct.py and write step summary
+  - run-ns3       : prepare workloads and invoke run_ns3_suite.py
+  - summarize     : run eval_report.py + mahimahi_rct.py and write step summary
 """
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ EXTRA_CONGESTION_VARIANTS: list[tuple[str, str]] = [
     ("CopaAuto", "copa_auto"),
     ("CopaAutoV2", "copa_auto_v2"),
     ("CopaAutoNc", "copa_auto_nc"),
+    ("CopaAutoNcJ0", "copa_auto_nc_j0"),
     ("CopaAutoT90", "copa_auto_t90"),
     ("CopaAutoT98", "copa_auto_t98"),
     ("CopaAutoT", "copa_auto_t"),
@@ -297,25 +298,6 @@ def resolve_shard_tuning(
     return bulk_secs, app_secs, parse_queues_spec(queues), parallel, high_bdp
 
 
-def resolve_quinn_ccs(mode: str, theta_raw: str, override: str) -> str:
-    first_theta, theta_list = parse_thetas(theta_raw)
-    if override.strip():
-        return override.strip().replace("{theta}", first_theta)
-    theta_ccs = [f"copa-auto-theta{tv}" for tv in theta_list]
-    if mode in ("quick", "datasets"):
-        ccs = ["copa", "copa-auto", "copa-auto-nc", f"copa-auto-theta{first_theta}"]
-    elif mode == "rct":
-        ccs = ["copa-auto", "copa-auto-theta0.9", "copa-auto-theta0.98"]
-    elif mode == "rct-datasets":
-        ccs = ["copa-auto", *theta_ccs, "copa-auto-nc", "copa", "bbr1", "bbr3", "cubic"]
-    else:
-        ccs = [
-            "copa-auto", "copa-auto-nc", f"copa-auto-theta{first_theta}",
-            f"copa-auto-nc-theta{first_theta}", "copa", "bbr1", "bbr3", "cubic",
-        ]
-    return ",".join(ccs)
-
-
 def resolve_kernel_ccs(mode: str, shard: str, theta_raw: str, override: str, avail_ccs: set[str], copa_kmod: bool) -> str:
     first_theta, theta_list = parse_thetas(theta_raw)
     if override.strip():
@@ -349,54 +331,6 @@ def read_available_kernel_ccs() -> set[str]:
         return set(out.split())
     except Exception:
         return {"cubic", "reno", "bbr"}
-
-
-def cmd_run_quinn(args: argparse.Namespace) -> int:
-    mode = os.environ["MODE"]
-    theta = os.environ.get("THETA", "0.98")
-    repeats = os.environ.get("REPEATS", "1")
-    override = os.environ.get("QUINN_CCS", "")
-    shard = os.environ["SHARD"]
-    workload = os.environ["WORKLOAD"]
-    send_fairness = os.environ.get("SEND_FAIRNESS", "false")
-    stream_rw = os.environ.get("STREAM_RECEIVE_WINDOW", "8M")
-
-    prepare_workloads(pathlib.Path("/tmp/workloads"), bulk_lines=200)
-    bulk_secs, app_secs, queues, parallel, high_bdp = resolve_shard_tuning(
-        mode, shard, workload, os.environ.get("PARALLEL", ""), os.environ.get("QUEUES", "")
-    )
-    ccs = resolve_quinn_ccs(mode, theta, override)
-
-    env = os.environ.copy()
-    if mode == "rct":
-        env["RUST_LOG"] = "warn,quinn_proto::congestion::copa=debug"
-
-    cmd = [
-        sys.executable, str(SCRIPTS_DIR / "run_mahimahi_suite.py"),
-        "--stack", "quinn",
-        "--shard", shard,
-        "--ccs", ccs,
-        "--queues", queues,
-        "--workloads", workload,
-        "--bulk-secs", str(bulk_secs),
-        "--app-secs", str(app_secs),
-        "--repeats", repeats,
-        "--send-fairness", send_fairness,
-        "--parallel", str(parallel),
-        "--bin", args.bin,
-        "--trace-dir", "/tmp/traces",
-        "--app-workload", "/tmp/workloads/app.wk",
-        "--app-workloads", WORKLOAD_MAP_ARG,
-        "--bulk-workload", "/tmp/workloads/bulk.wk",
-        "--out-dir", args.out_dir,
-    ]
-    if high_bdp:
-        cmd += ["--connection-window", "64M"]
-    if stream_rw:
-        cmd += ["--stream-receive-window", stream_rw]
-
-    print("Running:", " ".join(cmd), flush=True)
-    return subprocess.run(cmd, env=env).returncode
 
 
 def cmd_run_kernel(args: argparse.Namespace) -> int:
@@ -771,10 +705,6 @@ def main() -> int:
     p_patch = sub.add_parser("patch-mortise")
     p_patch.add_argument("--mortise-dir", default="/tmp/Mortise")
 
-    p_quinn = sub.add_parser("run-quinn")
-    p_quinn.add_argument("--bin", default="./quinn-jls/target/release/quinn-perf")
-    p_quinn.add_argument("--out-dir", default="/tmp/quinn_out")
-
     p_kern = sub.add_parser("run-kernel")
     p_kern.add_argument("--mortise-dir", default="/tmp/Mortise")
     p_kern.add_argument("--out-dir", default="/tmp/kernel_out")
@@ -795,7 +725,6 @@ def main() -> int:
     return {
         "plan": cmd_plan,
         "patch-mortise": cmd_patch_mortise,
-        "run-quinn": cmd_run_quinn,
         "run-kernel": cmd_run_kernel,
         "run-ns3": cmd_run_ns3,
         "summarize": cmd_summarize,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch cellular, Starlink, and synthetic traces and run Quinn or Mortise in parallel."""
+"""Fetch cellular, Starlink, and synthetic traces and run Mortise (Linux kernel TCP) in parallel."""
 
 from __future__ import annotations
 
@@ -467,111 +467,6 @@ def has_deliveries(path: Path) -> bool:
         return any(line.split(maxsplit=2)[1:2] == ["-"] for line in log if not line.startswith("#"))
 
 
-def parse_cc_flags(cc: str) -> tuple[str, list[str]]:
-    """Map suite label like `copa-auto-theta0.98` or `copa-auto-nc-t70` to CLI flags."""
-    m = re.match(r"^(copa-auto(?:-nc)?)-theta([0-9]*\.?[0-9]+)$", cc)
-    if m:
-        alg = m.group(1)
-        theta = float(m.group(2))
-        if not (0.01 <= theta <= 0.99):
-            raise ValueError(f"theta out of [0.01, 0.99] in {cc!r}")
-        return alg, ["--copa-tradeoff", f"{theta:g}"]
-    m = re.match(r"^(copa-auto(?:-nc)?)-t(\d+)$", cc)
-    if m:
-        alg = m.group(1)
-        theta = int(m.group(2)) / 100.0
-        if not (0.01 <= theta <= 0.99):
-            raise ValueError(f"theta out of [0.01, 0.99] in {cc!r}")
-        return alg, ["--copa-tradeoff", f"{theta:.2f}"]
-    return cc, []
-
-
-def run_quinn_job(
-    slot: int,
-    bin_path: Path,
-    cc: str,
-    trace_name: str,
-    replay: Replay,
-    q_bytes: str,
-    workload_kind: str,
-    workload_path: Path,
-    stem: str,
-    out_dir: Path,
-    bulk_secs: int,
-    app_secs: int,
-    send_fairness: str,
-    stream_receive_window: str | None,
-    connection_window: str | None,
-) -> tuple[str, int]:
-    port = 4433 + slot
-    log_path = out_dir / f"{stem}.downlink.log"
-    sum_path = out_dir / f"{stem}.summary.json"
-    srv_log = out_dir / f"{stem}.server.log"
-    alg, extra_cc_flags = parse_cc_flags(cc)
-
-    srv_cmd = [
-        str(bin_path),
-        "server",
-        "--listen",
-        f"0.0.0.0:{port}",
-        "--congestion",
-        alg,
-        *extra_cc_flags,
-        "--initial-mtu",
-        "1450",
-        "--send-fairness",
-        send_fairness,
-    ]
-    if stream_receive_window:
-        srv_cmd.extend(["--stream-receive-window", stream_receive_window])
-    if connection_window:
-        srv_cmd.extend(["--receive-window", connection_window, "--send-window", connection_window])
-
-    srv = subprocess.Popen(
-        srv_cmd,
-        stdout=srv_log.open("w"),
-        stderr=subprocess.STDOUT,
-    )
-    try:
-        time.sleep(0.8)
-        extra_str = " ".join(extra_cc_flags)
-        srw_str = f"--stream-receive-window {stream_receive_window}" if stream_receive_window else ""
-        cw_str = f"--receive-window {connection_window} --send-window {connection_window}" if connection_window else ""
-        common_cli = (
-            f'--ip "${{MAHIMAHI_BASE}}" --congestion "{alg}" {extra_str} --initial-mtu 1450 '
-            f'--send-fairness {send_fairness} {srw_str} {cw_str}'
-        )
-        if workload_kind == "bulk":
-            download_size = "16G" if replay.delay is not None or trace_name in LUMOS_5G else "500M"
-            client_cmd = (
-                f'timeout {bulk_secs + 60} "{bin_path}" client "${{MAHIMAHI_BASE}}:{port}" '
-                f'{common_cli} '
-                f'--bi-requests 1 --upload-size 0 --download-size {download_size} --duration {bulk_secs} '
-                f'--summary-json "{sum_path}" --json "{out_dir / (stem + ".iperf.json")}"'
-            )
-        else:
-            rct_path = out_dir / f"{stem}.rct.csv"
-            timing_path = out_dir / f"{stem}.request-timings.csv"
-            client_cmd = (
-                f'timeout {app_secs + 20} "{bin_path}" client "${{MAHIMAHI_BASE}}:{port}" '
-                f'{common_cli} '
-                f'--workload "{workload_path}" --duration {app_secs} --request-timings-csv "{timing_path}" '
-                f'--rct-csv "{rct_path}" --summary-json "{sum_path}"'
-            )
-
-        res = run_mm_cmd(replay_command(replay, q_bytes, log_path, client_cmd), sum_path, log_path)
-        if res.returncode != 0 or not sum_path.exists() or not has_deliveries(log_path):
-            record_failure(out_dir / f"{stem}.err.log", res)
-            return stem, res.returncode or 1
-        return stem, res.returncode
-    finally:
-        srv.terminate()
-        try:
-            srv.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            srv.kill()
-
-
 def resolve_mortise_cc(cc: str) -> str:
     """Map suite CC label (e.g. copa_auto_theta0.98) to Linux kernel TCP CCA name."""
     norm = cc.replace("-", "_")
@@ -658,8 +553,8 @@ def auto_parallel(shard: str, cpus: int | None = None) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run Mahimahi trace suite for quinn-jls or Mortise.")
-    parser.add_argument("--stack", required=True, choices=["quinn", "kernel", "mortise"])
+    parser = argparse.ArgumentParser(description="Run Mahimahi trace suite for Linux kernel TCP (Mortise).")
+    parser.add_argument("--stack", required=True, choices=["kernel", "mortise"])
     parser.add_argument("--shard", required=True, help="Trace shard name (e.g. smoke, lte, lumos-5g-s1-of-12)")
     parser.add_argument("--ccs", required=True, help="Comma-separated congestion algorithms")
     parser.add_argument("--queues", default="150000,2000000", help="Comma-separated queue sizes in bytes")
@@ -668,11 +563,8 @@ def main() -> int:
     parser.add_argument("--app-secs", type=int, default=200, help="Application observation window in seconds (0 = auto: span + 150s)")
     parser.add_argument("--fixed-phase", action="store_true", help="Replay each repetition from the same trace origin")
     parser.add_argument("--repeats", type=int, default=1, help="Number of time-shifted repeats per configuration")
-    parser.add_argument("--send-fairness", choices=["true", "false"], default="true")
-    parser.add_argument("--stream-receive-window", default=None, help="Optional quinn --stream-receive-window (e.g. 8M)")
-    parser.add_argument("--connection-window", help="Quinn connection receive and send windows (e.g. 64M)")
     parser.add_argument("--parallel", type=int, default=0, help="Max concurrent runs (0 = auto from CPU count)")
-    parser.add_argument("--bin", required=True, type=Path, help="Path to quinn-perf or Mortise client binary")
+    parser.add_argument("--bin", required=True, type=Path, help="Path to Mortise client binary")
     parser.add_argument("--trace-dir", required=True, type=Path)
     parser.add_argument(
         "--local-leo-dir",
@@ -777,24 +669,6 @@ def main() -> int:
             if wk_label != "bulk":
                 (args.out_dir / f"{stem}.app-seconds").write_text(f"{obs_secs}\n", encoding="utf-8")
             replay = replays_by_rep[(t, rep)]
-            if args.stack == "quinn":
-                return run_quinn_job(
-                    slot,
-                    args.bin,
-                    cc,
-                    t,
-                    replay,
-                    q,
-                    wk_label,
-                    wk_path,
-                    stem,
-                    args.out_dir,
-                    args.bulk_secs,
-                    obs_secs,
-                    args.send_fairness,
-                    args.stream_receive_window or None,
-                    args.connection_window,
-                )
             return run_mortise_job(
                 args.bin, cc, t, replay, q, wk_label, wk_path, stem, args.out_dir, args.bulk_secs, obs_secs
             )

@@ -3,16 +3,30 @@ name: Mahimahi Linux Kernel Bench
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "Dataset and workload preset"
+      dataset:
+        description: "datasets/lines dataset to run"
         type: choice
-        default: quick
+        default: basic
         required: true
-        options: [quick, smoke, datasets, rct, rct-datasets, lte, nyc-subway, lumos-5g, leo]
+        options: [basic, leocc, cellular-traces-2018, lumos, all]
+      scenarios:
+        description: "Optional comma-separated scenario filter (empty = all in dataset)"
+        type: string
+        default: ""
+      workloads:
+        description: "Workloads, comma-separated (bulk,app,websearch,pageload,vl2)"
+        type: string
+        default: "bulk,app"
+        required: true
       kernel_ccs:
-        description: "Linux congestion controls, comma separated"
+        description: "Linux congestion controls, comma-separated"
         type: string
         default: "copa_auto_v2,copa_auto_nc,mortise_copa,bbr,cubic"
+        required: true
+      queues:
+        description: "Mahimahi bottleneck queue per direction (e.g. 500KB, 150KB,2MB, infinite)"
+        type: string
+        default: "500KB"
         required: true
       measurement_rtts:
         description: "copa_auto_v2 period (SRTTs, 1..256)"
@@ -24,102 +38,104 @@ on:
         type: string
         default: "1"
         required: true
-      parallel:
-        description: "Concurrent experiments per runner (1 minimizes interference)"
+      max_bulk_s:
+        description: "Max bulk duration in seconds (0 = full lines duration)"
         type: string
-        default: "1"
+        default: "0"
         required: true
-      queues:
-        description: "Optional queue sizes, e.g. 150KB,2MB"
+      workload_timeout_s:
+        description: "Max wall-clock seconds per workload run (timeout scores 0)"
         type: string
-        default: ""
-      rct_workloads:
-        description: "Workloads for rct-datasets (app,websearch,vl2,pageload)"
+        default: "300"
+        required: true
+      max_shards:
+        description: "Max parallel GitHub Actions runners"
         type: string
-        default: "app,websearch"
+        default: "8"
+        required: true
 
 permissions:
   contents: read
 
 jobs:
   plan:
+    name: Plan lines matrix
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
-      mode: ${{ steps.plan.outputs.mode }}
+      plan_json: ${{ steps.plan.outputs.plan_json }}
+      needs_leocc: ${{ steps.plan.outputs.needs_leocc }}
     steps:
       - uses: actions/checkout@v4
-      - name: Check kernel CI integration
-        run: python3 scripts/bench/test_kernel_ci.py
+      - name: Run unit tests
+        run: |
+          python3 -m unittest scripts/bench/test_kernel_ci.py \
+            scripts/data/tests/test_lines_to_mahimahi.py \
+            scripts/data/tests/test_trace_to_lines.py
       - id: plan
         env:
-          MODE: ${{ inputs.mode }}
-          RCT_WORKLOADS: ${{ inputs.rct_workloads }}
-        run: python3 scripts/bench/ci_runner.py plan
+          DATASET: ${{ inputs.dataset }}
+          SCENARIOS: ${{ inputs.scenarios }}
+          WORKLOADS: ${{ inputs.workloads }}
+          KERNEL_CCS: ${{ inputs.kernel_ccs }}
+          QUEUES: ${{ inputs.queues }}
+          REPEATS: ${{ inputs.repeats }}
+          MAX_BULK_S: ${{ inputs.max_bulk_s }}
+          WORKLOAD_TIMEOUT_S: ${{ inputs.workload_timeout_s }}
+          MAX_SHARDS: ${{ inputs.max_shards }}
+        run: python3 scripts/bench/run_kernel_lines.py plan
 
-  kernel-eval:
-    name: kernel (${{ matrix.shard }}, ${{ matrix.workload }})
+  build:
+    name: Build Mahimahi & Mortise tools
     needs: plan
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build and network dependencies
+      - name: Run kernel C core unit tests
+        run: make -C kernel/tcp_copa_auto test
+
+      - name: Install build dependencies
         shell: bash
         run: |
           set -euxo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y build-essential git curl pkg-config \
             clang llvm libelf-dev libbpf-dev zlib1g-dev libssl-dev \
-            autoconf automake autotools-dev libtool libtool-bin dnsmasq \
-            xcb libxcb-composite0-dev libxcb-present-dev libcairo2-dev libpango1.0-dev \
-            python3-venv python3-pip
-          if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
-            sudo apt-get install -y "linux-headers-$(uname -r)"
-          fi
+            autoconf automake autotools-dev libtool libtool-bin \
+            xcb libxcb-composite0-dev libxcb-present-dev libcairo2-dev libpango1.0-dev
           test -r /sys/kernel/btf/vmlinux
-          uname -a
 
-      - name: Install Mahimahi
-        env:
-          SHARD: ${{ matrix.shard }}
+      - name: Cache enhanced Mahimahi binaries
+        id: mahimahi-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/tools/bin
+          key: mahimahi-leoreplayer-${{ runner.os }}-${{ hashFiles('scripts/env/install_mahimahi.sh') }}
+
+      - name: Build enhanced Mahimahi (on cache miss)
+        if: steps.mahimahi-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euxo pipefail
-          if [ "$SHARD" = leo ]; then
-            bash scripts/env/install_mahimahi.sh leo
-          else
-            bash scripts/env/install_mahimahi.sh standard
-          fi
-          command -v mm-delay
-          command -v mm-link
+          bash scripts/env/install_mahimahi.sh leo --install-dir "$RUNNER_TEMP/tools/bin"
 
-      - name: Build and load Linux congestion control module
-        env:
-          MEASUREMENT_RTTS: ${{ inputs.measurement_rtts }}
-        shell: bash
-        run: |
-          set -euxo pipefail
-          [[ "$MEASUREMENT_RTTS" =~ ^[0-9]+$ ]]
-          (( MEASUREMENT_RTTS >= 1 && MEASUREMENT_RTTS <= 256 ))
-          make -C kernel/tcp_copa_auto test
-          make -C kernel/tcp_copa_auto
-          sudo insmod kernel/tcp_copa_auto/tcp_copa_auto.ko measurement_rtts="$MEASUREMENT_RTTS"
-          sudo modprobe tcp_bbr || true
-          sysctl net.ipv4.tcp_available_congestion_control
-          grep -qw copa_auto_v2 /proc/sys/net/ipv4/tcp_available_congestion_control
+      - name: Cache Cargo registry for Mortise
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: mortise-cargo-${{ runner.os }}-${{ hashFiles('scripts/bench/ci_runner.py') }}
+          restore-keys: |
+            mortise-cargo-${{ runner.os }}-
 
-      - name: Prepare Mortise and BPF program
+      - name: Build Mortise BPF and traffic binaries
         shell: bash
         run: |
           set -euxo pipefail
           git clone --depth 1 https://github.com/BobAnkh/Mortise.git "$RUNNER_TEMP/Mortise"
-          sudo mkdir -p /home/vagrant
-          sudo ln -s "$RUNNER_TEMP/Mortise/algorithm" /home/vagrant/algorithm
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/bpftool.tar.gz" https://github.com/libbpf/bpftool/releases/download/v7.8.1/bpftool-v7.8.1-amd64.tar.gz
           echo "112026bbdf48d0d00ccfc4926e59878d47943f97c197f959f110abe29c898ddc  $RUNNER_TEMP/bpftool.tar.gz" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/bpftool.tar.gz" -C "$RUNNER_TEMP" bpftool
@@ -127,36 +143,120 @@ jobs:
           "$RUNNER_TEMP/bpftool" btf dump file /sys/kernel/btf/vmlinux format c > "$RUNNER_TEMP/Mortise/algorithm/bpf-kern/include/vmlinux.h"
           python3 scripts/bench/ci_runner.py patch-mortise --mortise-dir "$RUNNER_TEMP/Mortise"
           make -C "$RUNNER_TEMP/Mortise/algorithm/bpf-kern" build/mortise_copa.bpf.o CLANG=/usr/bin/clang
-          python3 -m venv "$RUNNER_TEMP/mortise-venv"
-          "$RUNNER_TEMP/mortise-venv/bin/pip" install numpy structlog scipy pandas
           cargo build --release --locked --manifest-path "$RUNNER_TEMP/Mortise/mortise/Cargo.toml" -p traffic -p mortise-manager
 
-      - name: Run Mahimahi with Linux TCP
+          mkdir -p "$RUNNER_TEMP/tools/Mortise/algorithm/bpf-kern/build" \
+                   "$RUNNER_TEMP/tools/Mortise/mortise/target/release"
+          cp "$RUNNER_TEMP/Mortise/algorithm/bpf-kern/build/mortise_copa.bpf.o" \
+             "$RUNNER_TEMP/tools/Mortise/algorithm/bpf-kern/build/"
+          cp "$RUNNER_TEMP/Mortise/mortise/target/release/client" \
+             "$RUNNER_TEMP/Mortise/mortise/target/release/server" \
+             "$RUNNER_TEMP/Mortise/mortise/target/release/manager" \
+             "$RUNNER_TEMP/tools/Mortise/mortise/target/release/"
+          cp -a "$RUNNER_TEMP/Mortise/mortise/"*.py "$RUNNER_TEMP/tools/Mortise/mortise/"
+          if [ -d "$RUNNER_TEMP/Mortise/mortise/config" ]; then
+            cp -a "$RUNNER_TEMP/Mortise/mortise/config" "$RUNNER_TEMP/tools/Mortise/mortise/"
+          fi
+
+      - name: Upload built tools artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-bench-tools
+          path: ${{ runner.temp }}/tools
+          retention-days: 1
+
+  kernel-eval:
+    name: kernel (${{ matrix.label }})
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download built tools artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-bench-tools
+          path: ${{ runner.temp }}/tools
+
+      - name: Install runtime and kernel module dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y build-essential dnsmasq libelf-dev libbpf-dev \
+            libprotobuf-dev libcairo2-dev libpango1.0-dev libxcb-composite0-dev libxcb-present-dev \
+            python3-venv python3-pip
+          if [ ! -d "/lib/modules/$(uname -r)/build" ]; then
+            sudo apt-get install -y "linux-headers-$(uname -r)"
+          fi
+          uname -a
+
+      - name: Install Mahimahi and Mortise runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo sysctl -w net.ipv4.ip_forward=1
+          sudo install -o root -g root -m 4755 "$RUNNER_TEMP/tools/bin/"{mm-delay,mm-link,mm-loss} /usr/local/bin/
+          command -v mm-delay
+          command -v mm-link
+          ldd /usr/local/bin/mm-link
+          chmod +x "$RUNNER_TEMP/tools/Mortise/mortise/target/release/"{client,server,manager}
+          sudo mkdir -p /home/vagrant
+          sudo ln -sfn "$RUNNER_TEMP/tools/Mortise/algorithm" /home/vagrant/algorithm
+          python3 -m venv "$RUNNER_TEMP/mortise-venv"
+          "$RUNNER_TEMP/mortise-venv/bin/pip" install -q numpy structlog scipy pandas
+
+      - name: Build and load Linux congestion control modules
         env:
-          MODE: ${{ needs.plan.outputs.mode }}
-          SHARD: ${{ matrix.shard }}
-          WORKLOAD: ${{ matrix.workload }}
+          MEASUREMENT_RTTS: ${{ inputs.measurement_rtts }}
+          NEEDS_LEOCC: ${{ needs.plan.outputs.needs_leocc }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          [[ "$MEASUREMENT_RTTS" =~ ^[0-9]+$ ]]
+          (( MEASUREMENT_RTTS >= 1 && MEASUREMENT_RTTS <= 256 ))
+          make -C kernel/tcp_copa_auto
+          sudo insmod kernel/tcp_copa_auto/tcp_copa_auto.ko measurement_rtts="$MEASUREMENT_RTTS"
+          if [ "$NEEDS_LEOCC" = "true" ]; then
+            make -C kernel/tcp_leocc
+            sudo insmod kernel/tcp_leocc/tcp_leocc.ko
+          fi
+          sudo modprobe tcp_bbr || true
+          sysctl net.ipv4.tcp_available_congestion_control
+          grep -qw copa_auto_v2 /proc/sys/net/ipv4/tcp_available_congestion_control
+
+      - name: Run Mahimahi lines benchmark
+        env:
+          UNITS_JSON: ${{ matrix.units_json }}
           KERNEL_CCS: ${{ inputs.kernel_ccs }}
-          REPEATS: ${{ inputs.repeats }}
-          PARALLEL: ${{ inputs.parallel }}
           QUEUES: ${{ inputs.queues }}
-          COPA_KMOD: "1"
+          REPEATS: ${{ inputs.repeats }}
+          PARALLEL: "1"
+          MAX_BULK_S: ${{ inputs.max_bulk_s }}
+          WORKLOAD_TIMEOUT_S: ${{ inputs.workload_timeout_s }}
+          BULK_WARMUP_S: "0"
         shell: bash
         run: |
           set -euxo pipefail
           export MORTISE_PYTHON="$RUNNER_TEMP/mortise-venv/bin/python3"
-          python3 scripts/bench/ci_runner.py run-kernel --mortise-dir "$RUNNER_TEMP/Mortise" --out-dir "$RUNNER_TEMP/kernel-results"
+          python3 scripts/bench/run_kernel_lines.py run \
+            --mortise-dir "$RUNNER_TEMP/tools/Mortise" \
+            --out-dir "$RUNNER_TEMP/kernel-results"
 
-      - name: Upload kernel results and diagnostics
+      - name: Upload shard results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: results-kernel-${{ matrix.shard }}-${{ matrix.workload }}
+          name: results-kernel-${{ matrix.shard_id }}
           path: ${{ runner.temp }}/kernel-results
           if-no-files-found: warn
 
   summarize:
-    name: Summarize kernel results
+    name: Summarize kernel lines results
     needs: [plan, kernel-eval]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
@@ -166,13 +266,15 @@ jobs:
         with:
           pattern: results-kernel-*
           path: /tmp/all-kernel-results
-      - name: Generate comparison summary
+      - name: Generate report and rankings
         env:
-          MODE: ${{ needs.plan.outputs.mode }}
+          PLAN_JSON: ${{ needs.plan.outputs.plan_json }}
         run: |
-          test -n "$(find /tmp/all-kernel-results -type f \( -name '*.downlink.log' -o -name '*.rct.csv' \) -print -quit)"
-          python3 scripts/bench/ci_runner.py summarize --input-dir /tmp/all-kernel-results --out-dir /tmp/kernel-summary
+          test -n "$(find /tmp/all-kernel-results -type f -name 'shard_runs.csv' -print -quit)"
+          python3 scripts/bench/run_kernel_lines.py summarize \
+            --input-dir /tmp/all-kernel-results \
+            --out-dir /tmp/kernel-summary
       - uses: actions/upload-artifact@v4
         with:
-          name: mahimahi-kernel-comparison-summary
+          name: mahimahi-kernel-lines-summary
           path: /tmp/kernel-summary

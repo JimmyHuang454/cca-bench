@@ -1,6 +1,6 @@
 # Workload File Format (`.wk`)
 
-All application-layer request workloads in `datasets/workloads/` use the unified **Mortise `.wk`** plain-text format so the exact same workload files drive both **ns-3** and **Linux Kernel / Quinn** evaluations.
+All application-layer request workloads in `datasets/workloads/` use the unified **Mortise `.wk`** plain-text format so the exact same workload files drive both **ns-3** and **Linux Kernel** evaluations.
 
 ## Syntax
 - Lines starting with `#` are metadata comments and ignored by loaders.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unified Mahimahi downlink-log + RCT CSV analyzer for quinn-jls and Mortise."""
+"""Unified Mahimahi downlink-log + RCT CSV analyzer for ns-3 and Linux kernel (Mortise)."""
 
 from __future__ import annotations
 
@@ -372,8 +372,6 @@ CSV_FLOAT_FIELDS = {
     "fct_slowdown",
     "rct_slowdown",
     "mortise_qoe",
-    "quic_loss_ratio",
-    "quic_rtt_ms",
 }
 
 
@@ -422,7 +420,7 @@ def load_shard_csv(path: Path) -> list[dict[str, Any]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Unified benchmark evaluator for ns-3, Linux kernel, and Quinn.")
+    parser = argparse.ArgumentParser(description="Unified benchmark evaluator for ns-3 and Linux kernel TCP.")
     parser.add_argument(
         "--input-dir",
         required=True,
@@ -466,14 +464,6 @@ def main() -> None:
                 capacity_mbps=row.get("capacity_mbps", math.nan),
             )
         )
-
-        sum_path = log_path.with_name(f"{stem}.summary.json")
-        if sum_path.exists():
-            with sum_path.open("r", encoding="utf-8") as sf:
-                sdata = json.load(sf)
-            if sdata.get("sent_packets", 0) > 0:
-                row["quic_loss_ratio"] = sdata["lost_packets"] / sdata["sent_packets"]
-                row["quic_rtt_ms"] = sdata.get("rtt_ms")
 
         seen_keys.add(record_key(row))
         records.append(row)
@@ -520,8 +510,6 @@ def main() -> None:
         "retrans_ratio",
         "fct_slowdown",
         "mortise_qoe",
-        "quic_loss_ratio",
-        "quic_rtt_ms",
     ]
     with args.out_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")

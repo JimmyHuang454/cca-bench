@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Unit tests for datasets/lines -> Mahimahi conversion."""
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(ROOT / 'scripts/bench'))
+sys.path.insert(0, str(ROOT / 'scripts/data'))
+
+import lines_common  # noqa: E402
+import lines_to_mahimahi  # noqa: E402
+
+
+class LinesToMahimahiTests(unittest.TestCase):
+    def test_direction_mapping_and_asymmetric_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene_dir = root / 'asym'
+            scene_dir.mkdir()
+            # lines up.* = TCP data (50 Mbps, 5 ms delay)
+            # lines down.* = TCP ACK (100 Mbps, 80 ms delay)
+            (scene_dir / 'up.txt').write_text('0,50m\n1000,0\n', encoding='utf-8')
+            (scene_dir / 'down.txt').write_text('0,100m\n1000,0\n', encoding='utf-8')
+            (scene_dir / 'up.delay.txt').write_text('0,5\n# end_ms=1000\n', encoding='utf-8')
+            (scene_dir / 'down.delay.txt').write_text('0,80\n# end_ms=1000\n', encoding='utf-8')
+
+            scenario = lines_common.discover(scene_dir)[0]
+            conv = lines_to_mahimahi.convert_scenario(scenario, root / 'out')
+
+            self.assertEqual(conv.period_ms, 1000)
+            self.assertAlmostEqual(conv.duration_s, 1.0)
+            self.assertAlmostEqual(conv.base_rtt_ms_bulk, 85.0)
+            self.assertAlmostEqual(conv.base_rtt_ms_period, 85.0)
+            self.assertAlmostEqual(conv.data_capacity_mbps_bulk, 50.0, places=4)
+
+            # lines/up.* (data) -> Mahimahi downlink (server -> client)
+            dl_pkts = conv.mm_downlink_trace.read_text(encoding='utf-8').splitlines()
+            ul_pkts = conv.mm_uplink_trace.read_text(encoding='utf-8').splitlines()
+            # 50 Mbps over 1s = 50_000_000 / 8 / 1500 = 4166.67 -> 4166 packets
+            self.assertEqual(len(dl_pkts), 4166)
+            # 100 Mbps over 1s = 8333.33 -> 8333 packets
+            self.assertEqual(len(ul_pkts), 8333)
+            # Constant delays compress to 1 line with explicit direction mapping
+            self.assertEqual(conv.mm_downlink_delay.read_text(encoding='utf-8').splitlines(), ['5'])
+            self.assertEqual(conv.mm_uplink_delay.read_text(encoding='utf-8').splitlines(), ['80'])
+
+    def test_mixed_count_mbps_outage_and_dynamic_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene_dir = root / 'dyn'
+            scene_dir.mkdir()
+            # 0..100ms: 2 pkts/ms (=200 pkts); 100..200ms: outage (0 pkts); 200..300ms: 12m (=1 pkt/ms = 100 pkts)
+            (scene_dir / 'up.txt').write_text('0,2\n100,0\n200,12m\n300,0\n', encoding='utf-8')
+            (scene_dir / 'down.txt').write_text('0,1\n300,0\n', encoding='utf-8')
+            (scene_dir / 'up.delay.txt').write_text('0,10\n100,50\n200,10\n# end_ms=300\n', encoding='utf-8')
+            (scene_dir / 'down.delay.txt').write_text('0,10\n# end_ms=300\n', encoding='utf-8')
+
+            scenario = lines_common.discover(scene_dir)[0]
+            conv = lines_to_mahimahi.convert_scenario(scenario, root / 'out')
+
+            dl_ts = [int(x) for x in conv.mm_downlink_trace.read_text(encoding='utf-8').splitlines()]
+            self.assertEqual(len(dl_ts), 300)
+            self.assertTrue(all(t < 100 or t >= 200 for t in dl_ts))
+
+            dl_delays = [int(x) for x in conv.mm_downlink_delay.read_text(encoding='utf-8').splitlines()]
+            self.assertEqual(len(dl_delays), 30)  # 300ms / 10ms
+            self.assertEqual(dl_delays[:10], [10] * 10)
+            self.assertEqual(dl_delays[10:20], [50] * 10)
+            self.assertEqual(dl_delays[20:30], [10] * 10)
+            # Downlink ACK delay is constant 10ms -> compressed to 1 line
+            self.assertEqual(conv.mm_uplink_delay.read_text(encoding='utf-8').splitlines(), ['10'])
+            # Average base RTT = (10*100 + 50*100 + 10*100)/300 + 10 = 23.333 + 10 = 33.333ms
+            self.assertAlmostEqual(conv.base_rtt_ms_bulk, 100.0 / 3.0, places=4)
+
+    def test_missing_delay_uses_default_and_all_zero_capacity_has_sentinel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene_dir = root / 'zero'
+            scene_dir.mkdir()
+            (scene_dir / 'up.txt').write_text('0,0\n500,0\n', encoding='utf-8')
+            (scene_dir / 'down.txt').write_text('0,1\n500,0\n', encoding='utf-8')
+
+            scenario = lines_common.discover(scene_dir)[0]
+            conv = lines_to_mahimahi.convert_scenario(scenario, root / 'out', default_one_way_delay_ms=10.0)
+            self.assertFalse(conv.has_up_delay_file)
+            self.assertFalse(conv.has_down_delay_file)
+            self.assertAlmostEqual(conv.base_rtt_ms_bulk, 20.0)
+            dl_ts = [int(x) for x in conv.mm_downlink_trace.read_text(encoding='utf-8').splitlines()]
+            self.assertEqual(len(dl_ts), 1)
+            self.assertGreater(dl_ts[0], 500)
+
+    def test_max_bulk_s_computes_truncated_window_base_rtt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene_dir = root / 'trunc'
+            scene_dir.mkdir()
+            (scene_dir / 'up.txt').write_text('0,24m\n2000,0\n', encoding='utf-8')
+            (scene_dir / 'down.txt').write_text('0,24m\n2000,0\n', encoding='utf-8')
+            (scene_dir / 'up.delay.txt').write_text('0,10\n1000,50\n# end_ms=2000\n', encoding='utf-8')
+            (scene_dir / 'down.delay.txt').write_text('0,10\n# end_ms=2000\n', encoding='utf-8')
+
+            scenario = lines_common.discover(scene_dir)[0]
+            conv = lines_to_mahimahi.convert_scenario(scenario, root / 'out', max_bulk_s=1.0)
+            self.assertAlmostEqual(conv.bulk_duration_s, 1.0)
+            self.assertAlmostEqual(conv.duration_s, 2.0)
+            self.assertAlmostEqual(conv.base_rtt_ms_bulk, 20.0)
+            self.assertAlmostEqual(conv.base_rtt_ms_period, 40.0)
+
+    def test_real_repo_basic_and_leocc_scenarios(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            asym = lines_common.discover(ROOT / 'datasets/lines/basic/asymmetric_delay')[0]
+            conv_asym = lines_to_mahimahi.convert_scenario(asym, out)
+            self.assertAlmostEqual(conv_asym.base_rtt_ms_bulk, 85.0)
+            self.assertEqual(conv_asym.mm_downlink_delay.read_text(encoding='utf-8').strip(), '5')
+            self.assertEqual(conv_asym.mm_uplink_delay.read_text(encoding='utf-8').strip(), '80')
+
+            leo = lines_common.discover(ROOT / 'datasets/lines/leocc/leo-bw')[0]
+            conv_leo = lines_to_mahimahi.convert_scenario(leo, out)
+            self.assertGreater(conv_leo.period_ms, 100_000)
+            self.assertGreater(conv_leo.base_rtt_ms_bulk, 10.0)
+            self.assertGreater(conv_leo.data_capacity_mbps_bulk, 10.0)
+
+
+if __name__ == '__main__':
+    unittest.main()

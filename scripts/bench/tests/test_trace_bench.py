@@ -171,9 +171,31 @@ class TraceBenchTests(unittest.TestCase):
         with patch.multiple(bench, CCS=['a', 'b', 'incomplete'], REPEATS=1,
                             WORKLOADS=['bulk', 'websearch']):
             tables = '\n'.join(bench.ranking_tables([{'name': 'scene'}], rows))
-        self.assertEqual(tables.split('## 所有场景总排名')[0].count('**基准**'), 7)
+        self.assertEqual(tables.split('## 各负载所有场景排名')[0].count('**基准**'), 7)
         self.assertIn('| **scene** | **1** | **a** | **1/1** | **0.500** | **基准** | **完整** |', tables)
         self.assertIn('| scene | - | incomplete | 0/1 |', tables)
+
+    def test_workload_ranking_uses_correct_direction_and_timeout(self):
+        rows = []
+        for scene, norms, slows in [('a', (.8, .4), (1, 2)), ('b', (.4, .8), (4, 2))]:
+            for cc, norm, slow in zip(('x', 'y'), norms, slows):
+                rows.extend([{'scenario': scene, 'cc': cc, 'workload': 'bulk', 'repeat': 1, 'status': 'success', 'norm_power': norm},
+                             {'scenario': scene, 'cc': cc, 'workload': 'app', 'repeat': 1, 'status': 'success', 'fct_slowdown': slow}])
+        scenes = [{'name': 'a'}, {'name': 'b'}]
+        with patch.multiple(bench, CCS=['x', 'y'], REPEATS=1, WORKLOADS=['bulk', 'app']):
+            for wk in ('bulk', 'app'):
+                entries, warnings = bench.workload_ranking(scenes, rows, wk)
+                self.assertFalse(warnings)
+                self.assertEqual([e['rank'] for e in entries], ['1', '1'])
+                self.assertAlmostEqual(entries[0]['score'], 2 ** -.5)
+            next(r for r in rows if r['scenario'] == 'a' and r['cc'] == 'x' and r['workload'] == 'app')['status'] = 'timeout'
+            entries, warnings = bench.workload_ranking(scenes, rows, 'app')
+            self.assertFalse(warnings)
+            self.assertEqual(entries[-1]['score'], 0)
+            self.assertEqual(entries[-1]['complete'], 1)
+            self.assertEqual(entries[-1]['status'], '含超时（0分）')
+            next(r for r in rows if r['scenario'] == 'a' and r['cc'] == 'y' and r['workload'] == 'app')['status'] = 'timeout'
+            self.assertIn('a', bench.workload_ranking(scenes, rows, 'app')[1][0])
 
     def test_overall_ranking_combines_scenarios_and_requires_completion(self):
         rows = []

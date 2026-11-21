@@ -2,35 +2,40 @@
 """Run TCP algorithms against all lines scenarios; edit the settings below."""
 from __future__ import annotations
 
-import csv
 import concurrent.futures
 import fcntl
 import hashlib
-import io
 import json
 import math
 import os
-import statistics
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
+
+_BENCH_DIR = str(Path(__file__).resolve().parent)
+if _BENCH_DIR not in sys.path:
+    sys.path.insert(0, _BENCH_DIR)
+
+import lines_common
+import trace_report
+from lines_common import atomic_write, digest, discover, parse_line, workload
+from trace_report import mean
 
 ROOT = Path(__file__).resolve().parents[2]
 
 # Select a dataset directory or one of its scenario directories.
 # Edit these settings, then run this script or `make bench`.
-LINES_DIR = ROOT / 'datasets/lines/basic'
-# WORKLOADS = ['bulk', 'websearch', 'pageload', 'app']
-WORKLOADS = ['bulk','app']
-CCS = ['cubic', 'bbr', 'copa_auto_nc','copa', 'vegas','westwood','illinois','veno','yeah','hybla']
+# LINES_DIR = ROOT / 'datasets/lines/lumos'
+LINES_DIR = ROOT / 'datasets/lines/leocc'
+WORKLOADS = ['bulk', 'websearch', 'pageload', 'app']
+CCS = ['cubic', 'bbr', 'copa_auto_nc', 'copa', 'vegas', 'westwood', 'illinois', 'veno', 'yeah', 'hybla']
 REPEATS = 2
 RESUME = True  # False: rerun all combinations and replace their results.
 MAX_WORKERS = os.cpu_count() or 1  # Maximum concurrent ns-3 processes; 1 runs serially.
 WORKLOAD_MAX_SIMULATION_S = 1800.0  # Maximum simulated time from the start, not wall time.
-DEFAULT_ONE_WAY_DELAY_MS = 10.0
+DEFAULT_ONE_WAY_DELAY_MS = lines_common.DEFAULT_ONE_WAY_DELAY_MS
 TCP_SEGMENT_SIZE_BYTES = 1448  # IPv4 + TCP timestamps with a 1500-byte MTU.
 BINARY = ROOT / 'ns3/ns-3/build/scratch/tcp-trace-bench/ns3-dev-tcp-trace-bench-optimized'
 RESULTS_DIR = ROOT / 'results/trace-bench'
@@ -38,86 +43,6 @@ RESULTS_DIR = ROOT / 'results/trace-bench'
 # Bump this only when Python-side simulation semantics change. Reporting and
 # concurrency changes do not invalidate previously completed simulations.
 SIMULATION_SIGNATURE = '182f37063e9dd6a695b65af9d5419d7aaf98dcf7571b4f8f237a49730cb81f68'
-
-
-def parse_line(path: Path, delay: bool = False) -> tuple[int, list[tuple[int, float]]]:
-    points = []
-    end = None
-    with path.open(encoding='utf-8') as stream:
-        for number, raw in enumerate(stream, 1):
-            text = raw.strip()
-            if not text:
-                continue
-            if text.startswith('#'):
-                if text.startswith('# end_ms='):
-                    if end is not None:
-                        raise ValueError(f'{path}:{number}: duplicate end marker')
-                    try:
-                        end = int(text[len('# end_ms='):])
-                    except ValueError:
-                        raise ValueError(f'{path}:{number}: invalid end marker') from None
-                continue
-            try:
-                t, raw_value = text.split(',')
-                raw_value = raw_value.strip()
-                mbps = not delay and raw_value.endswith('m')
-                if mbps and raw_value[:-1] != raw_value[:-1].rstrip():
-                    raise ValueError
-                t, value = int(t), float(raw_value[:-1] if mbps else raw_value)
-                if t < 0 or not math.isfinite(value) or value < 0 or (not delay and ((not mbps and not value.is_integer()) or value > (12_000_000 if mbps else 1_000_000))):
-                    raise ValueError
-                if mbps:
-                    value /= 12.0
-                if (not points and t != 0) or (points and t <= points[-1][0]):
-                    raise ValueError
-            except ValueError:
-                raise ValueError(f'{path}:{number}: invalid time point or value') from None
-            points.append((t, value))
-    if not points:
-        raise ValueError(f'{path}: no data')
-    if delay:
-        if end is None or end <= points[-1][0]:
-            raise ValueError(f'{path}: missing or invalid # end_ms marker')
-    else:
-        if len(points) < 2 or points[-1][1] != 0 or points[-1][0] <= 0:
-            raise ValueError(f'{path}: capacity must end with an explicit time,0')
-        end = points[-1][0]
-    return end, points
-
-
-def discover(directory: Path) -> list[dict]:
-    if not directory.is_dir():
-        raise ValueError(f'dataset directory not found: {directory}')
-    up = {(p.parent, p.name[:-len('.up.txt')]): p for p in directory.rglob('*.up.txt')}
-    down = {(p.parent, p.name[:-len('.down.txt')]): p for p in directory.rglob('*.down.txt')}
-    for direction, files in (('up', up), ('down', down)):
-        for p in directory.rglob(f'{direction}.txt'):
-            key = (p.parent, p.parent.name)
-            if key in files:
-                raise ValueError(f'ambiguous {direction} capacity files in {p.parent}')
-            files[key] = p
-    missing = set(up) ^ set(down)
-    if missing:
-        raise ValueError(f'missing up/down capacity for: {", ".join(str(parent / name) for parent, name in sorted(missing))}')
-    if not up:
-        raise ValueError(f'no line scenarios found in {directory}')
-    scenarios = []
-    seen = set()
-    for parent, name in sorted(up):
-        if name in seen:
-            raise ValueError(f'duplicate scenario name: {name}')
-        seen.add(name)
-        files = {'up': up[parent, name], 'down': down[parent, name]}
-        if (files['up'].name == 'up.txt') != (files['down'].name == 'down.txt'):
-            raise ValueError(f'mixed capacity file naming in {parent}')
-        for direction in ('up', 'down'):
-            fixed_names = files[direction].name == f'{direction}.txt'
-            p = parent / (f'{direction}.delay.txt' if fixed_names else f'{name}.{direction}.delay.txt')
-            if p.is_file():
-                files[direction + '_delay'] = p
-        ends = [parse_line(p, key.endswith('_delay'))[0] for key, p in files.items()]
-        scenarios.append({'name': name, 'files': files, 'duration_s': min(ends) / 1000.0})
-    return scenarios
 
 
 def result_directory(directory: Path) -> Path:
@@ -130,285 +55,36 @@ def result_directory(directory: Path) -> Path:
     return RESULTS_DIR / directory.resolve().name
 
 
-def workload(path: Path) -> tuple[int, float]:
-    elapsed, count = 0.0, 0
-    for number, raw in enumerate(path.read_text().splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith('#'):
-            continue
-        try:
-            gap, size = line.split()
-            gap, size = float(gap), int(size)
-            if not math.isfinite(gap) or gap < 0 or size <= 0 or size > 100000000:
-                raise ValueError
-        except ValueError:
-            raise ValueError(f'{path}:{number}: invalid workload entry') from None
-        elapsed += gap / 1000
-        count += 1
-    if not count:
-        raise ValueError(f'{path}: empty workload')
-    return count, elapsed
-
-
-def digest(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open('rb') as stream:
-        for part in iter(lambda: stream.read(1024 * 1024), b''):
-            h.update(part)
-    return h.hexdigest()
-
-
-def mean(rows: list[dict], field: str) -> str:
-    values = [float(r[field]) for r in rows if r.get(field) not in ('', None) and math.isfinite(float(r[field]))]
-    return f'{statistics.mean(values):.3f}' if values else '-'
-
-
 def ranking_entries(rows: list[dict], scenario: str, workload_name: str, kind: str) -> list[dict]:
-    """Rank complete runs using unrounded per-algorithm averages."""
-    def metric(cc: str, wk: str, field: str, positive: bool) -> tuple[float | None, bool, int]:
-        selected = [r for r in rows if r['scenario'] == scenario and r['cc'] == cc and r['workload'] == wk]
-        good = [r for r in selected if r['status'] == 'success']
-        values = []
-        for row in good:
-            try:
-                value = float(row[field])
-                if math.isfinite(value) and (value > 0 if positive else value >= 0):
-                    values.append(value)
-            except (KeyError, TypeError, ValueError):
-                pass
-        complete = (len(selected) == REPEATS and len(good) == REPEATS and
-                    {str(r['repeat']) for r in good} == {str(i) for i in range(1, REPEATS + 1)})
-        valid = complete and len(values) == REPEATS
-        return (statistics.mean(values) if values else None), valid, len(good)
-
-    entries = []
-    for cc in CCS:
-        timeout = False
-        norm, norm_ok, bulk_count = metric(cc, 'bulk', 'norm_power', False)
-        wk_stats = {wk: metric(cc, wk, 'fct_slowdown', True)
-                    for wk in (w for w in WORKLOADS if w != 'bulk')} if kind == 'combined' else {}
-        slow, slow_ok, workload_count = (metric(cc, workload_name, 'fct_slowdown', True)
-                                          if kind == 'workload' else (None, False, 0))
-        if kind == 'bulk':
-            value, valid, count = norm, norm_ok, f'{bulk_count}/{REPEATS}'
-        elif kind == 'workload':
-            value, valid, count = slow, slow_ok, f'{workload_count}/{REPEATS}'
-            selected = [r for r in rows if r['scenario'] == scenario and r['cc'] == cc and r['workload'] == workload_name]
-            timeout = any(r['status'] == 'timeout' for r in selected)
-        else:
-            if wk_stats and all(v[0] is not None for v in wk_stats.values()):
-                slow = math.exp(math.fsum(math.log(v[0]) for v in wk_stats.values()) / len(wk_stats))
-            value = math.sqrt(norm / slow) if norm is not None and slow is not None else None
-            valid = norm_ok and bool(wk_stats) and all(v[1] for v in wk_stats.values())
-            workload_valid = True
-            for wk in wk_stats:
-                selected = [r for r in rows if r['scenario'] == scenario and r['cc'] == cc and r['workload'] == wk]
-                assessed = (len(selected) == REPEATS and
-                            {str(r['repeat']) for r in selected} == {str(i) for i in range(1, REPEATS + 1)} and
-                            all(r['status'] in ('success', 'timeout') for r in selected))
-                has_timeout = any(r['status'] == 'timeout' for r in selected)
-                timeout |= has_timeout
-                success_valid = True
-                for r in selected:
-                    if r['status'] == 'success':
-                        try:
-                            sample = float(r['fct_slowdown'])
-                            success_valid &= math.isfinite(sample) and sample > 0
-                        except (KeyError, TypeError, ValueError):
-                            success_valid = False
-                workload_valid &= assessed and success_valid
-            if timeout and norm_ok and workload_valid:
-                value, valid = 0.0, True
-            count = '; '.join([f'bulk {bulk_count}/{REPEATS}'] +
-                              [f'{wk} {v[2]}/{REPEATS}' for wk, v in wk_stats.items()])
-        entries.append({'cc': cc, 'norm': norm, 'slow': slow, 'value': value,
-                        'workload_slows': {wk: v[0] for wk, v in wk_stats.items()},
-                        'valid': valid, 'count': count, 'rank': '-', 'gap': '-',
-                        'status': ('超时（0分）' if timeout and (kind == 'workload' or valid)
-                                   else '完整' if valid else '不完整或指标无效')})
-
-    lower_better = kind == 'workload'
-    qualified = [e for e in entries if e['valid'] and e['value'] is not None]
-    qualified.sort(key=lambda e: (e['value'] if lower_better else -e['value'], e['cc']))
-    if qualified and qualified[0]['value'] > 0:
-        best = qualified[0]['value']
-        previous = None
-        rank = 0
-        for index, entry in enumerate(qualified, 1):
-            value = entry['value']
-            if previous is None or value != previous:
-                rank = index
-            entry['rank'] = str(rank)
-            entry['gap'] = '基准' if value == best else f'{(value - best) / best * 100:+.1f}%'
-            previous = value
-    elif qualified:
-        for entry in qualified:
-            entry['status'] = '基准为零，无法排名'
-    return qualified + [e for e in entries if not e['valid'] or e['value'] is None]
+    return trace_report.ranking_entries(
+        rows, scenario, workload_name, kind, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS
+    )
 
 
 def overall_ranking(scenarios: list[dict], rows: list[dict]) -> tuple[list[dict], list[str]]:
-    """Compare algorithms against each scenario's best complete result."""
-    if 'bulk' not in WORKLOADS:
-        return [], ['总排名需要 bulk 结果。']
-    if not scenarios:
-        return [], ['没有可比较的场景。']
-    kind = 'combined' if any(w != 'bulk' for w in WORKLOADS) else 'bulk'
-    values = {cc: [] for cc in CCS}
-    wins = {cc: 0 for cc in CCS}
-    completed = {cc: 0 for cc in CCS}
-    missing_baselines = []
-    for scenario in scenarios:
-        entries = ranking_entries(rows, scenario['name'], '', kind)
-        qualified = [e for e in entries if e['valid'] and e['value'] is not None]
-        best = max((e['value'] for e in qualified), default=0.0)
-        if best <= 0:
-            missing_baselines.append(scenario['name'])
-        for e in qualified:
-            values[e['cc']].append(e['value'] / best if best > 0 else None)
-            if e['status'] == '完整':
-                completed[e['cc']] += 1
-            if best > 0 and e['value'] == best:
-                wins[e['cc']] += 1
-    entries = []
-    for cc in CCS:
-        ratios = values[cc]
-        complete = len(ratios) == len(scenarios)
-        score = None
-        if complete and not missing_baselines:
-            score = 0.0 if any(v == 0 for v in ratios) else math.exp(math.fsum(math.log(v) for v in ratios) / len(ratios))
-        status = ('场景不完整' if not complete else '含超时（0分）' if completed[cc] < len(scenarios) else '完整')
-        entries.append({'cc': cc, 'complete': completed[cc], 'wins': wins[cc], 'score': score,
-                        'rank': '-', 'gap': '-', 'status': status})
-    if missing_baselines:
-        return entries, ['无法计算总排名：以下场景没有有效的正数基准：' + '、'.join(missing_baselines) + '。']
-    ranked = sorted((e for e in entries if e['score'] is not None), key=lambda e: (-e['score'], e['cc']))
-    if ranked and ranked[0]['score'] > 0:
-        best = ranked[0]['score']
-        previous = None
-        for index, e in enumerate(ranked, 1):
-            if previous is None or e['score'] != previous:
-                rank = index
-            e['rank'] = str(rank)
-            e['gap'] = '基准' if e['score'] == best else f"{(e['score'] - best) / best * 100:+.1f}%"
-            previous = e['score']
-    elif ranked:
-        for e in ranked:
-            e['status'] = '总分基准为零，无法排名'
-    return ranked + [e for e in entries if e['score'] is None], []
+    return trace_report.overall_ranking(scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS)
 
 
 def overall_ranking_table(scenarios: list[dict], rows: list[dict]) -> list[str]:
-    entries, warnings = overall_ranking(scenarios, rows)
-    metric = '单场景综合评分' if any(w != 'bulk' for w in WORKLOADS) else '单场景 Bulk Norm Power'
-    result = ['## 所有场景总排名', '',
-              f'每个场景等权：先将 {metric} 除以该场景最优值，再对所有场景的相对得分取几何均值。',
-              '全部场景的所选负载及重复均有有效结果时参与排名；workload 超时按零分计算，并列场景最优各计一次。', '']
-    if warnings:
-        result.extend(warnings + [''])
-    if entries:
-        result.extend(['| 总排名 | 算法 | 完整场景 | 场景最优次数 | 总评分 ↑ | 相对第一名差距 | 状态 |',
-                       '|---:|---|---:|---:|---:|---:|---|'])
-        for e in entries:
-            cells = [e['rank'], e['cc'], f"{e['complete']}/{len(scenarios)}", str(e['wins']),
-                     '-' if e['score'] is None else f"{e['score']:.3f}", e['gap'], e['status']]
-            if e['gap'] == '基准':
-                cells = [f'**{cell}**' for cell in cells]
-            result.append('| ' + ' | '.join(cells) + ' |')
-        result.append('')
-    return result
+    return trace_report.overall_ranking_table(scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS)
+
+
+def workload_ranking(scenarios: list[dict], rows: list[dict], workload_name: str) -> tuple[list[dict], list[str]]:
+    return trace_report.workload_ranking(
+        scenarios, rows, workload_name, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS
+    )
+
+
+def workload_ranking_tables(scenarios: list[dict], rows: list[dict]) -> list[str]:
+    return trace_report.workload_ranking_tables(scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS)
 
 
 def ranking_tables(scenarios: list[dict], rows: list[dict]) -> list[str]:
-    result = ['## 算法排名', '',
-              '每个场景分别排名；指标为各次成功运行的算术平均，使用未四舍五入的值计算。',
-              '只有对应组合的所有重复均成功且指标有效时才参与排名；并列值共享排名。', '']
-
-    def fmt(value: float | None, suffix: str = '') -> str:
-        return '-' if value is None else f'{value:.3f}{suffix}'
-
-    def row(cells: list[str], entry: dict) -> str:
-        if entry['gap'] == '基准':
-            cells = [f'**{cell}**' for cell in cells]
-        return '| ' + ' | '.join(cells) + ' |'
-
-    if 'bulk' in WORKLOADS:
-        result.extend(['### Bulk：Norm Power', '',
-                       '| 场景 | 排名 | 算法 | 成功/总次数 | Norm Power ↑ | 相对最优差距 | 状态 |',
-                       '|---|---:|---|---:|---:|---:|---|'])
-        for scenario in scenarios:
-            for e in ranking_entries(rows, scenario['name'], 'bulk', 'bulk'):
-                result.append(row([scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['norm']), e['gap'], e['status']], e))
-        result.append('')
-    for wk in (w for w in WORKLOADS if w != 'bulk'):
-        result.extend([f'### {wk}：FCT Slowdown', '',
-                       '| 场景 | 排名 | 算法 | 成功/总次数 | FCT Slowdown ↓ | 相对最优差距 | 状态 |',
-                       '|---|---:|---|---:|---:|---:|---|'])
-        for scenario in scenarios:
-            for e in ranking_entries(rows, scenario['name'], wk, 'workload'):
-                result.append(row([scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['slow'], 'x'), e['gap'], e['status']], e))
-        result.append('')
-    workloads = [w for w in WORKLOADS if w != 'bulk']
-    if 'bulk' in WORKLOADS and workloads:
-        headers = ['场景', '排名', '算法', '成功/总次数', 'Norm Power']
-        headers.extend(f'{wk} Slowdown' for wk in workloads)
-        headers.extend(['Slowdown 几何均值', '综合评分 ↑', '相对最优差距', '状态'])
-        result.extend(['### 综合排名', '',
-                       '各 workload 的重复运行先取算术平均，再对所有 workload 等权取几何均值；综合评分 = sqrt(Norm Power / Slowdown 几何均值)。',
-                       '所有 workload 和 bulk 均需完成全部重复；workload 超时的场景综合评分为 0。', '',
-                       '| ' + ' | '.join(headers) + ' |',
-                       '|' + '|'.join(['---'] * len(headers)) + '|'])
-        for scenario in scenarios:
-            for e in ranking_entries(rows, scenario['name'], '', 'combined'):
-                cells = [scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['norm'])]
-                cells.extend(fmt(e['workload_slows'].get(wk), 'x') for wk in workloads)
-                cells.extend([fmt(e['slow'], 'x'), fmt(e['value']), e['gap'], e['status']])
-                result.append(row(cells, e))
-        result.append('')
-    result.extend(overall_ranking_table(scenarios, rows))
-    return result
+    return trace_report.ranking_tables(scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS)
 
 
 def print_overview(scenarios: list[dict], rows: list[dict]) -> None:
-    """Print equal-weight scenario summaries, excluding incomplete groups."""
-    groups: dict[tuple[str, str, str], list[dict]] = {}
-    for row in rows:
-        groups.setdefault((row['scenario'], row['cc'], row['workload']), []).append(row)
-    expected_repeats = {str(i) for i in range(1, REPEATS + 1)}
-    columns = [('Norm Power', 'bulk', 'norm_power')] if 'bulk' in WORKLOADS else []
-    columns += [(f'{wk} FCT', wk, 'fct_slowdown') for wk in WORKLOADS if wk != 'bulk']
-    table = [['Algorithm'] + [col[0] for col in columns]]
-    for cc in CCS:
-        cells = [cc]
-        for _, wk, metric in columns:
-            values = []
-            for scenario in scenarios:
-                group = groups.get((scenario['name'], cc, wk), [])
-                if (len(group) != REPEATS or any(r['status'] != 'success' for r in group) or
-                        {str(r['repeat']) for r in group} != expected_repeats):
-                    continue
-                try:
-                    samples = [float(r[metric]) for r in group]
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if any(not math.isfinite(v) or (v < 0 if wk == 'bulk' else v <= 0) for v in samples):
-                    continue
-                values.append(statistics.mean(samples))
-            if values:
-                value = (statistics.mean(values) if wk == 'bulk' else
-                         math.exp(math.fsum(math.log(v) for v in values) / len(values)))
-                cells.append(f'{value:.3f}{"" if wk == "bulk" else "x"} ({len(values)}/{len(scenarios)})')
-            else:
-                cells.append(f'- (0/{len(scenarios)})')
-        table.append(cells)
-    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
-    print('\n结果概览  ·  数值后为完整场景数 / 总场景数')
-    print('  Norm Power：场景算术均值；FCT Slowdown：场景几何均值。')
-    print('  覆盖场景数不同时，算法结果不宜直接比较。')
-    for index, row in enumerate(table):
-        print('  ' + '  '.join(value.ljust(widths[i]) for i, value in enumerate(row)))
-        if index == 0:
-            print('  ' + '  '.join('-' * width for width in widths))
+    trace_report.print_overview(scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS)
 
 
 class Progress:
@@ -474,23 +150,6 @@ class Progress:
         print(f'[完成] {label}{suffix}', flush=True)
 
 
-def atomic_write(path: Path, content: str) -> None:
-    with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
-                                     prefix=f'.{path.name}.', delete=False) as stream:
-        temp = Path(stream.name)
-        try:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        except BaseException:
-            temp.unlink(missing_ok=True)
-            raise
-    try:
-        os.replace(temp, path)
-    finally:
-        temp.unlink(missing_ok=True)
-
-
 def run_fingerprint(command: list[str], binary_sha: str, scenario_files: dict,
                     workload_sha: str | None, runner_sha: str) -> str:
     payload = {'version': 1, 'command': command, 'binary_sha256': binary_sha,
@@ -540,59 +199,25 @@ class ProcessController:
 
 
 def write_report(output: Path, scenarios: list[dict], rows: list[dict], work: dict) -> None:
-    ok = sum(row['status'] == 'success' for row in rows)
-    expected = len(scenarios) * len(CCS) * len(WORKLOADS) * REPEATS
-    text = ['# TCP Trace Bench 实验报告', '', f'- 数据集：{LINES_DIR}',
-            f'- 算法：{", ".join(CCS)}', f'- 负载：{", ".join(WORKLOADS)}',
-            f'- TCP 数据段大小：{TCP_SEGMENT_SIZE_BYTES} 字节',
-            f'- 每组重复：{REPEATS}；计划：{expected}；已运行或恢复：{len(rows)}；成功：{ok}；失败或未完成：{len(rows)-ok}']
-    if 'bulk' in WORKLOADS:
-        durations = {s['duration_s'] for s in scenarios}
-        if len(durations) == 1:
-            text.append(f'- Bulk 持续时间：{next(iter(durations)):.3f} s')
-        else:
-            text.append('- Bulk 持续时间：' + '；'.join(
-                f"{s['name']} {s['duration_s']:.3f} s" for s in scenarios))
-    text.append('')
-    for wk in WORKLOADS:
-        text.extend([f'## {wk}', ''])
-        if wk == 'bulk':
-            fields = ['capacity_mbps', 'throughput_mbps', 'utilization', 'qdelay_avg_ms', 'qdelay_p95_ms', 'util_power', 'norm_power', 'drop_rate']
-            text.append('| 场景 | 算法 | 成功/总次数 | 容量 Mbps | 吞吐 Mbps | 利用率 | 平均排队延迟 ms | P95 排队延迟 ms | Power ↑ | Norm Power ↑ | 门控丢包率 |')
-        else:
-            info = work[wk]
-            text.extend([f"文件：`{info['path']}`；数据块数：{info['count']}；到达跨度：{info['span_s']:.3f} s", ''])
-            fields = ['duration_s', 'requests', 'rct_mean_ms', 'rct_p95_ms', 'fct_slowdown', 'mortise_qoe']
-            text.append('| 场景 | 算法 | 成功/总次数 | Workload 完成时间 s | 完成数据块 | 平均数据块完成时间 ms | P95 数据块完成时间 ms | FCT Slowdown ↓ | Mortise QoE |')
-        text.append('|' + '|'.join(['---'] * (3 + len(fields))) + '|')
-        for scenario in scenarios:
-            for cc in CCS:
-                subset = [r for r in rows if r['scenario'] == scenario['name'] and r['cc'] == cc and r['workload'] == wk]
-                good = [r for r in subset if r['status'] == 'success']
-                text.append('| ' + ' | '.join([scenario['name'], cc, f'{len(good)}/{REPEATS}'] + [mean(good, f) for f in fields]) + ' |')
-        text.append('')
-    text.extend(ranking_tables(scenarios, rows))
-    text.extend(['## 场景与运行配置', ''])
-    if any('up_delay' not in s['files'] or 'down_delay' not in s['files'] for s in scenarios):
-        text.append(f'- 缺失延迟文件时，单向基础延迟：{DEFAULT_ONE_WAY_DELAY_MS:g} ms。')
-    if any(wk != 'bulk' for wk in WORKLOADS):
-        text.append(f'- Workload 循环回放 lines；全部数据块收到时立即结束，最多运行 {WORKLOAD_MAX_SIMULATION_S:g} s 仿真时间，超时记 0 分。')
-    text.extend(['', '## 失败与未完成', ''])
-    failed = [r for r in rows if r['status'] != 'success']
-    text.extend([f"- {r['scenario']} / {r['workload']} / {r['cc']} / 第 {r['repeat']} 次：{r['error']}" for r in failed] or ['无。'])
-    atomic_write(output / 'report.md', '\n'.join(text) + '\n')
+    content = trace_report.render_report(
+        scenarios,
+        rows,
+        work,
+        title='TCP Trace Bench 实验报告',
+        dataset_label=str(LINES_DIR),
+        ccs=CCS,
+        workloads=WORKLOADS,
+        repeats=REPEATS,
+        tcp_segment_size_bytes=TCP_SEGMENT_SIZE_BYTES,
+        default_one_way_delay_ms=DEFAULT_ONE_WAY_DELAY_MS,
+        workload_max_s=WORKLOAD_MAX_SIMULATION_S,
+        workload_timeout_label='仿真时间',
+    )
+    atomic_write(output / 'report.md', content)
 
 
 def write_results(output: Path, scenarios: list[dict], rows: list[dict], work: dict) -> None:
-    fields = ['scenario', 'workload', 'cc', 'repeat', 'status', 'error', 'duration_s', 'capacity_mbps',
-              'throughput_mbps', 'utilization', 'qdelay_avg_ms', 'qdelay_p95_ms', 'base_rtt_ms', 'est_rtt_ms',
-              'util_power', 'norm_power', 'drop_rate', 'requests_expected', 'requests', 'rct_mean_ms', 'rct_p50_ms',
-              'rct_p95_ms', 'fct_slowdown', 'mortise_qoe']
-    stream = io.StringIO(newline='')
-    writer = csv.DictWriter(stream, fieldnames=fields, extrasaction='ignore')
-    writer.writeheader()
-    writer.writerows(rows)
-    atomic_write(output / 'runs.csv', stream.getvalue())
+    trace_report.write_runs_csv(output / 'runs.csv', rows)
     write_report(output, scenarios, rows, work)
 
 
