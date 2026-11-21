@@ -284,10 +284,14 @@ def build_lines_plan(
 
 
 def generate_bulk_workload(path: Path, max_bytes: int) -> None:
-    """Create a Mortise .wk file with enough 16 MiB chunks to saturate the entire bulk run."""
-    chunk_bytes = 16 * 1024 * 1024
+    """Create a Mortise .wk file with enough 2 MiB chunks to saturate the entire bulk run.
+
+    Mortise's tokio LengthDelimitedCodec uses the default 8 MiB max_frame_length, so
+    each request chunk must stay well below 8 MiB (2 MiB matches upstream Mortise).
+    """
+    chunk_bytes = 2 * 1024 * 1024
     min_bytes = max(max_bytes, 4 * 1024**3)
-    n_lines = max(256, math.ceil(min_bytes / chunk_bytes))
+    n_lines = max(2048, math.ceil(min_bytes / chunk_bytes))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f'0\t{chunk_bytes}\n' * n_lines, encoding='utf-8')
 
@@ -375,6 +379,13 @@ def rct_wall_duration_s(rct_path: Path) -> float | None:
     return max(0.0, span_ns / 1e9) if span_ns >= 0 else None
 
 
+def summarize_process_error(stdout: str, stderr: str) -> str:
+    lines = [l.strip() for l in (stdout + '\n' + stderr).splitlines() if l.strip()]
+    useful = [l for l in lines if 'Died on std::runtime_error:' not in l]
+    chosen = useful[-4:] if useful else lines[-4:]
+    return ' | '.join(chosen)[-500:]
+
+
 def evaluate_single_run(
     *,
     conv: lines_to_mahimahi.MahimahiScenario,
@@ -424,7 +435,7 @@ def evaluate_single_run(
             res = run_mm_cmd(mm_cmd, log_path, log_path, allow_timeout=True)
             ok_code = res.returncode in (0, 124, 130, 137, 143)
             if not ok_code or not log_path.is_file() or not has_deliveries(log_path):
-                detail = (res.stdout + '\n' + res.stderr).strip()[-400:]
+                detail = summarize_process_error(res.stdout, res.stderr)
                 err_path.write_text(res.stdout + '\n' + res.stderr, encoding='utf-8')
                 row['error'] = f'exit {res.returncode}: {detail or "no packet deliveries in downlink.log"}'
                 return row
@@ -507,7 +518,7 @@ def evaluate_single_run(
             return row
 
         if res.returncode != 0 or completed != expected_reqs:
-            detail = (res.stdout + '\n' + res.stderr).strip()[-400:]
+            detail = summarize_process_error(res.stdout, res.stderr)
             err_path.write_text(res.stdout + '\n' + res.stderr, encoding='utf-8')
             row['error'] = f'exit {res.returncode} (completed {completed}/{expected_reqs}): {detail}'
             return row

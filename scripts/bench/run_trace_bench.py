@@ -28,7 +28,7 @@ ROOT = Path(__file__).resolve().parents[2]
 # Select a dataset directory or one of its scenario directories.
 # Edit these settings, then run this script or `make bench`.
 # LINES_DIR = ROOT / 'datasets/lines/lumos'
-LINES_DIR = ROOT / 'datasets/lines/leocc'
+LINES_DIR = ROOT / 'datasets/lines/basic'
 WORKLOADS = ['bulk', 'websearch', 'pageload', 'app']
 CCS = ['cubic', 'bbr', 'copa_auto_nc', 'copa', 'vegas', 'westwood', 'illinois', 'veno', 'yeah', 'hybla']
 REPEATS = 2

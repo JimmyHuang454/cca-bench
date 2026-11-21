@@ -62,6 +62,18 @@ class KernelCiTests(unittest.TestCase):
             self.assertIn('name = "copa_auto_v2"', rust.read_text(encoding='utf-8'))
             self.assertIn('CongestionOpt::CopaAutoV2 => (0, b"copa_auto_v2")', rust.read_text(encoding='utf-8'))
 
+    def test_generate_bulk_workload_respects_mortise_frame_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            wk = Path(tmp) / 'bulk.wk'
+            target = 10 * 1024**3  # 10 GiB
+            run_kernel_lines.generate_bulk_workload(wk, target)
+            lines = wk.read_text(encoding='utf-8').splitlines()
+            self.assertGreaterEqual(len(lines), 5120)
+            gap, size = map(int, lines[0].split())
+            self.assertEqual(gap, 0)
+            self.assertLessEqual(size, 2 * 1024 * 1024)
+            self.assertGreaterEqual(len(lines) * size, target)
+
     def test_parse_queues_spec(self):
         self.assertEqual(run_kernel_lines.parse_queues_spec('500KB'), ['500000'])
         self.assertEqual(run_kernel_lines.parse_queues_spec('150KB, 2MB, infinite'), ['150000', '2000000', 'infinite'])
