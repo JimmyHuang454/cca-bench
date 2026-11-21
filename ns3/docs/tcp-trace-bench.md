@@ -2,7 +2,11 @@
 
 在 `scripts/bench/run_trace_bench.py` 顶部设置 `LINES_DIR`、`WORKLOADS`、`CCS`、`REPEATS` 和 `MAX_WORKERS`。先运行 `make build-bench`，然后执行 `make bench` 或 `python3 scripts/bench/run_trace_bench.py`。新入口只读取 lines TXT；旧数据集与物理层测试保留在 `make -C ns3 legacy-bench` 及原有专用目标。
 
+`LINES_DIR` 可设为 `datasets/lines/lumos` 运行整个数据集，或设为 `datasets/lines/lumos/5g_trace_100_walking` 只运行该场景。结果分别写到 `results/trace-bench/lumos` 和 `results/trace-bench/lumos/5g_trace_100_walking`。
+
 `MAX_WORKERS` 默认使用操作系统报告的逻辑 CPU 数，限制同时运行的独立 ns-3 进程数；设为 1 可串行运行。实际并发数不会超过待运行任务数。并发只影响实际执行时间，不改变仿真时间、输入或随机种子。每个任务由主进程汇总并保存断点；中断时停止正在运行的子进程，之后可续跑。
+
+终端显示实验进度和每个结束任务的记录，包括场景、算法、负载、重复编号、实际运行耗时及主要指标；失败任务显示原因。最终概览仅统计所有重复均成功且指标有效的场景：Norm Power 按场景取算术平均，FCT Slowdown 按场景取几何平均；每项附完整场景数。详细结果和排名见报告。
 
 每个场景必须包含同名前缀的 `.up.txt` 与 `.down.txt`，可选 `.up.delay.txt` 和 `.down.delay.txt`。格式见 `datasets/lines/TRACE-FORMAT.md`。两方向初始时刻为 0，容量文件必须以结束时刻的 0 结尾；延迟文件必须以 `# end_ms=<时间>` 标记有效时长。Bulk 运行时长取所有已提供文件的最短时长，不循环。Workload 使用该最短有效时长作为整个场景的共同循环周期；上下行容量和延迟同时回到起点，超过共同周期的数据不参与回放。缺失延迟使用配置里的单向延迟，默认 10 ms。
 

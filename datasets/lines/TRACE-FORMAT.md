@@ -1,6 +1,14 @@
 # Trace 转换格式
 
-转换一组 Mahimahi 上下行发包机会，可选提供 LeoCC 延迟文件：
+在 `scripts/data/trace_to_lines.py` 顶部设置 `DATASET_DIR`，然后直接运行：
+
+```sh
+python3 scripts/data/trace_to_lines.py
+```
+
+默认转换 `datasets/traces/lumos/`，输出到 `datasets/lines/lumos/`。要转换单组文件，将 `DATASET_DIR` 设为 `None`，并设置 `UPLINK_TRACE`、`DOWNLINK_TRACE` 和可选的 `DELAY_TRACE`；输出到 `datasets/lines/converted/`。
+
+也可以通过命令行临时指定一组 Mahimahi 上下行发包机会，以及可选的 LeoCC 延迟文件：
 
 ```sh
 python3 scripts/data/trace_to_lines.py input.up input.down [delay.txt]
@@ -14,7 +22,21 @@ python3 scripts/data/trace_to_lines.py input.up input.down [delay.txt]
 python3 scripts/data/trace_to_lines.py datasets/traces/cellular-traces-2018
 ```
 
-输出到 `datasets/lines/<输入目录名>/`。目录模式配对同名 `.up`、`.down`，可选配对同名 `.delay`。LeoCC 的 `bw_<名称>.txt` 和 `delay_<名称>.txt` 配对，带宽用于上下行；项目示例 `leo-bw.txt` 和 `leo-delay.txt` 也支持。缺少必须的配对文件时报错。目标文件已存在时报错，不覆盖原始文件或已有结果。
+输出到 `datasets/lines/<输入目录名>/`。目录模式配对同名 `.up`、`.down`，可选配对同名 `.delay`。LeoCC 的 `bw_<名称>.txt` 和 `delay_<名称>.txt` 配对，带宽用于上下行；项目示例 `leo-bw.txt` 和 `leo-delay.txt` 也支持。Lumos 的 `5g_trace_*.down` / `4g_trace_*.down` 同时生成相同的上行和下行时间序列；对称上行是实验假设，不是实测上行。Lumos 若没有延迟输入，默认生成上下行各 20 ms 的单向延迟文件（基础 RTT 40 ms），可在脚本中调整 `LUMOS_ONE_WAY_DELAY_MS`。Lumos 的 `.mbps` 文件不参与本转换。缺少必须的配对文件时报错。目标文件已存在时报错，不覆盖原始文件或已有结果。
+
+每个场景的文件放在独立的同名目录中，例如：
+
+```text
+datasets/lines/lumos/5g_trace_100_walking/
+  5g_trace_100_walking.up.txt
+  5g_trace_100_walking.down.txt
+  5g_trace_100_walking.up.delay.txt
+  5g_trace_100_walking.down.delay.txt
+```
+
+单组文件转换的输出目录同样是 `datasets/lines/converted/<场景名>/`。bench 的 `LINES_DIR` 可以指定数据集目录或单个场景目录；也兼容旧的平铺文件布局。
+
+Lumos 的 `.down` 表示下载方向；目前 `tcp-trace-bench` 的数据固定走 `.up`，ACK 走 `.down`。当前上下行使用相同时间序列，因此数据可经过由下行轨迹生成的容量变化；这不能模拟独立的真实上行或下载方向特有的非对称行为。
 
 ## 容量
 

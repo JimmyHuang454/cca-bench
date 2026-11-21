@@ -15,15 +15,17 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# Select a dataset directory or one of its scenario directories.
 # Edit these settings, then run this script or `make bench`.
 LINES_DIR = ROOT / 'datasets/lines/leocc'
 WORKLOADS = ['bulk', 'websearch', 'pageload', 'app']
-CCS = ['copa', 'bbr', 'copa_auto_nc']
-REPEATS = 3
+CCS = ['cubic', 'bbr', 'copa_auto_nc','copa']
+REPEATS = 2
 RESUME = True  # False: rerun all combinations and replace their results.
 MAX_WORKERS = os.cpu_count() or 1  # Maximum concurrent ns-3 processes; 1 runs serially.
 WORKLOAD_DRAIN_TIMEOUT_S = 60.0
@@ -78,23 +80,37 @@ def parse_line(path: Path, delay: bool = False) -> tuple[int, list[tuple[int, fl
 def discover(directory: Path) -> list[dict]:
     if not directory.is_dir():
         raise ValueError(f'dataset directory not found: {directory}')
-    up = {p.name[:-len('.up.txt')]: p for p in directory.glob('*.up.txt')}
-    down = {p.name[:-len('.down.txt')]: p for p in directory.glob('*.down.txt')}
+    up = {(p.parent, p.name[:-len('.up.txt')]): p for p in directory.rglob('*.up.txt')}
+    down = {(p.parent, p.name[:-len('.down.txt')]): p for p in directory.rglob('*.down.txt')}
     missing = set(up) ^ set(down)
     if missing:
-        raise ValueError(f'missing up/down capacity for: {", ".join(sorted(missing))}')
+        raise ValueError(f'missing up/down capacity for: {", ".join(str(parent / name) for parent, name in sorted(missing))}')
     if not up:
         raise ValueError(f'no line scenarios found in {directory}')
     scenarios = []
-    for name in sorted(up):
-        files = {'up': up[name], 'down': down[name]}
+    seen = set()
+    for parent, name in sorted(up):
+        if name in seen:
+            raise ValueError(f'duplicate scenario name: {name}')
+        seen.add(name)
+        files = {'up': up[parent, name], 'down': down[parent, name]}
         for direction in ('up', 'down'):
-            p = directory / f'{name}.{direction}.delay.txt'
+            p = parent / f'{name}.{direction}.delay.txt'
             if p.is_file():
                 files[direction + '_delay'] = p
         ends = [parse_line(p, key.endswith('_delay'))[0] for key, p in files.items()]
         scenarios.append({'name': name, 'files': files, 'duration_s': min(ends) / 1000.0})
     return scenarios
+
+
+def result_directory(directory: Path) -> Path:
+    try:
+        relative = directory.resolve().relative_to((ROOT / 'datasets/lines').resolve())
+        if relative.parts:
+            return RESULTS_DIR / relative
+    except ValueError:
+        pass
+    return RESULTS_DIR / directory.resolve().name
 
 
 def workload(path: Path) -> tuple[int, float]:
@@ -235,6 +251,111 @@ def ranking_tables(scenarios: list[dict], rows: list[dict]) -> list[str]:
     return result
 
 
+def print_overview(scenarios: list[dict], rows: list[dict]) -> None:
+    """Print equal-weight scenario summaries, excluding incomplete groups."""
+    groups: dict[tuple[str, str, str], list[dict]] = {}
+    for row in rows:
+        groups.setdefault((row['scenario'], row['cc'], row['workload']), []).append(row)
+    expected_repeats = {str(i) for i in range(1, REPEATS + 1)}
+    columns = [('Norm Power', 'bulk', 'norm_power')] if 'bulk' in WORKLOADS else []
+    columns += [(f'{wk} FCT', wk, 'fct_slowdown') for wk in WORKLOADS if wk != 'bulk']
+    table = [['Algorithm'] + [col[0] for col in columns]]
+    for cc in CCS:
+        cells = [cc]
+        for _, wk, metric in columns:
+            values = []
+            for scenario in scenarios:
+                group = groups.get((scenario['name'], cc, wk), [])
+                if (len(group) != REPEATS or any(r['status'] != 'success' for r in group) or
+                        {str(r['repeat']) for r in group} != expected_repeats):
+                    continue
+                try:
+                    samples = [float(r[metric]) for r in group]
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if any(not math.isfinite(v) or (v < 0 if wk == 'bulk' else v <= 0) for v in samples):
+                    continue
+                values.append(statistics.mean(samples))
+            if values:
+                value = (statistics.mean(values) if wk == 'bulk' else
+                         math.exp(math.fsum(math.log(v) for v in values) / len(values)))
+                cells.append(f'{value:.3f}{"" if wk == "bulk" else "x"} ({len(values)}/{len(scenarios)})')
+            else:
+                cells.append(f'- (0/{len(scenarios)})')
+        table.append(cells)
+    widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
+    print('\n结果概览  ·  数值后为完整场景数 / 总场景数')
+    print('  Norm Power：场景算术均值；FCT Slowdown：场景几何均值。')
+    print('  覆盖场景数不同时，算法结果不宜直接比较。')
+    for index, row in enumerate(table):
+        print('  ' + '  '.join(value.ljust(widths[i]) for i, value in enumerate(row)))
+        if index == 0:
+            print('  ' + '  '.join('-' * width for width in widths))
+
+
+class Progress:
+    def __init__(self, total: int, resumed: int, started: float):
+        self.total = total
+        self.resumed = resumed
+        self.started = started
+        self.tty = sys.stdout.isatty()
+        self.last_bucket = -1
+        self.last_draw = 0.0
+        self.visible = False
+        self.last_state = None
+
+    def update(self, done: int, failures: int, running: int, force: bool = False) -> None:
+        percent = 100 * done // self.total if self.total else 100
+        state = (done, failures, running)
+        if force and self.last_state == state:
+            return
+        bucket = percent // 10
+        now = time.monotonic()
+        if not force and ((self.tty and now - self.last_draw < 0.2) or
+                          (not self.tty and bucket <= self.last_bucket)):
+            return
+        filled = percent * 20 // 100
+        bar = '#' * filled + '-' * (20 - filled)
+        line = (f'[{bar}] {percent:3d}%  {done}/{self.total}  '
+                f'运行中 {running}  失败 {failures}  已恢复 {self.resumed}  '
+                f'耗时 {now - self.started:.1f}s')
+        if self.tty:
+            print('\r\033[K' + line, end='', flush=True)
+            self.visible = True
+        else:
+            print(line, flush=True)
+        self.last_bucket = bucket
+        self.last_draw = now
+        self.last_state = state
+
+    def finish(self) -> None:
+        if self.tty and self.visible:
+            print(flush=True)
+            self.visible = False
+
+    def completed(self, row: dict, elapsed: float) -> None:
+        if self.tty and self.visible:
+            print('\r\033[K', end='', flush=True)
+            self.visible = False
+        label = (f"{row['scenario']}  |  {row['cc']}  |  {row['workload']}  |  "
+                 f"第 {row['repeat']} 次  |  {elapsed:.2f}s")
+        if row['status'] != 'success':
+            print(f"[失败] {label}  |  {row['error']}", file=sys.stderr, flush=True)
+            return
+        fields = [('throughput_mbps', '吞吐', ' Mbps'), ('norm_power', 'Norm Power', '')] if row['workload'] == 'bulk' else [
+            ('duration_s', '完成时间', ' s'), ('fct_slowdown', 'FCT Slowdown', 'x')]
+        metrics = []
+        for key, name, unit in fields:
+            try:
+                value = float(row[key])
+                if math.isfinite(value):
+                    metrics.append(f'{name} {value:.3f}{unit}')
+            except (KeyError, TypeError, ValueError):
+                pass
+        suffix = '  |  ' + '  |  '.join(metrics) if metrics else ''
+        print(f'[完成] {label}{suffix}', flush=True)
+
+
 def atomic_write(path: Path, content: str) -> None:
     with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
                                      prefix=f'.{path.name}.', delete=False) as stream:
@@ -332,7 +453,9 @@ def write_report(output: Path, scenarios: list[dict], rows: list[dict], work: di
                 text.append('| ' + ' | '.join([scenario['name'], cc, f'{len(good)}/{REPEATS}'] + [mean(good, f) for f in fields]) + ' |')
         text.append('')
     text.extend(ranking_tables(scenarios, rows))
-    text.extend(['## 场景与运行配置', '', f'- 缺失延迟文件时，单向基础延迟：{DEFAULT_ONE_WAY_DELAY_MS:g} ms。'])
+    text.extend(['## 场景与运行配置', ''])
+    if any('up_delay' not in s['files'] or 'down_delay' not in s['files'] for s in scenarios):
+        text.append(f'- 缺失延迟文件时，单向基础延迟：{DEFAULT_ONE_WAY_DELAY_MS:g} ms。')
     if any(wk != 'bulk' for wk in WORKLOADS):
         text.append(f'- Workload 循环回放 lines，完成时间为全部数据块收到的仿真时刻；最后一块产生后最多等待 {WORKLOAD_DRAIN_TIMEOUT_S:g} s。')
     text.extend(['', '## 失败与未完成', ''])
@@ -356,6 +479,8 @@ def write_results(output: Path, scenarios: list[dict], rows: list[dict], work: d
 
 def main() -> int:
     lock_handle = None
+    progress = None
+    started = time.monotonic()
     try:
         if not BINARY.is_file():
             raise ValueError(f'benchmark binary missing: {BINARY}; run make build-bench')
@@ -363,6 +488,8 @@ def main() -> int:
                 or not CCS or len(set(CCS)) != len(CCS) or not WORKLOADS or len(set(WORKLOADS)) != len(WORKLOADS)
                 or not math.isfinite(WORKLOAD_DRAIN_TIMEOUT_S) or WORKLOAD_DRAIN_TIMEOUT_S <= 0):
             raise ValueError('invalid algorithms, workloads or repeats')
+        print('\nTCP Trace Bench\n' + '=' * 40, flush=True)
+        print(f'数据集：{LINES_DIR}\n正在读取并校验输入…', flush=True)
         scenarios = discover(LINES_DIR)
         work = {}
         for wk in WORKLOADS:
@@ -373,7 +500,7 @@ def main() -> int:
             path = ROOT / 'datasets/workloads' / f'{wk}.wk'
             count, span = workload(path)
             work[wk] = {'path': path, 'count': count, 'span_s': span, 'sha256': digest(path)}
-        output = RESULTS_DIR / LINES_DIR.resolve().name
+        output = result_directory(LINES_DIR)
         output.mkdir(parents=True, exist_ok=True)
         lock_handle = (output / '.lock').open('a')
         try:
@@ -422,7 +549,6 @@ def main() -> int:
                             try:
                                 saved = json.loads(checkpoint.read_text(encoding='utf-8'))
                                 if saved['fingerprint'] == fingerprint and saved['row']['status'] == 'success':
-                                    print(f'{label} (已完成，跳过)', flush=True)
                                     rows_by_index[index] = saved['row']
                                     index += 1
                                     continue
@@ -460,29 +586,47 @@ def main() -> int:
                                                        ensure_ascii=False, allow_nan=False) + '\n')
             rows_by_index[job['index']] = row
             snapshot()
+            progress.completed(row, job['finished_at'] - job['started_at'])
+            progress.update(len(rows_by_index),
+                            sum(r['status'] != 'success' for r in rows_by_index.values()),
+                            len(active), force=progress.tty)
 
         snapshot()
         controller = ProcessController()
         worker_count = min(MAX_WORKERS, len(pending)) if pending else 0
-        print(f'并发数：{worker_count}；待运行：{len(pending)}', flush=True)
+        print(f'场景：{len(scenarios)}  |  算法：{", ".join(CCS)}  |  负载：{", ".join(WORKLOADS)}')
+        print(f'重复：{REPEATS}  |  并发：{worker_count}  |  已恢复：{len(rows_by_index)}  |  待运行：{len(pending)}\n', flush=True)
+        progress = Progress(index, len(rows_by_index), started)
+        progress.update(len(rows_by_index), 0, worker_count, force=True)
         if pending:
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=worker_count)
             active: dict[concurrent.futures.Future, dict] = {}
             jobs = iter(pending)
 
+            def run_job(job: dict) -> tuple[int | None, str, str, str]:
+                try:
+                    return controller.run(job['cmd'], job['timeout'])
+                finally:
+                    job['finished_at'] = time.monotonic()
+
             def submit_one() -> bool:
                 job = next(jobs, None)
                 if job is None:
                     return False
-                print(job['label'], flush=True)
-                active[executor.submit(controller.run, job['cmd'], job['timeout'])] = job
+                job['started_at'] = time.monotonic()
+                active[executor.submit(run_job, job)] = job
                 return True
 
             try:
                 for _ in range(worker_count):
                     submit_one()
                 while active:
-                    completed, _ = concurrent.futures.wait(active, return_when=concurrent.futures.FIRST_COMPLETED)
+                    completed, _ = concurrent.futures.wait(active, timeout=1.0,
+                                                           return_when=concurrent.futures.FIRST_COMPLETED)
+                    if not completed:
+                        progress.update(len(rows_by_index),
+                                        sum(r['status'] != 'success' for r in rows_by_index.values()),
+                                        len(active))
                     for future in completed:
                         job = active.pop(future)
                         save_result(job, future.result())
@@ -499,12 +643,19 @@ def main() -> int:
             else:
                 executor.shutdown(wait=True)
         rows = [rows_by_index[i] for i in sorted(rows_by_index)]
-        print(f'Report: {output / "report.md"}')
-        return 0 if all(r['status'] == 'success' for r in rows) else 1
+        failures = sum(row['status'] != 'success' for row in rows)
+        progress.update(len(rows), failures, 0, force=True)
+        progress.finish()
+        print(f'\n{"完成" if failures == 0 else "已完成，存在失败任务"}  ·  成功 {len(rows) - failures}/{index}  ·  耗时 {time.monotonic() - started:.1f}s')
+        print_overview(scenarios, rows)
+        print(f'\n详细报告：{output / "report.md"}\n')
+        return 0 if failures == 0 else 1
     except (OSError, ValueError) as error:
         print(f'error: {error}', file=sys.stderr)
         return 1
     except KeyboardInterrupt:
+        if progress is not None:
+            progress.finish()
         print('\n已中断；已完成的结果已保存，再次运行可继续。', file=sys.stderr)
         return 130
     finally:

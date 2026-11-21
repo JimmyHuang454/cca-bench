@@ -152,6 +152,9 @@ convert-mahimahi:
 bench:
 	python3 "$(SCRIPTS_DIR)/bench/run_trace_bench.py"
 
+trace_to_lines:
+	python3 "$(SCRIPTS_DIR)/../scripts/data/trace_to_lines.py"
+
 legacy-bench: workloads
 	@if [ ! -x "$(BENCH_BIN)" ]; then $(MAKE) build-bench; fi
 	@mkdir -p "$(OUT_DIR)" "$(RESULTS_DIR)/cache"

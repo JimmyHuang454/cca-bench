@@ -1,5 +1,7 @@
 import importlib.util
+import contextlib
 import csv
+import io
 import tempfile
 import json
 import os
@@ -19,6 +21,57 @@ spec.loader.exec_module(bench)
 
 
 class TraceBenchTests(unittest.TestCase):
+    def test_discover_dataset_and_individual_scenario(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / 'datasets/lines/example'
+            for name in ('a', 'b'):
+                scene = dataset / name
+                scene.mkdir(parents=True)
+                for direction in ('up', 'down'):
+                    (scene / f'{name}.{direction}.txt').write_text('0,1\n10,0\n')
+                (scene / f'{name}.up.delay.txt').write_text('0,20\n# end_ms=10\n')
+            all_scenes = bench.discover(dataset)
+            self.assertEqual([s['name'] for s in all_scenes], ['a', 'b'])
+            self.assertEqual(bench.discover(dataset / 'a'), [all_scenes[0]])
+            with patch.multiple(bench, ROOT=root, RESULTS_DIR=root / 'results'):
+                self.assertEqual(bench.result_directory(dataset), root / 'results/example')
+                self.assertEqual(bench.result_directory(dataset / 'a'), root / 'results/example/a')
+            (dataset / 'b/b.down.txt').unlink()
+            with self.assertRaisesRegex(ValueError, 'missing up/down'):
+                bench.discover(dataset)
+
+    def test_completed_task_output_includes_metrics_and_failures(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            progress = bench.Progress(2, 0, time.monotonic())
+            progress.completed({'scenario': 'line-a', 'cc': 'copa', 'workload': 'bulk',
+                                'repeat': 1, 'status': 'success',
+                                'throughput_mbps': 10.5, 'norm_power': 0.8}, 0.12)
+            progress.completed({'scenario': 'line-b', 'cc': 'bbr', 'workload': 'app',
+                                'repeat': 2, 'status': 'failed', 'error': '超时'}, 0.34)
+        self.assertIn('[完成] line-a  |  copa  |  bulk  |  第 1 次', out.getvalue())
+        self.assertIn('吞吐 10.500 Mbps', out.getvalue())
+        self.assertIn('Norm Power 0.800', out.getvalue())
+        self.assertIn('[失败] line-b  |  bbr  |  app  |  第 2 次', err.getvalue())
+        self.assertIn('超时', err.getvalue())
+
+    def test_console_overview_uses_complete_scenarios(self):
+        rows = []
+        for scenario, norm, slow in [('a', 0.4, 1.0), ('b', 0.8, 4.0)]:
+            rows.extend([
+                {'scenario': scenario, 'cc': 'copa', 'workload': 'bulk', 'repeat': 1,
+                 'status': 'success', 'norm_power': norm},
+                {'scenario': scenario, 'cc': 'copa', 'workload': 'websearch', 'repeat': 1,
+                 'status': 'success' if scenario == 'a' else 'failed', 'fct_slowdown': slow},
+            ])
+        out = io.StringIO()
+        with patch.multiple(bench, CCS=['copa'], WORKLOADS=['bulk', 'websearch'], REPEATS=1), \
+                contextlib.redirect_stdout(out):
+            bench.print_overview([{'name': 'a'}, {'name': 'b'}], rows)
+        self.assertIn('0.600 (2/2)', out.getvalue())
+        self.assertIn('1.000x (1/2)', out.getvalue())
+
     def test_rankings_use_complete_unrounded_scenario_and_workload_values(self):
         rows = []
         for cc, norm, slow in [('best', 0.8, 2.0), ('tie', 0.8, 1.0), ('partial', 0.7, 3.0)]:
@@ -265,12 +318,15 @@ class TraceBenchTests(unittest.TestCase):
                     active -= 1
                 return (0, '{"throughput_mbps": 1}\n', '', '')
 
+            console = io.StringIO()
             with patch.multiple(bench, LINES_DIR=lines, RESULTS_DIR=root / 'results',
                                 BINARY=binary, CCS=['cubic'], WORKLOADS=['bulk'], REPEATS=4,
                                 RESUME=False, MAX_WORKERS=2), \
-                    patch.object(bench.ProcessController, 'run', simulate):
+                    patch.object(bench.ProcessController, 'run', simulate), \
+                    contextlib.redirect_stdout(console):
                 self.assertEqual(bench.main(), 0)
             self.assertEqual(peak, 2)
+            self.assertEqual(console.getvalue().count('[完成] a  |  cubic  |  bulk'), 4)
             with (root / 'results/sample/runs.csv').open(newline='') as stream:
                 self.assertEqual([r['repeat'] for r in csv.DictReader(stream)], ['1', '2', '3', '4'])
 
@@ -339,7 +395,7 @@ class TraceBenchTests(unittest.TestCase):
                 marker.touch()
                 resumed = subprocess.run([sys.executable, '-c', driver], text=True,
                                          capture_output=True, timeout=10, check=True)
-                self.assertIn('a__bulk__cubic__r1 (已完成，跳过)', resumed.stdout)
+                self.assertIn('已恢复：1', resumed.stdout)
                 self.assertTrue((root / 'results/sample/runs/a__bulk__cubic__r2.json').exists())
             finally:
                 if proc.poll() is None:

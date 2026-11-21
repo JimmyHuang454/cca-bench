@@ -13,6 +13,46 @@ spec.loader.exec_module(module)
 
 
 class ConversionTest(unittest.TestCase):
+    def test_lumos_uses_same_down_trace_in_both_directions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / 'traces' / 'lumos'
+            dataset.mkdir(parents=True)
+            (dataset / '5g_trace_100_walking.down').write_text('0\n2\n4\n')
+            (dataset / '5g_trace_100_walking.mbps').write_text('not used\n')
+            (dataset / 'lumos-fixed-ack-100mbps.up').write_text('0\n0\n1\n')
+            with patch.multiple(module, ROOT=root, DATASET_DIR=dataset), \
+                    patch('sys.argv', ['trace_to_lines.py']), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(module.main(), 0)
+            dest = root / 'datasets/lines/lumos/5g_trace_100_walking'
+            self.assertEqual((dest / '5g_trace_100_walking.down.txt').read_text(),
+                             '0,1\n1,0\n2,1\n3,0\n4,1\n5,0\n')
+            self.assertEqual((dest / '5g_trace_100_walking.up.txt').read_text(),
+                             (dest / '5g_trace_100_walking.down.txt').read_text())
+            self.assertEqual((dest / '5g_trace_100_walking.up.delay.txt').read_text(),
+                             '0,20\n# end_ms=5\n')
+            self.assertEqual((dest / '5g_trace_100_walking.down.delay.txt').read_text(),
+                             '0,20\n# end_ms=5\n')
+
+    def test_script_configuration_directory_and_single_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / 'traces' / 'example'
+            dataset.mkdir(parents=True)
+            up, down, delay = (dataset / name for name in ('a.up', 'a.down', 'a.delay'))
+            up.write_text('0\n1\n')
+            down.write_text('0\n2\n')
+            delay.write_text('20\n')
+            with patch.multiple(module, ROOT=root, DATASET_DIR=dataset), \
+                    patch('sys.argv', ['trace_to_lines.py']), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(module.main(), 0)
+            self.assertTrue((root / 'datasets/lines/example/a/a.up.txt').is_file())
+            with patch.multiple(module, ROOT=root, DATASET_DIR=None, UPLINK_TRACE=up,
+                                DOWNLINK_TRACE=down, DELAY_TRACE=delay), \
+                    patch('sys.argv', ['trace_to_lines.py']), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(module.main(), 0)
+            self.assertTrue((root / 'datasets/lines/converted/a/a.down.delay.txt').is_file())
+
     def test_capacity_boundaries_and_gaps(self):
         with tempfile.TemporaryDirectory() as tmp:
             trace = Path(tmp) / 'input'
@@ -49,7 +89,7 @@ class ConversionTest(unittest.TestCase):
             (dataset / 'one.delay').write_text('20\n25\n')
             with patch.object(module, 'ROOT', root), patch('sys.argv', ['trace_to_lines.py', str(dataset)]), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(module.main(), 0)
-                target = root / 'datasets/lines/sample'
+                target = root / 'datasets/lines/sample/one'
                 self.assertEqual((target / 'one.up.txt').read_text(), '0,1\n1,0\n2,1\n3,0\n')
                 self.assertEqual((target / 'one.up.delay.txt').read_text(), '0,20\n10,25\n# end_ms=20\n')
                 self.assertEqual((target / 'one.down.delay.txt').read_text(), (target / 'one.up.delay.txt').read_text())
@@ -68,7 +108,7 @@ class ConversionTest(unittest.TestCase):
                 self.assertFalse((root / 'datasets/lines/leocc').exists())
                 (dataset / 'bad.down').unlink()
                 self.assertEqual(module.main(), 0)
-                dest = root / 'datasets/lines/leocc'
+                dest = root / 'datasets/lines/leocc/bw_a'
                 self.assertEqual((dest / 'bw_a.up.txt').read_text(), (dest / 'bw_a.down.txt').read_text())
                 self.assertEqual((dest / 'bw_a.up.delay.txt').read_text(), '0,20\n# end_ms=10\n')
                 self.assertEqual((dest / 'bw_a.down.delay.txt').read_text(), (dest / 'bw_a.up.delay.txt').read_text())

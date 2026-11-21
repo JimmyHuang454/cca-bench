@@ -7,12 +7,23 @@ import itertools
 import math
 import os
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Iterator, TextIO
+from typing import Iterator, NamedTuple, TextIO
 
 ROOT = Path(__file__).resolve().parents[2]
+
+# Edit these settings, then run `python3 scripts/data/trace_to_lines.py`.
+# Directory mode: convert all supported trace pairs into a matching lines folder.
+DATASET_DIR: Path | None = ROOT / 'datasets/traces/lumos'
+
+# Single-pair mode: set DATASET_DIR = None and specify these files.
+UPLINK_TRACE: Path | None = None
+DOWNLINK_TRACE: Path | None = None
+DELAY_TRACE: Path | None = None  # Optional LeoCC delay file, used for both directions.
+LUMOS_ONE_WAY_DELAY_MS = 20.0  # Assumed delay in each direction when no delay trace exists.
 
 
 def numbers(path: Path, *, integer: bool) -> Iterator[int | float]:
@@ -40,7 +51,7 @@ def numbers(path: Path, *, integer: bool) -> Iterator[int | float]:
         raise ValueError(f'{path}: no samples')
 
 
-def write_capacity(path: Path, output: TextIO) -> None:
+def write_capacity(path: Path, output: TextIO) -> int:
     """Write each 1 ms bin and finish at last timestamp + 1; do not loop."""
     previous_time = -1
     previous_count = None
@@ -60,6 +71,7 @@ def write_capacity(path: Path, output: TextIO) -> None:
         previous_count = count
         previous_time = at
     output.write(f'{previous_time + 1},0\n')
+    return previous_time + 1
 
 
 def write_delay(path: Path, output: TextIO) -> None:
@@ -73,19 +85,36 @@ def write_delay(path: Path, output: TextIO) -> None:
     output.write(f'# end_ms={count * 10}\n')
 
 
-def directory_jobs(directory: Path, dest: Path) -> list[tuple[Path, Path, bool]]:
+class ConversionJob(NamedTuple):
+    source: Path
+    target: Path
+    kind: str
+
+
+def directory_jobs(directory: Path, dest: Path) -> list[ConversionJob]:
     jobs = []
     for down in sorted(directory.glob('*.down')):
         up = down.with_suffix('.up')
-        if not up.is_file():
-            raise ValueError(f'missing uplink file: {up}')
         name = down.stem
-        jobs.extend([(up, dest / f'{name}.up.txt', False),
-                     (down, dest / f'{name}.down.txt', False)])
+        scene_dir = dest / name
+        lumos = name.startswith(('5g_trace_', '4g_trace_'))
+        if lumos:
+            # Lumos has measured downlink only; use that same schedule in both
+            # directions as an explicit symmetric approximation.
+            jobs.extend([ConversionJob(down, scene_dir / f'{name}.down.txt', 'capacity'),
+                         ConversionJob(down, scene_dir / f'{name}.up.txt', 'copy')])
+        elif up.is_file():
+            jobs.extend([ConversionJob(up, scene_dir / f'{name}.up.txt', 'capacity'),
+                         ConversionJob(down, scene_dir / f'{name}.down.txt', 'capacity')])
+        else:
+            raise ValueError(f'missing uplink file: {up}')
         delay = down.with_suffix('.delay')
         if delay.is_file():
-            jobs.extend([(delay, dest / f'{name}.up.delay.txt', True),
-                         (delay, dest / f'{name}.down.delay.txt', True)])
+            jobs.extend([ConversionJob(delay, scene_dir / f'{name}.up.delay.txt', 'delay'),
+                         ConversionJob(delay, scene_dir / f'{name}.down.delay.txt', 'delay')])
+        elif lumos:
+            jobs.extend([ConversionJob(down, scene_dir / f'{name}.up.delay.txt', 'constant-delay'),
+                         ConversionJob(down, scene_dir / f'{name}.down.delay.txt', 'constant-delay')])
     # LeoCC examples use one bandwidth trace in both directions.
     leo_files = sorted(directory.glob('bw_*.txt'))
     if (directory / 'leo-bw.txt').is_file():
@@ -96,10 +125,11 @@ def directory_jobs(directory: Path, dest: Path) -> list[tuple[Path, Path, bool]]
         if not delay.is_file():
             raise ValueError(f'missing LeoCC delay file: {delay}')
         name = bw.stem
-        jobs.extend([(bw, dest / f'{name}.up.txt', False),
-                     (bw, dest / f'{name}.down.txt', False),
-                     (delay, dest / f'{name}.up.delay.txt', True),
-                     (delay, dest / f'{name}.down.delay.txt', True)])
+        scene_dir = dest / name
+        jobs.extend([ConversionJob(bw, scene_dir / f'{name}.up.txt', 'capacity'),
+                     ConversionJob(bw, scene_dir / f'{name}.down.txt', 'capacity'),
+                     ConversionJob(delay, scene_dir / f'{name}.up.delay.txt', 'delay'),
+                     ConversionJob(delay, scene_dir / f'{name}.down.delay.txt', 'delay')])
     if not jobs:
         raise ValueError(f'{directory}: no .up/.down pairs or bw_*.txt traces found')
     return jobs
@@ -107,12 +137,21 @@ def directory_jobs(directory: Path, dest: Path) -> list[tuple[Path, Path, bool]]
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('uplink', type=Path, help='uplink trace or dataset directory')
+    parser.add_argument('uplink', nargs='?', type=Path, help='uplink trace or dataset directory')
     parser.add_argument('downlink', nargs='?', type=Path)
     parser.add_argument('delay', nargs='?', type=Path)
     args = parser.parse_args()
     created = []
     try:
+        if args.uplink is None:
+            if DATASET_DIR is not None:
+                if not DATASET_DIR.is_dir():
+                    raise ValueError(f'dataset directory not found: {DATASET_DIR}')
+                args.uplink = DATASET_DIR
+            else:
+                if UPLINK_TRACE is None or DOWNLINK_TRACE is None:
+                    raise ValueError('set DATASET_DIR or both UPLINK_TRACE and DOWNLINK_TRACE')
+                args.uplink, args.downlink, args.delay = UPLINK_TRACE, DOWNLINK_TRACE, DELAY_TRACE
         if args.uplink.is_dir():
             if args.downlink or args.delay:
                 raise ValueError('directory mode accepts only one argument')
@@ -121,14 +160,14 @@ def main() -> int:
         else:
             if args.downlink is None:
                 raise ValueError('downlink trace is required')
-            dest = ROOT / 'datasets' / 'lines' / 'converted'
             name = args.downlink.stem
-            jobs = [(args.uplink, dest / f'{name}.up.txt', False),
-                    (args.downlink, dest / f'{name}.down.txt', False)]
+            dest = ROOT / 'datasets' / 'lines' / 'converted' / name
+            jobs = [ConversionJob(args.uplink, dest / f'{name}.up.txt', 'capacity'),
+                    ConversionJob(args.downlink, dest / f'{name}.down.txt', 'capacity')]
             if args.delay is not None:
-                jobs.extend([(args.delay, dest / f'{name}.up.delay.txt', True),
-                             (args.delay, dest / f'{name}.down.delay.txt', True)])
-        targets = [target for _, target, _ in jobs]
+                jobs.extend([ConversionJob(args.delay, dest / f'{name}.up.delay.txt', 'delay'),
+                             ConversionJob(args.delay, dest / f'{name}.down.delay.txt', 'delay')])
+        targets = [job.target for job in jobs]
         if len(set(targets)) != len(targets):
             raise ValueError('multiple inputs map to the same output filename')
         for target in targets:
@@ -138,12 +177,26 @@ def main() -> int:
         # Convert and validate the entire batch before publishing any files.
         with tempfile.TemporaryDirectory(prefix='.trace-to-lines-', dir=dest) as temp:
             staged = []
-            for index, (source, target, is_delay) in enumerate(jobs):
+            converted = {}
+            durations = {}
+            for index, job in enumerate(jobs):
                 tmp = Path(temp) / str(index)
-                with tmp.open('w', encoding='utf-8') as output:
-                    (write_delay if is_delay else write_capacity)(source, output)
-                staged.append((tmp, target))
+                if job.kind == 'copy':
+                    shutil.copyfile(converted[job.source], tmp)
+                else:
+                    with tmp.open('w', encoding='utf-8') as output:
+                        if job.kind == 'delay':
+                            write_delay(job.source, output)
+                        elif job.kind == 'constant-delay':
+                            if not math.isfinite(LUMOS_ONE_WAY_DELAY_MS) or LUMOS_ONE_WAY_DELAY_MS < 0:
+                                raise ValueError('LUMOS_ONE_WAY_DELAY_MS must be finite and nonnegative')
+                            output.write(f'0,{LUMOS_ONE_WAY_DELAY_MS:g}\n# end_ms={durations[job.source]}\n')
+                        else:
+                            durations[job.source] = write_capacity(job.source, output)
+                            converted[job.source] = tmp
+                staged.append((tmp, job.target))
             for tmp, target in staged:
+                target.parent.mkdir(parents=True, exist_ok=True)
                 os.link(tmp, target)  # exclusive: never replace an existing file
                 created.append(target)
         for target in created:
