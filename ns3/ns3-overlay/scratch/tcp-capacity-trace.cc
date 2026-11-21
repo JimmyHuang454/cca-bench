@@ -462,6 +462,7 @@ bool g_slewing = false;                     ///< A delay decrease is in progress
 std::vector<Ptr<PacketSink>> g_sinks;           ///< One sink per flow
 std::vector<uint64_t> g_lastRx;                 ///< Bytes at the last bin, per flow
 std::vector<std::vector<double>> g_rttSamples;  ///< All RTT samples [ms], per flow
+std::vector<std::vector<double>> g_baseRttSamples; ///< Path base RTT at each RTT sample
 std::vector<std::vector<double>> g_srttSamples; ///< Smoothed RTT updates for diagnostics
 std::ofstream g_rawRttLog; ///< Optional log of every valid ACK RTT sample
 std::vector<double> g_binRttSum;                ///< RTT sum in the current bin, per flow
@@ -1028,6 +1029,7 @@ LastRttTrace(uint32_t flow, Time newVal)
         if (Simulator::Now().GetSeconds() > g_warmup)
         {
             g_rttSamples[flow].push_back(newVal.GetSeconds() * 1000.0);
+            g_baseRttSamples[flow].push_back(2.0 * (g_delayMs + g_accessDelayMs));
             if (g_rawRttLog.is_open())
             {
                 g_rawRttLog << std::setprecision(12) << Simulator::Now().GetSeconds() << ","
@@ -1602,6 +1604,7 @@ main(int argc, char* argv[])
     g_lastRx.assign(n, 0);
     g_rxAtWarmup.assign(n, 0);
     g_rttSamples.assign(n, {});
+    g_baseRttSamples.assign(n, {});
     g_srttSamples.assign(n, {});
     g_binRttSum.assign(n, 0.0);
     g_binRttCount.assign(n, 0);
@@ -1678,7 +1681,13 @@ main(int argc, char* argv[])
 
     if (evalJson)
     {
-        const double effBaseRttMs = (baseRttMs > 0.0) ? baseRttMs : (2.0 * (bottleneckDelayMs + accessDelayMs));
+        double effBaseRttMs = (baseRttMs > 0.0) ? baseRttMs : (2.0 * (bottleneckDelayMs + accessDelayMs));
+        if (profile == "file" && !g_baseRttSamples[0].empty())
+        {
+            double sumBase = 0.0;
+            for (double base : g_baseRttSamples[0]) sumBase += base;
+            effBaseRttMs = sumBase / g_baseRttSamples[0].size();
+        }
         std::vector<double> qd;
         uint64_t delivPkts = 0;
         uint64_t dropPkts = 0;
@@ -1694,9 +1703,11 @@ main(int argc, char* argv[])
                                      ? g_rttSamples[0]
                                      : (!g_srttSamples.empty() ? g_srttSamples[0] : g_rttSamples[0]);
             qd.reserve(rttSrc.size());
-            for (double r : rttSrc)
+            for (size_t i = 0; i < rttSrc.size(); ++i)
             {
-                qd.push_back(std::max(r - effBaseRttMs, 0.0));
+                double base = profile == "file" && i < g_baseRttSamples[0].size()
+                                  ? g_baseRttSamples[0][i] : effBaseRttMs;
+                qd.push_back(std::max(rttSrc[i] - base, 0.0));
             }
         }
         if (delivPkts == 0 && dropPkts == 0 && !g_retx.empty())
@@ -1751,7 +1762,17 @@ main(int argc, char* argv[])
                     double rctS = std::max(rcts[i] / 1000.0, 1e-6);
                     double thrMbps = (static_cast<double>(sz) * 8.0) / (rctS * 1e6);
                     qoeSum += (thrMbps * 0.5) / std::max(rcts[i], 1.0) * 100.0;
-                    double idealMs = std::max(effBaseRttMs, 1.0) +
+                    double requestBase = effBaseRttMs;
+                    if (profile == "file" && i < wkArrSec.size())
+                    {
+                        requestBase = 2.0 * (bottleneckDelayMs + accessDelayMs);
+                        for (const auto& seg : sched)
+                        {
+                            if (seg.start > wkArrSec[i]) break;
+                            if (seg.delayMs >= 0) requestBase = 2.0 * (seg.delayMs + accessDelayMs);
+                        }
+                    }
+                    double idealMs = std::max(requestBase, 1.0) +
                                      ((avgCap > 1e-6) ? (static_cast<double>(sz) * 8.0 / (avgCap * 1000.0)) : 0.0);
                     double sd = std::max(rcts[i] / std::max(idealMs, 1e-3), 1.0);
                     logSdSum += std::log(sd);

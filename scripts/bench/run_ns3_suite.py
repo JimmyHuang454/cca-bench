@@ -8,6 +8,8 @@ import concurrent.futures
 import csv
 import json
 import os
+import math
+import random
 import subprocess
 import sys
 import time
@@ -254,6 +256,33 @@ def probe_phy_capacity(kind: str, bin_path: Path, spec_path: Path, spec: dict[st
     }
 
 
+def write_basic_schedule(spec: dict[str, Any], seed: int, output: Path) -> None:
+    """Render a JSON-defined basic line into the ns-3 capacity schedule."""
+    tick = float(spec["tick_s"])
+    sigma = float(spec["sigma"])
+    access_delay = float(spec.get("access_delay_ms", 5))
+    if tick <= 0 or sigma < 0:
+        raise ValueError("basic line tick_s must be positive and sigma nonnegative")
+    rng = random.Random(seed)
+    t = 0.0
+    with output.open("w", encoding="utf-8") as f:
+        f.write(f"# {spec['name']} seed={seed}\n")
+        for seg in spec["segments"]:
+            duration = float(seg["duration_s"])
+            count = round(duration / tick)
+            rate = float(seg["bandwidth_mbps"])
+            loss = float(seg["loss_rate"])
+            delay = float(seg["base_rtt_ms"]) / 2 - access_delay
+            if count <= 0 or abs(count * tick - duration) > 1e-6 or rate <= 0 or not 0 <= loss <= 1 or delay < 0:
+                raise ValueError(f"invalid basic line segment: {seg}")
+            for i in range(count):
+                capacity = rate * math.exp(sigma * rng.gauss(0, 1) - sigma ** 2 / 2)
+                f.write(f"{t + i * tick:.3f} {capacity:.4f} {loss:g} {delay:g}\n")
+            t += duration
+    if abs(t - float(spec["duration_s"])) > 1e-6:
+        raise ValueError(f"{spec['name']}: segment durations do not match duration_s")
+
+
 def run_one_job(job: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     kind = job["kind"]
     if kind == "trace":
@@ -277,7 +306,7 @@ def run_one_job(job: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
             cmd.append(f"--delayTrace={job['delay_trace']}")
         if job.get("workload_file"):
             cmd.append(f"--workloadFile={job['workload_file']}")
-    elif kind == "wired":
+    elif kind == "wired" or kind == "basic":
         spec = job["spec"]
         cmd = [
             str(job["bin"]),
@@ -300,6 +329,8 @@ def run_one_job(job: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
             f"--run={job['repeat']}",
             "--evalJson=1",
         ]
+        if kind == "basic":
+            cmd.extend(["--profile=file", f"--traceFile={job['schedule']}"])
         if job.get("workload_file"):
             cmd.append(f"--workloadFile={job['workload_file']}")
     elif kind == "4g_line":
@@ -357,6 +388,9 @@ def run_one_job(job: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
     if not data:
         return None, f"[FAIL {dt:.1f}s] {tag}: no JSON output"
 
+    if job["kind"] == "basic" and job.get("expected_requests") and data.get("requests", 0) != job["expected_requests"]:
+        return None, f"[FAIL {dt:.1f}s] {tag}: completed {data.get('requests', 0)}/{job['expected_requests']} requests"
+
     row: dict[str, Any] = {
         "stack": job["stack"],
         "workload": rms.normalize_workload_label(job["workload"]),
@@ -388,6 +422,8 @@ def main() -> int:
     parser.add_argument("--ccs", default="copa_auto,copa_auto_v2,copa_auto_nc,copa_auto_nc_j0,mortise_copa,bbr,bbr3,cubic")
     parser.add_argument("--workloads", default="bulk,websearch")
     parser.add_argument("--workload-map", default="")
+    parser.add_argument("--basic-groups", default="ABCDE")
+    parser.add_argument("--basic-sigmas", default="0.1,0.4")
     parser.add_argument("--queues", default="", help="Optional comma-separated queue sizes (e.g. 150KB,2MB)")
     parser.add_argument("--bulk-secs", type=int, default=60)
     parser.add_argument("--warmup-s", type=float, default=5.0)
@@ -428,12 +464,33 @@ def main() -> int:
     completed_keys = load_completed_keys(out_csv) if args.resume else set()
     cap_cache = load_cap_cache(args.cap_cache)
 
+    for wk in workloads:
+        if wk != "bulk" and (wk not in wk_map or not wk_map[wk].is_file()):
+            parser.error(f"workload file not found for {wk}: {wk_map.get(wk)}")
+
     # Separate line-based shards from Mahimahi trace shards
     scenario_entries: list[dict[str, Any]] = []
     seen_names: set[str] = set()
 
     for sh in sub_shards:
-        if sh == "wired":
+        if sh == "basic":
+            groups = set(args.basic_groups.upper())
+            sigmas = {float(x) for x in args.basic_sigmas.split(",") if x.strip()}
+            if not groups or not sigmas:
+                parser.error("basic groups and sigmas must not be empty")
+            for p in sorted((args.lines_dir / "basic").glob("*.json")):
+                spec = json.loads(p.read_text(encoding="utf-8"))
+                if str(spec["group"]).upper() not in groups or float(spec["sigma"]) not in sigmas:
+                    continue
+                name = spec.get("name", p.stem)
+                if name in seen_names:
+                    raise ValueError(f"duplicate scenario name: {name}")
+                seen_names.add(name)
+                qs = override_queues or [parse_queue_bytes(q) for q in spec.get("queues", ["2MB"])]
+                scenario_entries.append({"kind": "basic", "stack": "ns3", "name": name, "spec": spec, "queues": qs})
+            if not any(e["kind"] == "basic" for e in scenario_entries):
+                parser.error(f"no basic JSON scenarios match in {args.lines_dir / 'basic'}")
+        elif sh == "wired":
             for p in sorted((args.lines_dir / "wired").glob("*.json")):
                 spec = json.loads(p.read_text(encoding="utf-8"))
                 name = spec.get("name", p.stem)
@@ -591,10 +648,16 @@ def main() -> int:
                                     "cc": cc,
                                     "repeat": rep,
                                 }
-            elif kind == "wired":
+            elif kind in ("wired", "basic"):
                 spec = e["spec"]
                 base_dur = float(spec.get("duration_s", args.bulk_secs))
                 for rep in range(1, repeats + 1):
+                    schedule = ""
+                    if kind == "basic":
+                        schedule_path = args.out_dir / "schedules" / f"{name}-r{rep}.txt"
+                        schedule_path.parent.mkdir(parents=True, exist_ok=True)
+                        write_basic_schedule(spec, rep, schedule_path)
+                        schedule = str(schedule_path.resolve())
                     for q in queues:
                         for wk in workloads:
                             wk_norm = rms.normalize_workload_label(wk)
@@ -609,7 +672,9 @@ def main() -> int:
                                 if (name, str(q), wk_norm, cc, str(rep)) in completed_keys:
                                     continue
                                 yield {
-                                    "kind": "wired",
+                                    "kind": kind,
+                                    "schedule": schedule,
+                                    "expected_requests": sum(1 for line in Path(wk_file).read_text().splitlines() if line.strip() and not line.lstrip().startswith("#")) if kind == "basic" and wk_file else 0,
                                     "stack": e["stack"],
                                     "bin": str(args.bin),
                                     "trace": name,
@@ -738,7 +803,7 @@ def main() -> int:
         f"in {format_duration(elapsed)} -> {out_csv}",
         flush=True,
     )
-    return 1 if (failures > 0 and total_ok == 0) else 0
+    return 1 if failures > 0 and ("basic" in sub_shards or total_ok == 0) else 0
 
 
 if __name__ == "__main__":

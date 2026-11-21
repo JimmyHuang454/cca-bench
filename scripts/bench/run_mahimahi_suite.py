@@ -90,6 +90,8 @@ SHARDS: dict[str, list[str]] = {
 
 def ensure_lumos_repo(trace_dir: Path) -> Path:
     """Sparse-checkout Lumous5G (5G + 4G, 296 traces) from SIGCOMM21-5G/artifact."""
+    trace_dir = trace_dir / "lumos"
+    trace_dir.mkdir(parents=True, exist_ok=True)
     repo = trace_dir / "lumos_artifact"
     lumos_root = repo / "Video-Streaming" / "Network-Traces" / "Lumous5G"
     if (lumos_root / "5G").is_dir() and (lumos_root / "4G").is_dir():
@@ -245,6 +247,8 @@ def normalize_workload_label(wk: str) -> str:
 
 def prepare_replay(trace_name: str, trace_dir: Path, bulk_secs: int) -> Replay:
     if trace_name in LEO_TRACES:
+        trace_dir = trace_dir / "leocc"
+        trace_dir.mkdir(parents=True, exist_ok=True)
         base = f"https://raw.githubusercontent.com/SpaceNetLab/LeoCC/{LEO_REV}/leoreplayer/replayer/example/Cubic"
         capacity = trace_dir / "leo-bw.txt"
         delay = trace_dir / "leo-delay.txt"
@@ -317,6 +321,20 @@ def generate_rate_trace(segments: list[tuple[float, float, float]], dst: Path, s
 
 def prepare_trace_pair(trace_name: str, trace_dir: Path) -> tuple[Path, Path]:
     """Download/generate trace and return (up_trace, down_trace)."""
+    if trace_name in LTE_TRACES:
+        dataset = "mahimahi"
+    elif trace_name in NYC_STATIONARY or trace_name in NYC_WALKING or trace_name in NYC_DRIVING:
+        dataset = "cellular-traces-nyc"
+    elif trace_name in NYC_SUBWAY:
+        dataset = "cellular-traces-2018"
+    elif trace_name in LUMOS_5G or trace_name.startswith(("5g_trace_", "4g_trace_")):
+        dataset = "lumos"
+    elif trace_name.startswith("synth-"):
+        dataset = "synthetic"
+    else:
+        raise ValueError(f"Unknown trace: {trace_name}")
+    trace_dir = trace_dir / dataset
+    trace_dir.mkdir(parents=True, exist_ok=True)
     if trace_name in LTE_TRACES:
         down = trace_dir / f"{trace_name}.down"
         raw_up = trace_dir / f"{trace_name}.up.raw"

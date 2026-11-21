@@ -16,7 +16,10 @@ export JOBS
 # Benchmark suite configurable variables (override via `make bench SHARD=...`)
 # ---------------------------------------------------------------------------
 SHARD         ?= synth
-CCS           ?= copa_auto,copa_auto_v2,copa_auto_nc,copa_auto_nc_j0,mortise_copa,bbr,bbr3,cubic,vegas,veno,yeah
+BASIC_GROUPS  ?= ABCDE
+BASIC_SIGMAS  ?= 0.1,0.4
+BASIC_WORKLOADS ?= bulk,app
+CCS           ?= copa_auto,copa_auto_v2,copa_auto_nc,copa_auto_nc_j0,copa_auto_nc_theta0.9,mortise_copa,bbr,bbr3,cubic,vegas,veno,yeah
 WORKLOADS     ?= bulk,websearch
 REPEATS       ?= 1
 JITTER_US     ?= -1
@@ -48,9 +51,9 @@ LEO_TRACES := traces/leocc/4.8K.zip
 
 .PHONY: help setup-bench test-core sync-bench build-bench workloads convert-mahimahi \
         bench bench-wired bench-wifi bench-synth bench-4g bench-lte bench-5g bench-leo \
-        bench-lines-quick bench-lines bench-datasets bench-full \
+        bench-lines-quick bench-lines bench-datasets bench-full bench-basic \
         summary report clean-bench clean-all \
-        setup smoke fetch fetch-mahimahi fetch-leocc basic 4g-paper lte leo mobile lines figures all clean-results
+        setup smoke fetch fetch-mahimahi fetch-leocc 4g-paper lte leo mobile lines figures all clean-results
 
 help:
 	@echo "=== 1. Build, Unit Tests & Datasets ==="
@@ -61,11 +64,13 @@ help:
 	@echo "  make convert-mahimahi  Convert Mahimahi traces to unified lines JSON (datasets/lines/mahimahi/)"
 	@echo ""
 	@echo "=== 2. Unified Benchmark Suite (results -> results/ns3/<shard>/) ==="
-	@echo "  make bench             Run run_ns3_suite.py + eval_report.py for SHARD=$(SHARD)"
+	@echo "  make bench             Run configured scripts/bench/run_trace_bench.py"
+	@echo "  make legacy-bench      Run the previous suite for SHARD=$(SHARD)"
 	@echo "  make bench-wired       Wired links (datasets/lines/wired/*.json: home, wan, dc, step)"
 	@echo "  make bench-wifi        Real 802.11ax Wi-Fi MAC/PHY (datasets/lines/wifi/*.json: home, wall, cafe)"
 	@echo "  make bench-lines-quick 3GPP 4G PHY quick subset (city-street, train-tunnel, highway-congestion)"
 	@echo "  make bench-lines       All 14 3GPP 4G PHY real-world routes (datasets/lines/4g/*.json)"
+	@echo "  make bench-basic       Basic A-E dynamic scenarios, bulk + app"
 	@echo "  make bench-synth       Synthetic Mahimahi traces (2 traces)"
 	@echo "  make bench-4g          Mahimahi 4G-driving traces (4 traces; alias: bench-lte)"
 	@echo "  make bench-5g          Lumos5G traces"
@@ -80,7 +85,7 @@ help:
 	@echo "  make clean-all         Delete results/ns3, results/kernel, results/reports, results/cache"
 	@echo ""
 	@echo "=== 4. Legacy Paper Scenarios ==="
-	@echo "  make lines | mobile | basic | 4g-paper | leo | figures | clean-results"
+	@echo "  make lines | mobile | 4g-paper | leo | figures | clean-results"
 	@echo ""
 	@echo "=== Configurable Variables ==="
 	@echo "  SHARD=$(SHARD)  CCS=$(CCS)"
@@ -112,13 +117,13 @@ setup-bench:
 	$(MAKE) sync-bench
 	cd "$(NS3_ROOT)" && ./ns3 configure --build-profile=optimized --disable-python --disable-werror \
 		--enable-modules=core,network,internet,point-to-point,applications,traffic-control,lte,wifi,mobility,buildings,propagation,spectrum,flow-monitor
-	cd "$(NS3_ROOT)" && ./ns3 build tcp-capacity-trace tcp-lte-highspeed-handover tcp-wifi-bench
+	cd "$(NS3_ROOT)" && ./ns3 build tcp-trace-bench tcp-capacity-trace tcp-lte-highspeed-handover tcp-wifi-bench
 	ln -sf ns3-dev-tcp-capacity-trace-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-capacity-trace-default"
 	ln -sf ns3-dev-tcp-lte-highspeed-handover-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-lte-highspeed-handover-default"
 	ln -sf ns3-dev-tcp-wifi-bench-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-wifi-bench-default"
 
 build-bench: sync-bench
-	cd "$(NS3_ROOT)" && ./ns3 build tcp-capacity-trace tcp-lte-highspeed-handover tcp-wifi-bench
+	cd "$(NS3_ROOT)" && ./ns3 build tcp-trace-bench tcp-capacity-trace tcp-lte-highspeed-handover tcp-wifi-bench
 	ln -sf ns3-dev-tcp-capacity-trace-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-capacity-trace-default"
 	ln -sf ns3-dev-tcp-lte-highspeed-handover-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-lte-highspeed-handover-default"
 	ln -sf ns3-dev-tcp-wifi-bench-optimized "$(NS3_ROOT)/build/scratch/ns3-dev-tcp-wifi-bench-default"
@@ -144,7 +149,10 @@ convert-mahimahi:
 # ---------------------------------------------------------------------------
 # Unified ns-3 Benchmark Suite
 # ---------------------------------------------------------------------------
-bench: workloads
+bench:
+	python3 "$(SCRIPTS_DIR)/bench/run_trace_bench.py"
+
+legacy-bench: workloads
 	@if [ ! -x "$(BENCH_BIN)" ]; then $(MAKE) build-bench; fi
 	@mkdir -p "$(OUT_DIR)" "$(RESULTS_DIR)/cache"
 	python3 "$(SCRIPTS_DIR)/bench/run_ns3_suite.py" \
@@ -152,6 +160,8 @@ bench: workloads
 		--lte-bin "$(LTE_BIN)" \
 		--wifi-bin "$(WIFI_BIN)" \
 		--shard "$(SHARD)" \
+		--basic-groups "$(BASIC_GROUPS)" \
+		--basic-sigmas "$(BASIC_SIGMAS)" \
 		--ccs "$(CCS)" \
 		--workloads "$(WORKLOADS)" \
 		--workload-map "$(WORKLOAD_MAP)" \
@@ -169,37 +179,40 @@ bench: workloads
 		--out-dir "$(OUT_DIR)"
 	$(MAKE) summary OUT_DIR="$(OUT_DIR)"
 
+bench-basic:
+	$(MAKE) legacy-bench SHARD=basic WORKLOADS="$(if $(filter command line environment,$(origin WORKLOADS)),$(WORKLOADS),$(BASIC_WORKLOADS))"
+
 bench-wired:
-	$(MAKE) bench SHARD=wired
+	$(MAKE) legacy-bench SHARD=wired
 
 bench-wifi:
-	$(MAKE) bench SHARD=wifi
+	$(MAKE) legacy-bench SHARD=wifi
 
 bench-lines-quick:
-	$(MAKE) bench SHARD=lines-quick
+	$(MAKE) legacy-bench SHARD=lines-quick
 
 bench-lines:
-	$(MAKE) bench SHARD=lines
+	$(MAKE) legacy-bench SHARD=lines
 
 bench-synth:
-	$(MAKE) bench SHARD=synth
+	$(MAKE) legacy-bench SHARD=synth
 
 bench-4g:
-	$(MAKE) bench SHARD=4g
+	$(MAKE) legacy-bench SHARD=4g
 
 bench-lte: bench-4g
 
 bench-5g:
-	$(MAKE) bench SHARD=lumos-5g
+	$(MAKE) legacy-bench SHARD=lumos-5g
 
 bench-leo:
-	$(MAKE) bench SHARD=leo
+	$(MAKE) legacy-bench SHARD=leo
 
 bench-datasets:
-	$(MAKE) bench SHARD=datasets
+	$(MAKE) legacy-bench SHARD=datasets
 
 bench-full:
-	$(MAKE) bench SHARD=full
+	$(MAKE) legacy-bench SHARD=full
 
 summary:
 	@mkdir -p "$(OUT_DIR)"
@@ -247,9 +260,6 @@ $(LTE_TRACES):
 
 $(LEO_TRACES):
 	./fetch_traces.sh leocc
-
-basic:
-	./run_all.sh basic
 
 4g-paper: lte
 

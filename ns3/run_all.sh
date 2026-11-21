@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Run every experiment of the validation section and write the figure data.
 # Finished runs are skipped, so the script can be restarted after an interruption.
-# usage: NS3_ROOT=/path/to/ns-3 JOBS=9 ./run_all.sh [basic|lte|leo|mobile|lines|figures|all]
+# usage: NS3_ROOT=/path/to/ns-3 JOBS=9 ./run_all.sh [lte|leo|mobile|lines|figures|all]
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export NS3_ROOT="${NS3_ROOT:-$HERE/ns-3}"
@@ -11,14 +11,6 @@ WHAT="${1:-all}"
 want() { [ "$WHAT" = all ] || [ "$WHAT" = "$1" ]; }
 mkdir -p "$R"
 
-if want basic; then
-    for sigma in 0.1 0.4; do
-        $PY "$SC/basic_runner.py" "$R/basic-s$sigma" "$J" \
-            copa-auto,copa-auto+nosw,copa,copa+nosw,copa+gcv,copa+gcv+nosw,cubic,bbr,copa-d0.2+nosw,copa-d0.1+nosw,copa-d0.05+nosw,copa-d0.03+nosw,copa-d0.02+nosw,copa-d0.01+nosw \
-            "$sigma" ABCDE
-        $PY "$SC/basic_analyze.py" "$R/basic-s$sigma" "$R/basic-s$sigma-summary"
-    done
-fi
 if want lte; then
     $PY "$SC/mahimahi_runner.py" "$HERE/traces/mahimahi" "$R/lte" "$J"
     $PY "$SC/mahimahi_analyze.py" "$R/lte" "$R/lte-summary"
@@ -70,7 +62,6 @@ if want figures; then
     $PY "$SC/sync_mobile.py" "$R/mobile" "$R/sweep"
     python3 "$SC/compare.py" "$R/sweep" "$R/compare"
     python3 "$SC/pgfdata.py" "$R/sweep" "$F" "$R/compare/compare.json"
-    $PY "$SC/basic_pgfdata.py" "$R/basic-s0.1-summary/basic.json" "$R/basic-s0.4-summary/basic.json" "$R/basic-s0.4" "$F"
     $PY "$SC/mahimahi_pgfdata.py" "$R/lte-summary/summary.json" "$F/trace-power.dat" "$F/trace-rows.tex"
     $PY "$SC/leocc_pgfdata.py" "$R/leo-summary/summary.json" "$F/leo-power.dat" "$F/leo-rows.tex"
 fi

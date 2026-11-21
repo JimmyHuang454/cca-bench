@@ -59,6 +59,7 @@ make build-bench   # 同步最新 C 核心与 overlay 并增量重编 3 个仿�
 make help
 
 # 统一场景与链路评测（支持在仓库根目录或 ns3/ 下执行）
+make bench-basic        # basic A-E 动态场景，默认 bulk + app
 make bench-wired        # 有线链路（datasets/lines/wired/*.json：home, wan, dc, step）
 make bench-wifi         # 原生 802.11ax Wi-Fi 物理层（datasets/lines/wifi/*.json：home, wall, cafe）
 make bench-lines-quick  # 3GPP 4G 物理层快速子集（city-street, train-tunnel, highway-congestion）
@@ -217,7 +218,7 @@ Workflow 位于 [.github/workflows/ns3-bench.yml](../.github/workflows/ns3-bench
 | :--- | :--- | :--- |
 | **`make lines`** | `tcp-lte-highspeed-handover` | **14 条 `lines` JSON 真实生活路线**（单流 + 2/4 流多流竞争）：<br>• 步行/运动：`walk-line`（`walk.json`）、`run-line`（`run.json`）<br>• 城市交通：`city-drive`（`city-drive.json`）、`city-bus`（`city-bus.json`）、`city-subway`（`city-subway.json`）、`city-elevated`（`city-elevated.json`）<br>• 城市密集区：`city-mall`（`city-mall.json`）、`city-stadium`（`city-stadium.json`）<br>• 乡村/偏远：`rural-road`（`rural-road.json`）、`rural-mountain`（`rural-mountain.json`）、`rural-village`（`rural-village.json`）、`rural-edge`（`rural-edge.json`）<br>• 城际高速：`hwy-line`（`highway.json`）、`hsr-line`（`hsr.json`，300 km/h 高铁） |
 | **`make mobile`** | `tcp-lte-highspeed-handover` | 3GPP 4G 高速公路/高铁切换专项 + 2/4 流与背景流公平性竞争（`config/hwy.args`） |
-| **`make basic`** | `tcp-capacity-trace` | 合成链路动态剖面（`outage` 隧道断网、`step` 带宽阶跃、`handover` 切换、`fluctuate` 对数正态随机游走） |
+| **`make bench-basic`** | `tcp-capacity-trace` | A–E 带宽、丢包与基础 RTT 动态场景，运行 bulk 和 app workload |
 | **`make 4g-paper`**（别名 `make lte`） / **`make leo`** | `tcp-capacity-trace` | 论文原版 1/2/4 流 180 s Mahimahi 4G 与 LeoCC `4.8K.zip` 大规模重放 |
 
 ---
@@ -261,3 +262,5 @@ ns-3/build/scratch/ns3-dev-tcp-capacity-trace-optimized \
 ```
 
 Period diagnostics, including sample count, utilization spread, fit error, confidence and gain, are printed to stderr when `--debugMs` is enabled. `MeasurementRtts` accepts 1 through 256; short periods may have insufficient samples for fitting. The maximum delivery rate is an estimate, and the period minimum RTT can include a persistent queue.
+
+`make bench-basic` 从 `datasets/lines/basic/*.json` 读取场景定义，默认运行 A–E、sigma 0.1 和 0.4，使用 2 MB 队列及单条流。可设置 `BASIC_GROUPS=AE BASIC_SIGMAS=0.4 REPEATS=3 WORKLOADS=bulk,app` 筛选已有 JSON；新增波动强度需添加对应 JSON。结果默认位于 `results/ns3/basic/`。运行前修改过算法时先执行 `make build-bench`，并用 `RESUME=0` 重新测评。动态 RTT 场景的排队延迟按 RTT 样本对应的基础 RTT 计算；FCT 基准采用请求开始时的计划基础 RTT 和全程平均容量，属于近似值。未完成全部请求的任务会报告失败。

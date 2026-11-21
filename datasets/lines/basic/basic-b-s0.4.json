@@ -1,0 +1,52 @@
+{
+  "_comment": "基础动态链路 B；容量对数正态波动 sigma=0.4",
+  "name": "basic-B-s0.4",
+  "tech": "synthetic",
+  "group": "B",
+  "sigma": 0.4,
+  "tick_s": 0.02,
+  "duration_s": 180,
+  "base_rtt_ms": 50,
+  "access_delay_ms": 5,
+  "queues": [
+    "2MB"
+  ],
+  "segments": [
+    {
+      "duration_s": 30,
+      "bandwidth_mbps": 40,
+      "loss_rate": 0,
+      "base_rtt_ms": 50
+    },
+    {
+      "duration_s": 30,
+      "bandwidth_mbps": 40,
+      "loss_rate": 0.01,
+      "base_rtt_ms": 50
+    },
+    {
+      "duration_s": 30,
+      "bandwidth_mbps": 40,
+      "loss_rate": 0.005,
+      "base_rtt_ms": 50
+    },
+    {
+      "duration_s": 30,
+      "bandwidth_mbps": 40,
+      "loss_rate": 0.05,
+      "base_rtt_ms": 50
+    },
+    {
+      "duration_s": 30,
+      "bandwidth_mbps": 40,
+      "loss_rate": 0.02,
+      "base_rtt_ms": 50
+    },
+    {
+      "duration_s": 30,
+      "bandwidth_mbps": 40,
+      "loss_rate": 0.1,
+      "base_rtt_ms": 50
+    }
+  ]
+}
