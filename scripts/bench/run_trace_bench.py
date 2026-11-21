@@ -24,12 +24,12 @@ ROOT = Path(__file__).resolve().parents[2]
 # Edit these settings, then run this script or `make bench`.
 LINES_DIR = ROOT / 'datasets/lines/basic'
 # WORKLOADS = ['bulk', 'websearch', 'pageload', 'app']
-WORKLOADS = ['bulk']
-CCS = ['cubic', 'bbr', 'copa_auto_nc','copa']
+WORKLOADS = ['bulk','app']
+CCS = ['cubic', 'bbr', 'copa_auto_nc','copa', 'vegas','westwood','illinois','veno','yeah','hybla']
 REPEATS = 2
 RESUME = True  # False: rerun all combinations and replace their results.
 MAX_WORKERS = os.cpu_count() or 1  # Maximum concurrent ns-3 processes; 1 runs serially.
-WORKLOAD_DRAIN_TIMEOUT_S = 60.0
+WORKLOAD_MAX_SIMULATION_S = 1800.0  # Maximum simulated time from the start, not wall time.
 DEFAULT_ONE_WAY_DELAY_MS = 10.0
 TCP_SEGMENT_SIZE_BYTES = 1448  # IPv4 + TCP timestamps with a 1500-byte MTU.
 BINARY = ROOT / 'ns3/ns-3/build/scratch/tcp-trace-bench/ns3-dev-tcp-trace-bench-optimized'
@@ -183,6 +183,7 @@ def ranking_entries(rows: list[dict], scenario: str, workload_name: str, kind: s
 
     entries = []
     for cc in CCS:
+        timeout = False
         norm, norm_ok, bulk_count = metric(cc, 'bulk', 'norm_power', False)
         wk_stats = {wk: metric(cc, wk, 'fct_slowdown', True)
                     for wk in (w for w in WORKLOADS if w != 'bulk')} if kind == 'combined' else {}
@@ -192,17 +193,39 @@ def ranking_entries(rows: list[dict], scenario: str, workload_name: str, kind: s
             value, valid, count = norm, norm_ok, f'{bulk_count}/{REPEATS}'
         elif kind == 'workload':
             value, valid, count = slow, slow_ok, f'{workload_count}/{REPEATS}'
+            selected = [r for r in rows if r['scenario'] == scenario and r['cc'] == cc and r['workload'] == workload_name]
+            timeout = any(r['status'] == 'timeout' for r in selected)
         else:
             if wk_stats and all(v[0] is not None for v in wk_stats.values()):
                 slow = math.exp(math.fsum(math.log(v[0]) for v in wk_stats.values()) / len(wk_stats))
             value = math.sqrt(norm / slow) if norm is not None and slow is not None else None
             valid = norm_ok and bool(wk_stats) and all(v[1] for v in wk_stats.values())
+            workload_valid = True
+            for wk in wk_stats:
+                selected = [r for r in rows if r['scenario'] == scenario and r['cc'] == cc and r['workload'] == wk]
+                assessed = (len(selected) == REPEATS and
+                            {str(r['repeat']) for r in selected} == {str(i) for i in range(1, REPEATS + 1)} and
+                            all(r['status'] in ('success', 'timeout') for r in selected))
+                has_timeout = any(r['status'] == 'timeout' for r in selected)
+                timeout |= has_timeout
+                success_valid = True
+                for r in selected:
+                    if r['status'] == 'success':
+                        try:
+                            sample = float(r['fct_slowdown'])
+                            success_valid &= math.isfinite(sample) and sample > 0
+                        except (KeyError, TypeError, ValueError):
+                            success_valid = False
+                workload_valid &= assessed and success_valid
+            if timeout and norm_ok and workload_valid:
+                value, valid = 0.0, True
             count = '; '.join([f'bulk {bulk_count}/{REPEATS}'] +
                               [f'{wk} {v[2]}/{REPEATS}' for wk, v in wk_stats.items()])
         entries.append({'cc': cc, 'norm': norm, 'slow': slow, 'value': value,
                         'workload_slows': {wk: v[0] for wk, v in wk_stats.items()},
                         'valid': valid, 'count': count, 'rank': '-', 'gap': '-',
-                        'status': '完整' if valid else '不完整或指标无效'})
+                        'status': ('超时（0分）' if timeout and (kind == 'workload' or valid)
+                                   else '完整' if valid else '不完整或指标无效')})
 
     lower_better = kind == 'workload'
     qualified = [e for e in entries if e['valid'] and e['value'] is not None]
@@ -224,6 +247,78 @@ def ranking_entries(rows: list[dict], scenario: str, workload_name: str, kind: s
     return qualified + [e for e in entries if not e['valid'] or e['value'] is None]
 
 
+def overall_ranking(scenarios: list[dict], rows: list[dict]) -> tuple[list[dict], list[str]]:
+    """Compare algorithms against each scenario's best complete result."""
+    if 'bulk' not in WORKLOADS:
+        return [], ['总排名需要 bulk 结果。']
+    if not scenarios:
+        return [], ['没有可比较的场景。']
+    kind = 'combined' if any(w != 'bulk' for w in WORKLOADS) else 'bulk'
+    values = {cc: [] for cc in CCS}
+    wins = {cc: 0 for cc in CCS}
+    completed = {cc: 0 for cc in CCS}
+    missing_baselines = []
+    for scenario in scenarios:
+        entries = ranking_entries(rows, scenario['name'], '', kind)
+        qualified = [e for e in entries if e['valid'] and e['value'] is not None]
+        best = max((e['value'] for e in qualified), default=0.0)
+        if best <= 0:
+            missing_baselines.append(scenario['name'])
+        for e in qualified:
+            values[e['cc']].append(e['value'] / best if best > 0 else None)
+            if e['status'] == '完整':
+                completed[e['cc']] += 1
+            if best > 0 and e['value'] == best:
+                wins[e['cc']] += 1
+    entries = []
+    for cc in CCS:
+        ratios = values[cc]
+        complete = len(ratios) == len(scenarios)
+        score = None
+        if complete and not missing_baselines:
+            score = 0.0 if any(v == 0 for v in ratios) else math.exp(math.fsum(math.log(v) for v in ratios) / len(ratios))
+        status = ('场景不完整' if not complete else '含超时（0分）' if completed[cc] < len(scenarios) else '完整')
+        entries.append({'cc': cc, 'complete': completed[cc], 'wins': wins[cc], 'score': score,
+                        'rank': '-', 'gap': '-', 'status': status})
+    if missing_baselines:
+        return entries, ['无法计算总排名：以下场景没有有效的正数基准：' + '、'.join(missing_baselines) + '。']
+    ranked = sorted((e for e in entries if e['score'] is not None), key=lambda e: (-e['score'], e['cc']))
+    if ranked and ranked[0]['score'] > 0:
+        best = ranked[0]['score']
+        previous = None
+        for index, e in enumerate(ranked, 1):
+            if previous is None or e['score'] != previous:
+                rank = index
+            e['rank'] = str(rank)
+            e['gap'] = '基准' if e['score'] == best else f"{(e['score'] - best) / best * 100:+.1f}%"
+            previous = e['score']
+    elif ranked:
+        for e in ranked:
+            e['status'] = '总分基准为零，无法排名'
+    return ranked + [e for e in entries if e['score'] is None], []
+
+
+def overall_ranking_table(scenarios: list[dict], rows: list[dict]) -> list[str]:
+    entries, warnings = overall_ranking(scenarios, rows)
+    metric = '单场景综合评分' if any(w != 'bulk' for w in WORKLOADS) else '单场景 Bulk Norm Power'
+    result = ['## 所有场景总排名', '',
+              f'每个场景等权：先将 {metric} 除以该场景最优值，再对所有场景的相对得分取几何均值。',
+              '全部场景的所选负载及重复均有有效结果时参与排名；workload 超时按零分计算，并列场景最优各计一次。', '']
+    if warnings:
+        result.extend(warnings + [''])
+    if entries:
+        result.extend(['| 总排名 | 算法 | 完整场景 | 场景最优次数 | 总评分 ↑ | 相对第一名差距 | 状态 |',
+                       '|---:|---|---:|---:|---:|---:|---|'])
+        for e in entries:
+            cells = [e['rank'], e['cc'], f"{e['complete']}/{len(scenarios)}", str(e['wins']),
+                     '-' if e['score'] is None else f"{e['score']:.3f}", e['gap'], e['status']]
+            if e['gap'] == '基准':
+                cells = [f'**{cell}**' for cell in cells]
+            result.append('| ' + ' | '.join(cells) + ' |')
+        result.append('')
+    return result
+
+
 def ranking_tables(scenarios: list[dict], rows: list[dict]) -> list[str]:
     result = ['## 算法排名', '',
               '每个场景分别排名；指标为各次成功运行的算术平均，使用未四舍五入的值计算。',
@@ -232,13 +327,18 @@ def ranking_tables(scenarios: list[dict], rows: list[dict]) -> list[str]:
     def fmt(value: float | None, suffix: str = '') -> str:
         return '-' if value is None else f'{value:.3f}{suffix}'
 
+    def row(cells: list[str], entry: dict) -> str:
+        if entry['gap'] == '基准':
+            cells = [f'**{cell}**' for cell in cells]
+        return '| ' + ' | '.join(cells) + ' |'
+
     if 'bulk' in WORKLOADS:
         result.extend(['### Bulk：Norm Power', '',
                        '| 场景 | 排名 | 算法 | 成功/总次数 | Norm Power ↑ | 相对最优差距 | 状态 |',
                        '|---|---:|---|---:|---:|---:|---|'])
         for scenario in scenarios:
             for e in ranking_entries(rows, scenario['name'], 'bulk', 'bulk'):
-                result.append(f"| {scenario['name']} | {e['rank']} | {e['cc']} | {e['count']} | {fmt(e['norm'])} | {e['gap']} | {e['status']} |")
+                result.append(row([scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['norm']), e['gap'], e['status']], e))
         result.append('')
     for wk in (w for w in WORKLOADS if w != 'bulk'):
         result.extend([f'### {wk}：FCT Slowdown', '',
@@ -246,7 +346,7 @@ def ranking_tables(scenarios: list[dict], rows: list[dict]) -> list[str]:
                        '|---|---:|---|---:|---:|---:|---|'])
         for scenario in scenarios:
             for e in ranking_entries(rows, scenario['name'], wk, 'workload'):
-                result.append(f"| {scenario['name']} | {e['rank']} | {e['cc']} | {e['count']} | {fmt(e['slow'], 'x')} | {e['gap']} | {e['status']} |")
+                result.append(row([scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['slow'], 'x'), e['gap'], e['status']], e))
         result.append('')
     workloads = [w for w in WORKLOADS if w != 'bulk']
     if 'bulk' in WORKLOADS and workloads:
@@ -255,7 +355,7 @@ def ranking_tables(scenarios: list[dict], rows: list[dict]) -> list[str]:
         headers.extend(['Slowdown 几何均值', '综合评分 ↑', '相对最优差距', '状态'])
         result.extend(['### 综合排名', '',
                        '各 workload 的重复运行先取算术平均，再对所有 workload 等权取几何均值；综合评分 = sqrt(Norm Power / Slowdown 几何均值)。',
-                       '所有 workload 和 bulk 均需完成全部重复，才参与综合排名。', '',
+                       '所有 workload 和 bulk 均需完成全部重复；workload 超时的场景综合评分为 0。', '',
                        '| ' + ' | '.join(headers) + ' |',
                        '|' + '|'.join(['---'] * len(headers)) + '|'])
         for scenario in scenarios:
@@ -263,8 +363,9 @@ def ranking_tables(scenarios: list[dict], rows: list[dict]) -> list[str]:
                 cells = [scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['norm'])]
                 cells.extend(fmt(e['workload_slows'].get(wk), 'x') for wk in workloads)
                 cells.extend([fmt(e['slow'], 'x'), fmt(e['value']), e['gap'], e['status']])
-                result.append('| ' + ' | '.join(cells) + ' |')
+                result.append(row(cells, e))
         result.append('')
+    result.extend(overall_ranking_table(scenarios, rows))
     return result
 
 
@@ -475,7 +576,7 @@ def write_report(output: Path, scenarios: list[dict], rows: list[dict], work: di
     if any('up_delay' not in s['files'] or 'down_delay' not in s['files'] for s in scenarios):
         text.append(f'- 缺失延迟文件时，单向基础延迟：{DEFAULT_ONE_WAY_DELAY_MS:g} ms。')
     if any(wk != 'bulk' for wk in WORKLOADS):
-        text.append(f'- Workload 循环回放 lines，完成时间为全部数据块收到的仿真时刻；最后一块产生后最多等待 {WORKLOAD_DRAIN_TIMEOUT_S:g} s。')
+        text.append(f'- Workload 循环回放 lines；全部数据块收到时立即结束，最多运行 {WORKLOAD_MAX_SIMULATION_S:g} s 仿真时间，超时记 0 分。')
     text.extend(['', '## 失败与未完成', ''])
     failed = [r for r in rows if r['status'] != 'success']
     text.extend([f"- {r['scenario']} / {r['workload']} / {r['cc']} / 第 {r['repeat']} 次：{r['error']}" for r in failed] or ['无。'])
@@ -504,7 +605,7 @@ def main() -> int:
             raise ValueError(f'benchmark binary missing: {BINARY}; run make build-bench')
         if (REPEATS < 1 or not isinstance(MAX_WORKERS, int) or MAX_WORKERS < 1
                 or not CCS or len(set(CCS)) != len(CCS) or not WORKLOADS or len(set(WORKLOADS)) != len(WORKLOADS)
-                or not math.isfinite(WORKLOAD_DRAIN_TIMEOUT_S) or WORKLOAD_DRAIN_TIMEOUT_S <= 0):
+                or not math.isfinite(WORKLOAD_MAX_SIMULATION_S) or WORKLOAD_MAX_SIMULATION_S <= 0):
             raise ValueError('invalid algorithms, workloads or repeats')
         print('\nTCP Trace Bench\n' + '=' * 40, flush=True)
         print(f'数据集：{LINES_DIR}\n正在读取并校验输入…', flush=True)
@@ -529,7 +630,7 @@ def main() -> int:
         raw_dir.mkdir(exist_ok=True)
         metadata = {'lines_dir': str(LINES_DIR), 'ccs': CCS, 'workloads': {k: {**v, 'path': str(v['path'])} for k, v in work.items()},
                     'repeats': REPEATS, 'max_workers': MAX_WORKERS, 'default_one_way_delay_ms': DEFAULT_ONE_WAY_DELAY_MS,
-                    'workload_drain_timeout_s': WORKLOAD_DRAIN_TIMEOUT_S,
+                    'workload_max_simulation_s': WORKLOAD_MAX_SIMULATION_S,
                     'scenarios': [{'name': s['name'], 'duration_s': s['duration_s'],
                                    'files': {k: {'path': str(v), 'sha256': digest(v)} for k, v in s['files'].items()}} for s in scenarios],
                     'binary_sha256': digest(BINARY), 'queue_bytes_per_direction': 500000,
@@ -548,8 +649,7 @@ def main() -> int:
                         row = {'scenario': scenario['name'], 'workload': wk, 'cc': cc, 'repeat': repeat,
                                'duration_s': scenario['duration_s'], 'status': 'failed', 'error': ''}
                         files = scenario['files']
-                        stop_s = (scenario['duration_s'] if wk == 'bulk'
-                                  else work[wk]['span_s'] + WORKLOAD_DRAIN_TIMEOUT_S + 0.001)
+                        stop_s = scenario['duration_s'] if wk == 'bulk' else WORKLOAD_MAX_SIMULATION_S
                         cmd = [str(BINARY), '--profile=lines', f'--upTrace={files["up"]}', f'--downTrace={files["down"]}',
                                f'--stopTime={stop_s}', f'--ccs={cc}', f'--run={repeat}',
                                f'--defaultDelayMs={DEFAULT_ONE_WAY_DELAY_MS}',
@@ -569,7 +669,7 @@ def main() -> int:
                         if RESUME and checkpoint.is_file():
                             try:
                                 saved = json.loads(checkpoint.read_text(encoding='utf-8'))
-                                if saved['fingerprint'] == fingerprint and saved['row']['status'] == 'success':
+                                if saved['fingerprint'] == fingerprint and saved['row']['status'] in ('success', 'timeout'):
                                     rows_by_index[index] = saved['row']
                                     index += 1
                                     continue
@@ -598,7 +698,10 @@ def main() -> int:
                 data = json.loads(next(line for line in reversed(stdout.splitlines()) if line.startswith('{')))
                 row.update(data)
                 if job['expected'] is not None and int(data.get('requests', 0)) != job['expected']:
-                    row['error'] = f"数据块完成 {data.get('requests', 0)}/{job['expected']}"
+                    row['status'] = 'timeout'
+                    row['error'] = f"达到最大仿真时长 {WORKLOAD_MAX_SIMULATION_S:g} s，数据块完成 {data.get('requests', 0)}/{job['expected']}，计 0 分"
+                    for field in ('rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'fct_slowdown', 'mortise_qoe'):
+                        row[field] = ''
                 else:
                     row['status'] = 'success'
             except (RuntimeError, ValueError, StopIteration) as exc:

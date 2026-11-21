@@ -159,6 +159,108 @@ class TraceBenchTests(unittest.TestCase):
         self.assertEqual(ranked[0]['status'], '基准为零，无法排名')
         self.assertEqual(ranked[1]['rank'], '-')
 
+    def test_rankings_bold_all_tied_baselines_only(self):
+        rows = []
+        for cc in ('a', 'b', 'incomplete'):
+            rows.extend([
+                {'scenario': 'scene', 'cc': cc, 'workload': 'bulk', 'repeat': 1,
+                 'status': 'success' if cc != 'incomplete' else 'failed', 'norm_power': 0.5},
+                {'scenario': 'scene', 'cc': cc, 'workload': 'websearch', 'repeat': 1,
+                 'status': 'success', 'fct_slowdown': 2.0},
+            ])
+        with patch.multiple(bench, CCS=['a', 'b', 'incomplete'], REPEATS=1,
+                            WORKLOADS=['bulk', 'websearch']):
+            tables = '\n'.join(bench.ranking_tables([{'name': 'scene'}], rows))
+        self.assertEqual(tables.split('## 所有场景总排名')[0].count('**基准**'), 7)
+        self.assertIn('| **scene** | **1** | **a** | **1/1** | **0.500** | **基准** | **完整** |', tables)
+        self.assertIn('| scene | - | incomplete | 0/1 |', tables)
+
+    def test_overall_ranking_combines_scenarios_and_requires_completion(self):
+        rows = []
+        for scene, a, b in [('one', .8, .4), ('two', .3, .4)]:
+            for cc, norm in [('a', a), ('b', b), ('partial', .6)]:
+                rows.append({'scenario': scene, 'cc': cc, 'workload': 'bulk', 'repeat': 1,
+                             'status': 'failed' if cc == 'partial' and scene == 'two' else 'success', 'norm_power': norm})
+                rows.append({'scenario': scene, 'cc': cc, 'workload': 'websearch', 'repeat': 1,
+                             'status': 'success', 'fct_slowdown': 1.0})
+        scenes = [{'name': 'one'}, {'name': 'two'}]
+        with patch.multiple(bench, CCS=['a', 'b', 'partial'], REPEATS=1, WORKLOADS=['bulk', 'websearch']):
+            entries, warnings = bench.overall_ranking(scenes, rows)
+            self.assertEqual(warnings, [])
+            self.assertEqual(entries[-1]['cc'], 'partial')
+            self.assertEqual(entries[-1]['complete'], 1)
+            self.assertIsNone(entries[-1]['score'])
+            self.assertGreater(entries[0]['score'], entries[1]['score'])
+            self.assertEqual(entries[0]['rank'], '1')
+            rows = [r for r in rows if r['scenario'] != 'two']
+            entries, warnings = bench.overall_ranking(scenes, rows)
+            self.assertIn('two', warnings[0])
+            self.assertTrue(all(e['score'] is None for e in entries))
+
+    def test_overall_ranking_bulk_ties_zeros_and_missing_bulk(self):
+        scenes = [{'name': 'a'}, {'name': 'b'}]
+        rows = [{'scenario': scene, 'cc': cc, 'workload': 'bulk', 'repeat': 1,
+                 'status': 'success', 'norm_power': value}
+                for scene, vals in [('a', (1, .5, 0)), ('b', (.5, 1, 0))]
+                for cc, value in zip(('x', 'y', 'zero'), vals)]
+        with patch.multiple(bench, CCS=['x', 'y', 'zero'], REPEATS=1, WORKLOADS=['bulk']):
+            entries, warnings = bench.overall_ranking(scenes, rows)
+            self.assertFalse(warnings)
+            self.assertEqual([e['rank'] for e in entries], ['1', '1', '3'])
+            self.assertAlmostEqual(entries[0]['score'], 2 ** -.5)
+            self.assertEqual(entries[-1]['score'], 0)
+            self.assertEqual(entries[-1]['wins'], 0)
+            table = '\n'.join(bench.overall_ranking_table(scenes, rows))
+            self.assertEqual(table.count('**基准**'), 2)
+        with patch.multiple(bench, WORKLOADS=['websearch']):
+            self.assertIn('需要 bulk', bench.overall_ranking(scenes, rows)[1][0])
+
+    def test_timeout_scores_zero_and_does_not_become_baseline(self):
+        rows = []
+        for cc, status in [('good', 'success'), ('slow', 'timeout')]:
+            rows.append({'scenario': 'a', 'cc': cc, 'workload': 'bulk', 'repeat': 1,
+                         'status': 'success', 'norm_power': .5})
+            rows.append({'scenario': 'a', 'cc': cc, 'workload': 'app', 'repeat': 1,
+                         'status': status, 'fct_slowdown': 2 if status == 'success' else ''})
+        with patch.multiple(bench, CCS=['good', 'slow'], REPEATS=1, WORKLOADS=['bulk', 'app']):
+            scenario = bench.ranking_entries(rows, 'a', '', 'combined')
+            slow = next(e for e in scenario if e['cc'] == 'slow')
+            self.assertTrue(slow['valid'])
+            self.assertEqual(slow['value'], 0)
+            self.assertEqual(slow['status'], '超时（0分）')
+            overall, warnings = bench.overall_ranking([{'name': 'a'}], rows)
+            self.assertFalse(warnings)
+            self.assertEqual(overall[-1]['score'], 0)
+            self.assertEqual(overall[-1]['complete'], 0)
+            self.assertEqual(overall[-1]['status'], '含超时（0分）')
+            rows[1]['status'] = 'timeout'
+            self.assertTrue(bench.overall_ranking([{'name': 'a'}], rows)[1])
+
+    def test_timeout_is_recorded_and_resumed_without_fake_fct(self):
+        if not bench.BINARY.exists():
+            self.skipTest('build tcp-trace-bench first')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lines = root / 'lines/sample'
+            lines.mkdir(parents=True)
+            for direction in ('up', 'down'):
+                (lines / f'{direction}.txt').write_text('0,5\n1000,0\n')
+            workloads = root / 'datasets/workloads'
+            workloads.mkdir(parents=True)
+            (workloads / 'long.wk').write_text('0 1000\n1500 2000\n')
+            with patch.multiple(bench, ROOT=root, LINES_DIR=lines, RESULTS_DIR=root / 'results',
+                                WORKLOADS=['bulk', 'long'], CCS=['cubic'], REPEATS=1,
+                                WORKLOAD_MAX_SIMULATION_S=.5, RESUME=True), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(bench.main(), 1)
+                with next((root / 'results').rglob('runs.csv')).open(newline='') as stream:
+                    rows = {r['workload']: r for r in csv.DictReader(stream)}
+                self.assertEqual(rows['long']['status'], 'timeout')
+                self.assertEqual(rows['long']['fct_slowdown'], '')
+                self.assertIn('0 分', rows['long']['error'])
+                with patch.object(bench.ProcessController, 'run', side_effect=AssertionError('must resume')):
+                    self.assertEqual(bench.main(), 1)
+
     def test_bulk_transfers_without_warmup_and_reports_power(self):
         binary = bench.BINARY
         if not binary.exists():
@@ -313,7 +415,7 @@ class TraceBenchTests(unittest.TestCase):
             (work / 'long.wk').write_text('0 1000\n1500 2000\n')
             with patch.multiple(bench, ROOT=root, LINES_DIR=lines, RESULTS_DIR=root / 'results',
                                 BINARY=binary, CCS=['cubic'], WORKLOADS=['long'], REPEATS=1,
-                                WORKLOAD_DRAIN_TIMEOUT_S=2.0):
+                                WORKLOAD_MAX_SIMULATION_S=3.5):
                 self.assertEqual(bench.main(), 0)
             with next((root / 'results').rglob('runs.csv')).open(newline='') as stream:
                 row = next(csv.DictReader(stream))
