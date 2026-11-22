@@ -41,7 +41,7 @@ IsCopaKernelName(const std::string& name)
 {
     const std::string cc = BaseCc(name);
     return cc == "copa" || cc == "copa-auto" || cc == "copa_auto" || cc == "copa_auto_nc" ||
-           cc == "copa_auto_nc_j0" || cc == "copa_auto_nc_j3" || cc == "copa_orig" ||
+           cc == "copa_auto_j0" || cc == "copa_auto_nc_j0" || cc == "copa_auto_nc_j3" || cc == "copa_orig" ||
            cc.rfind("copa-d", 0) == 0 || cc.rfind("copa_auto_theta", 0) == 0 ||
            cc.rfind("copa_auto_nc_theta", 0) == 0;
 }
@@ -101,7 +101,7 @@ ConfigureCc(uint32_t nodeId, std::string name, int32_t jitterUs, uint32_t copaCl
     bool modeSwitching = !nosw;
     int32_t effJitterUs = jitterUs;
     uint32_t thetaMilli = 500U;
-    uint32_t initDeltaQ20 = 41943U;
+    uint32_t initDeltaQ20 = 524288U; /* 0.50 * 2^20 */
 
     if (cc == "copa" || cc == "copa_orig")
     {
@@ -120,6 +120,12 @@ ConfigureCc(uint32_t nodeId, std::string name, int32_t jitterUs, uint32_t copaCl
     {
         adaptive = true;
         modeSwitching = false;
+    }
+    else if (cc == "copa_auto_j0")
+    {
+        adaptive = true;
+        modeSwitching = !nosw;
+        effJitterUs = 0;
     }
     else if (cc == "copa_auto_nc_j0")
     {

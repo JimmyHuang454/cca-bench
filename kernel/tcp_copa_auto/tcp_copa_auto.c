@@ -118,6 +118,18 @@ static void tcp_copa_init_auto(struct sock *sk)
 	tcp_copa_init_common(sk, cfg);
 }
 
+static void tcp_copa_init_auto_j0(struct sock *sk)
+{
+	struct copa_auto_cfg cfg = {
+		.adaptive = true,
+		.mode_switching = true,
+		.jitter_us = 0,
+		.theta_milli = 500,
+		.init_delta_q20 = COPA_DELTA_INIT_Q20,
+	};
+	tcp_copa_init_common(sk, cfg);
+}
+
 static void tcp_copa_init_auto_nc(struct sock *sk)
 {
 	struct copa_auto_cfg cfg = {
@@ -332,6 +344,7 @@ static struct tcp_congestion_ops sym __read_mostly = {		\
 
 DEFINE_COPA_OPS(tcp_copa_v2_ops,         "copa_auto_v2",    tcp_copa_init_v2);
 DEFINE_COPA_OPS(tcp_copa_auto_ops,       "copa_auto",       tcp_copa_init_auto);
+DEFINE_COPA_OPS(tcp_copa_auto_j0_ops,    "copa_auto_j0",    tcp_copa_init_auto_j0);
 DEFINE_COPA_OPS(tcp_copa_auto_nc_ops,    "copa_auto_nc",    tcp_copa_init_auto_nc);
 DEFINE_COPA_OPS(tcp_copa_auto_nc_j0_ops, "copa_auto_nc_j0", tcp_copa_init_auto_nc_j0);
 DEFINE_COPA_OPS(tcp_copa_auto_t90_ops,   "copa_auto_t90",   tcp_copa_init_auto_t90);
@@ -343,6 +356,7 @@ DEFINE_COPA_OPS(tcp_copa_nc_ops,         "copa_nc",         tcp_copa_init_orig_n
 static struct tcp_congestion_ops * const copa_ops_list[] = {
 	&tcp_copa_v2_ops,
 	&tcp_copa_auto_ops,
+	&tcp_copa_auto_j0_ops,
 	&tcp_copa_auto_nc_ops,
 	&tcp_copa_auto_nc_j0_ops,
 	&tcp_copa_auto_t90_ops,
@@ -364,7 +378,7 @@ static int __init tcp_copa_auto_register(void)
 			return ret;
 		}
 	}
-	pr_info("tcp_copa_auto: registered copa_auto_v2, copa_auto, copa_auto_nc, copa_auto_nc_j0, copa_auto_t90, copa_auto_t98, copa_auto_t, copa_orig, copa_nc\n");
+	pr_info("tcp_copa_auto: registered copa_auto_v2, copa_auto, copa_auto_j0, copa_auto_nc, copa_auto_nc_j0, copa_auto_t90, copa_auto_t98, copa_auto_t, copa_orig, copa_nc\n");
 	return 0;
 }
 

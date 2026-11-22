@@ -29,10 +29,11 @@ ROOT = Path(__file__).resolve().parents[2]
 # Edit these settings, then run this script or `make bench`.
 # LINES_DIR = ROOT / 'datasets/lines/lumos'
 LINES_DIR = ROOT / 'datasets/lines/basic'
-WORKLOADS = ['bulk', 'websearch', 'pageload', 'app']
-CCS = ['copa_nc', 'cubic', 'copa_auto', 'bbr', 'copa_auto_nc', 'copa', 'vegas', 'westwood', 'illinois', 'veno', 'yeah', 'hybla']
-REPEATS = 2
-TAIL_PERCENTILE = 95  # Tail percentile for qdelay, Norm Power, RCT, FCT Slowdown & rankings (e.g. 50, 90, 95, 99).
+WORKLOADS = ['bulk', 'websearch', 'pageload', 'app', 'http2_mux_rr', 'http2_mux_srpt']
+CCS = ['copa_nc', 'copa_auto', 'copa', 'copa_auto_nc', 'bbr', 'cubic', 'westwood', 'illinois', 'veno', 'yeah', 'hybla']
+CCS = ['copa_nc', 'copa_auto', 'copa', 'copa_auto_nc', 'copa_auto_nc_theta0.8','copa_auto_j0', 'copa_auto_nc_j0', 'bbr', 'cubic']
+REPEATS = 1
+TAIL_PERCENTILE = 98  # Tail percentile for qdelay, Norm Power, RCT, FCT Slowdown & rankings (e.g. 50, 90, 95, 99).
 RESUME = True  # False: rerun all combinations and replace their results.
 MAX_WORKERS = os.cpu_count() or 1  # Maximum concurrent ns-3 processes; 1 runs serially.
 WORKLOAD_MAX_SIMULATION_S = 1800.0  # Maximum simulated time from the start, not wall time.

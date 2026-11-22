@@ -90,10 +90,83 @@ def http3_pageload() -> list[tuple[int, int]]:
     return out
 
 
+def _http2_mux_pages() -> list[tuple[int, int, list[int]]]:
+    """Deterministic 12-page multi-stream HTTP/2 object catalog: (think_ms, html_bytes, burst_streams)."""
+    rng = xorshift64(0x4832_2015)
+
+    def rand_bytes(lo_kb: int, hi_kb: int) -> int:
+        return int(round((lo_kb + (hi_kb - lo_kb) * next(rng)) * 1024))
+
+    pages: list[tuple[int, int, list[int]]] = []
+    for p in range(12):
+        think_ms = 0 if p == 0 else int(2500 + 1000 * next(rng))
+        html_bytes = rand_bytes(18, 32)
+        burst_streams = [
+            rand_bytes(24, 80),     # critical CSS
+            rand_bytes(600, 1600),  # large hero image / media chunk / JS bundle
+            rand_bytes(24, 80),     # critical JS
+            rand_bytes(90, 260),    # image / asset 1
+            rand_bytes(90, 260),    # image / asset 2
+            rand_bytes(90, 260),    # image / asset 3
+            rand_bytes(4, 24),      # small XHR / API 1
+            rand_bytes(4, 24),      # small XHR / API 2
+            rand_bytes(4, 24),      # small XHR / UI icon 3
+        ]
+        pages.append((think_ms, html_bytes, burst_streams))
+    return pages
+
+
+def _interleave_http2_frames(sched: str, frame_bytes: int = 16384) -> list[tuple[int, int]]:
+    """Pre-interleave multi-stream HTTP/2 page objects into <= 16 KB DATA frames (pure .wk)."""
+    out: list[tuple[int, int]] = []
+    for think_ms, html_bytes, burst_streams in _http2_mux_pages():
+        # Wave 1: HTML document split into HTTP/2 DATA frames
+        rem = html_bytes
+        first = True
+        while rem > 0:
+            chunk = min(rem, frame_bytes)
+            out.append((think_ms if first else 0, chunk))
+            rem -= chunk
+            first = False
+
+        # Wave 2: 9 concurrent page resources triggered 30 ms after HTML, interleaved into 16 KB frames
+        active = list(burst_streams)
+        wave_first = True
+        while active:
+            if sched == "srpt":
+                idx = min(range(len(active)), key=lambda i: active[i])
+                rem_s = active.pop(idx)
+                chunk = min(rem_s, frame_bytes)
+                out.append((30 if wave_first else 0, chunk))
+                wave_first = False
+                if rem_s > chunk:
+                    active.insert(idx, rem_s - chunk)
+            else:
+                rem_s = active.pop(0)
+                chunk = min(rem_s, frame_bytes)
+                out.append((30 if wave_first else 0, chunk))
+                wave_first = False
+                if rem_s > chunk:
+                    active.append(rem_s - chunk)
+    return out
+
+
+def http2_mux_rr() -> list[tuple[int, int]]:
+    """HTTP/2 multiplexed page loads with 16 KB Round-Robin frame interleaving."""
+    return _interleave_http2_frames("rr")
+
+
+def http2_mux_srpt() -> list[tuple[int, int]]:
+    """HTTP/2 multiplexed page loads with 16 KB SRPT (shortest-remaining-first) frame scheduling."""
+    return _interleave_http2_frames("srpt")
+
+
 GENERATORS = {
     "websearch": dctcp_websearch,
     "vl2": vl2_datamining,
     "pageload": http3_pageload,
+    "http2_mux_rr": http2_mux_rr,
+    "http2_mux_srpt": http2_mux_srpt,
 }
 
 
@@ -108,7 +181,7 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument(
         "--only",
-        default="websearch,vl2,pageload",
+        default="websearch,vl2,pageload,http2_mux_rr,http2_mux_srpt",
         help="Comma-separated workload names to generate",
     )
     args = parser.parse_args()

@@ -25,7 +25,7 @@ IsCopaKernelName(const std::string& name)
     const std::string cc = BaseCc(name);
     return cc == "copa" || cc == "copa_nc" || cc == "copa_orig_nc" ||
            cc == "copa-auto" || cc == "copa_auto" || cc == "copa_auto_nc" ||
-           cc == "copa_auto_nc_j0" || cc == "copa_auto_nc_j3" || cc == "copa_orig" ||
+           cc == "copa_auto_j0" || cc == "copa_auto_nc_j0" || cc == "copa_auto_nc_j3" || cc == "copa_orig" ||
            cc.rfind("copa-d", 0) == 0 || cc.rfind("copa_auto_theta", 0) == 0 ||
            cc.rfind("copa_auto_nc_theta", 0) == 0;
 }
@@ -35,7 +35,7 @@ IsAdaptiveCopaName(const std::string& name)
 {
     const std::string cc = BaseCc(name);
     return cc == "copa-auto-v2" || cc == "copa_auto_v2" || cc == "copa-auto" || cc == "copa_auto" || cc == "copa_auto_nc" ||
-           cc == "copa_auto_nc_j0" || cc == "copa_auto_nc_j3" ||
+           cc == "copa_auto_j0" || cc == "copa_auto_nc_j0" || cc == "copa_auto_nc_j3" ||
            cc.rfind("copa_auto_theta", 0) == 0 || cc.rfind("copa_auto_nc_theta", 0) == 0;
 }
 
@@ -92,7 +92,7 @@ ConfigureCcFlow(uint32_t nodeId,
     bool modeSwitching = !nosw;
     int32_t effJitterUs = jitterUs;
     uint32_t thetaMilli = 500U;
-    uint32_t initDeltaQ20 = 41943U; /* 0.04 * 2^20 */
+    uint32_t initDeltaQ20 = 524288U; /* 0.50 * 2^20 (safe Copa default; adapts down on jitter) */
 
     if (cc == "copa" || cc == "copa_orig")
     {
@@ -123,6 +123,12 @@ ConfigureCcFlow(uint32_t nodeId,
     {
         adaptive = true;
         modeSwitching = false;
+    }
+    else if (cc == "copa_auto_j0")
+    {
+        adaptive = true;
+        modeSwitching = !nosw;
+        effJitterUs = 0;
     }
     else if (cc == "copa_auto_nc_j0")
     {

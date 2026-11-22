@@ -498,7 +498,7 @@ def resolve_mortise_cc(cc: str) -> str:
                     stdout=subprocess.DEVNULL,
                 )
         return "copa_auto_t"
-    if norm in ("copa_auto", "copa_auto_v2", "copa_auto_nc", "copa_auto_t90", "copa_auto_t98", "copa_auto_t", "copa_orig"):
+    if norm in ("copa_auto", "copa_auto_j0", "copa_auto_v2", "copa_auto_nc", "copa_auto_nc_j0", "copa_auto_t90", "copa_auto_t98", "copa_auto_t", "copa_orig"):
         return norm
     return cc
 

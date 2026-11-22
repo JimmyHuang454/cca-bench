@@ -31,6 +31,7 @@ REPO_ROOT = SCRIPTS_ROOT.parent
 
 EXTRA_CONGESTION_VARIANTS: list[tuple[str, str]] = [
     ("CopaAuto", "copa_auto"),
+    ("CopaAutoJ0", "copa_auto_j0"),
     ("CopaAutoV2", "copa_auto_v2"),
     ("CopaAutoNc", "copa_auto_nc"),
     ("CopaAutoNcJ0", "copa_auto_nc_j0"),

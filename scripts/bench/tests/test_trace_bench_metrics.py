@@ -490,6 +490,44 @@ class TraceBenchConsistencyAndParityTests(TraceBenchCase):
             self.assertGreaterEqual(wk['fct_slowdown_p95'], wk['fct_slowdown'] - 1e-6, name)
             self.assertLessEqual(wk['rct_p50_ms'], wk['rct_p95_ms'], name)
 
+    def test_10_http2_mux_pure_wk_workloads(self):
+        """Pure .wk HTTP/2 mux workloads (RR & SRPT) share identical bytes and run cleanly."""
+        sys.path.insert(0, str(ROOT / 'scripts/bench'))
+        import lines_common
+
+        rr_wk = ROOT / 'datasets/workloads/http2_mux_rr.wk'
+        srpt_wk = ROOT / 'datasets/workloads/http2_mux_srpt.wk'
+        rr_count, rr_span = lines_common.workload(rr_wk)
+        srpt_count, srpt_span = lines_common.workload(srpt_wk)
+        self.assertEqual(rr_count, srpt_count)
+        self.assertGreater(rr_count, 500)
+        self.assertAlmostEqual(rr_span, srpt_span, places=3)
+
+        def parse_sizes(path):
+            return [int(line.split()[1]) for line in path.read_text(encoding='utf-8').splitlines() if line.strip() and not line.startswith('#')]
+
+        rr_sizes = parse_sizes(rr_wk)
+        srpt_sizes = parse_sizes(srpt_wk)
+        self.assertEqual(sum(rr_sizes), sum(srpt_sizes))
+        self.assertLessEqual(max(rr_sizes), 16384)
+        self.assertLessEqual(max(srpt_sizes), 16384)
+        self.assertNotEqual(rr_sizes, srpt_sizes)
+
+        scene_dir = ROOT / 'datasets/lines/basic/wired_congested'
+        scene = LineScenario(
+            up=scene_dir / 'up.txt',
+            down=scene_dir / 'down.txt',
+            up_delay=scene_dir / 'up.delay.txt',
+            down_delay=scene_dir / 'down.delay.txt',
+        )
+        for wk_path in (rr_wk, srpt_wk):
+            res = self.run_json(scene, stop_time=300.0, cc='copa_auto', workload_file=wk_path, line_period_ms=60000)
+            self.assertEqual(res['requests'], rr_count)
+            self.assertEqual(res['requests_expected'], rr_count)
+            self.assertGreaterEqual(res['fct_slowdown'], 1.0)
+            self.assertLessEqual(res['rct_p50_ms'], res['rct_p95_ms'])
+            self.assertLessEqual(res['rct_p95_ms'], res['rct_tail_ms'])
+
 
 if __name__ == '__main__':
     unittest.main()

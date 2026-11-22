@@ -400,6 +400,190 @@ static void test_tcpcoop_and_loss_mode(void)
     puts("[PASS] test_tcpcoop_and_loss_mode");
 }
 
+static void test_delta_step_and_saturated_prior(void)
+{
+    struct copa_auto_state ca;
+    struct copa_auto_cfg cfg = {
+        .adaptive = true,
+        .mode_switching = false,
+        .jitter_us = 0,
+        .theta_milli = 500,
+        .init_delta_q20 = COPA_DELTA_INIT_Q20,
+    };
+    u64 now = 1000000ULL;
+
+    /* 1) Symmetric multiplicative floor: from delta=0.50, one starved segment never drops >2x */
+    copa_state_init(&ca, cfg, NULL, now, 30);
+    ca.slow_start = false;
+    ca.delta_run_q20 = COPA_DELTA_INIT_Q20; /* 0.50 */
+    ca.seg_acks = 100;
+    ca.seg_idle = 100; /* rho = 50 (starved -> rtt_min/20 prior -> large dq_target) */
+    ca.seg_min_rtt_us = 20000ULL;
+    copa_update_delta(&ca, 500ULL, 20000ULL, 100ULL);
+    /* Must shrink smoothly, bounded by exp(-ln(4)/2) = 0.50 -> delta >= ~0.25 */
+    assert(ca.delta_run_q20 < COPA_DELTA_INIT_Q20);
+    assert(ca.delta_run_q20 >= (COPA_DELTA_INIT_Q20 * 48ULL) / 100ULL);
+
+    /* 2) Saturated-link prior (rho=980, ratio_us==0): never inflates dq_target above k_us */
+    copa_state_init(&ca, cfg, NULL, now, 20);
+    ca.slow_start = false;
+    ca.delta_run_q20 = COPA_DELTA_INIT_Q20;
+    ca.seg_acks = 100;
+    ca.seg_idle = 0; /* rho = 980 */
+    ca.seg_min_rtt_us = 24000ULL;
+    copa_update_delta(&ca, 5000ULL, 20000ULL, 20ULL);
+    /* k_us is small (~50-100 us), so dq_target stays well below seg_dq=5ms and delta stays 0.50 */
+    assert(ca.dq_target_us < 4000ULL);
+    assert(ca.delta_run_q20 == COPA_DELTA_INIT_Q20);
+
+    puts("[PASS] test_delta_step_and_saturated_prior");
+}
+
+static void test_base_rtt_jump_vs_cubic_ramp(void)
+{
+    struct copa_auto_state ca;
+    struct copa_probe_board board = { 0 };
+    struct copa_auto_cfg cfg = {
+        .adaptive = true,
+        .mode_switching = true,
+        .jitter_us = -1,
+        .theta_milli = 500,
+        .init_delta_q20 = COPA_DELTA_INIT_Q20,
+    };
+    u64 now = 1000000ULL;
+    int i;
+
+    /* 1) Base-RTT jump 20 ms -> 90 ms at cwnd=4: loaded_since_us stays alive,
+     * REFRESH_RTT confirms flat plateau, updates trusted_min_us to 90 ms, no TCPCOOP. */
+    copa_state_init(&ca, cfg, &board, now, 20);
+    ca.slow_start = false;
+    ca.has_jitter = true;
+    ca.jitter_us = 0;
+    ca.first_probe_done = true;
+    copa_on_ack(&ca, now, 20000ULL, 20000ULL, 2, 1448, 10000000ULL, false, false);
+    assert(ca.trusted_min_us == 20000ULL);
+    ca.cwnd_q10 = (u64)COPA_MIN_CWND_PKTS << 10;
+
+    for (i = 0; i < 40; i++) {
+        now += 45000ULL; /* > 2 * trusted_min_us (40 ms), < 2 * srtt (180 ms) */
+        copa_on_ack(&ca, now, 90000ULL, 90000ULL, 1, 1448, 1250000ULL, false, false);
+    }
+    assert(ca.trusted_min_us == 90000ULL);
+    assert(ca.mode == COPA_MODE_DEFAULT);
+    assert(!ca.competitive);
+
+    /* 2) Rising CUBIC queue ramp fails per-round flatness check and enters TCPCOOP */
+    copa_state_init(&ca, cfg, &board, now, 20);
+    ca.slow_start = false;
+    ca.has_jitter = true;
+    ca.jitter_us = 0;
+    ca.first_probe_done = true;
+    ca.delta_run_q20 = COPA_DELTA_INIT_Q20;
+    copa_on_ack(&ca, now, 20000ULL, 20000ULL, 2, 1448, 1250000ULL, false, false);
+    for (i = 0; i < 80; i++) {
+        u64 rtt = 68000ULL + (u64)(i % 16) * 2500ULL; /* rising CUBIC queue 68..105.5 ms */
+        now += 20000ULL;
+        copa_on_ack(&ca, now, rtt, 50000ULL, 2, 1448, 1250000ULL, false, false);
+    }
+    assert(ca.trusted_min_us == 20000ULL);
+    assert(ca.mode == COPA_MODE_TCPCOOP);
+    assert(ca.competitive);
+
+    puts("[PASS] test_base_rtt_jump_vs_cubic_ramp");
+}
+
+static void test_app_limited_standing_queue_yield(void)
+{
+    struct copa_auto_state ca;
+    struct copa_auto_cfg cfg = {
+        .adaptive = true,
+        .mode_switching = false,
+        .jitter_us = 0,
+        .theta_milli = 500,
+        .init_delta_q20 = COPA_DELTA_INIT_Q20,
+    };
+    u64 now = 1000000ULL;
+    u32 cwnd;
+    int i;
+
+    copa_state_init(&ca, cfg, NULL, now, 80);
+    ca.slow_start = false;
+    copa_on_ack(&ca, now, 20000ULL, 20000ULL, 2, 1448, 6000000ULL, false, false);
+
+    /* Brief 1-SRTT burst under app_limited: cwnd stays protected at 80 */
+    for (i = 0; i < 5; i++) {
+        now += 5000ULL;
+        cwnd = copa_on_ack(&ca, now, 32000ULL, 25000ULL, 2, 1448, 3000000ULL, true, false);
+    }
+    assert(cwnd == 80);
+
+    /* Sustained >2*SRTT standing queue under app_limited (rwnd-limited after cap drop): yields */
+    for (i = 0; i < 100; i++) {
+        now += 5000ULL;
+        cwnd = copa_on_ack(&ca, now, 32000ULL, 25000ULL, 2, 1448, 3000000ULL, true, false);
+    }
+    assert(cwnd < 70);
+
+    puts("[PASS] test_app_limited_standing_queue_yield");
+}
+
+static void test_jitter_drain_no_drop_and_mid_drain_drop(void)
+{
+    struct copa_auto_state ca;
+    struct copa_probe_board board = { 0 };
+    struct copa_auto_cfg cfg = {
+        .adaptive = true,
+        .mode_switching = false,
+        .jitter_us = -1,
+        .theta_milli = 500,
+        .init_delta_q20 = COPA_DELTA_INIT_Q20,
+    };
+    /* Realistic LEO-like delay steps (20 ms period > srtt/2 = 13.5 ms) */
+    static const u64 jitter_pattern[12] = {
+        20000, 20000, 20000, 30000, 30000, 30000,
+        22000, 22000, 22000, 32000, 32000, 32000
+    };
+    u64 now = 1000000ULL;
+    int i;
+
+    /* 1) Oscillating high-jitter link (LEO-like) completes initial MEASURE_J via no-drop floor
+     * and computes an analytical startup_delta_q20 < 0.50. */
+    copa_state_init(&ca, cfg, &board, now, 20);
+    ca.slow_start = false;
+    for (i = 0; i < 120; i++) {
+        now += 6000ULL;
+        copa_on_ack(&ca, now, jitter_pattern[i % 12], 27000ULL, 2, 1448, 6000000ULL, false, false);
+    }
+    assert(ca.first_probe_done);
+    assert(ca.has_jitter && ca.jitter_us >= 2500ULL);
+    assert(ca.startup_delta_q20 > 0 && ca.startup_delta_q20 < COPA_DELTA_INIT_Q20);
+
+    /* 2) Genuine mid-drain capacity drop sets drain_rate_dropped and caps post-drain cwnd */
+    copa_state_init(&ca, cfg, &board, now, 80);
+    ca.slow_start = false;
+    ca.has_jitter = true;
+    ca.jitter_us = 0;
+    ca.first_probe_done = true;
+    ca.trusted_min_us = 20000ULL;
+    copa_on_ack(&ca, now, 20000ULL, 20000ULL, 2, 1448, 6000000ULL, false, false);
+    copa_start_drain(&ca, COPA_DRAIN_MEASURE_J, true, 1, now, 20000ULL, 20000ULL,
+                     20000ULL, 0ULL, 1448, 200000ULL, false);
+    assert(ca.drain_phase == COPA_PHASE_DRAINING);
+    /* Sudden 4x capacity drop mid-drain with high dq_us (> 10 ms) */
+    for (i = 0; i < 10 && ca.drain_phase == COPA_PHASE_DRAINING; i++) {
+        now += 8000ULL;
+        copa_on_ack(&ca, now, 45000ULL, 30000ULL, 1, 1448, 1200000ULL, false, false);
+    }
+    assert(ca.drain_rate_dropped);
+    /* Finish drain: cwnd must NOT blast back to saved 80 pkts */
+    now = ca.drain_deadline_us + 1000ULL;
+    copa_on_ack(&ca, now, 20000ULL, 22000ULL, 1, 1448, 1200000ULL, false, false);
+    assert(ca.drain_phase != COPA_PHASE_DRAINING);
+    assert((ca.cwnd_q10 >> 10) < 50);
+
+    puts("[PASS] test_jitter_drain_no_drop_and_mid_drain_drop");
+}
+
 int main(void)
 {
 	test_passive_observations();
@@ -407,6 +591,10 @@ int main(void)
 	test_outage_samples();
 	test_manual_jitter_and_loss_brake();
 	test_tcpcoop_and_loss_mode();
+	test_delta_step_and_saturated_prior();
+	test_base_rtt_jump_vs_cubic_ramp();
+	test_app_limited_standing_queue_yield();
+	test_jitter_drain_no_drop_and_mid_drain_drop();
 	test_math_ln_exp();
 	test_target_dq();
 	test_slow_start_and_steady();

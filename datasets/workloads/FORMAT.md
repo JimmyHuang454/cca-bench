@@ -18,6 +18,8 @@ All application-layer request workloads in `datasets/workloads/` use the unified
 | `websearch.wk` | DCTCP heavy-tailed search queries + large responses | 80 | 95.9 s | 29.10 MB |
 | `vl2.wk` | VL2 bimodal extreme heavy tail (tiny RPCs + large transfers) | 80 | 89.9 s | 10.91 MB |
 | `pageload.wk` | Bursty HTTP/3 webpage resource clusters + think time | 80 | 48.7 s | 19.91 MB |
+| `http2_mux_rr.wk` | HTTP/2 16 KB Round-Robin pre-interleaved multi-stream page loads | 1326 | 35.3 s | 20.77 MB |
+| `http2_mux_srpt.wk` | HTTP/2 16 KB SRPT (shortest-first) pre-interleaved multi-stream page loads | 1326 | 35.3 s | 20.77 MB |
 | *(built-in `bulk`)* | Continuous saturated backlogged flow (no `.wk` file needed) | — | 60 s (115 s LEO) | Saturated |
 
 Regenerate synthetic `.wk` files anytime with:

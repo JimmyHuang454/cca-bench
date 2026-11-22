@@ -41,7 +41,7 @@ BENCH_BIN     ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp-capacity-trace-optimized
 LTE_BIN       ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp-lte-highspeed-handover-optimized
 WIFI_BIN      ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp-wifi-bench-optimized
 
-WORKLOAD_MAP  := app=$(WORKLOAD_DIR)/app.wk,websearch=$(WORKLOAD_DIR)/websearch.wk,vl2=$(WORKLOAD_DIR)/vl2.wk,pageload=$(WORKLOAD_DIR)/pageload.wk
+WORKLOAD_MAP  := app=$(WORKLOAD_DIR)/app.wk,websearch=$(WORKLOAD_DIR)/websearch.wk,vl2=$(WORKLOAD_DIR)/vl2.wk,pageload=$(WORKLOAD_DIR)/pageload.wk,http2_mux_rr=$(WORKLOAD_DIR)/http2_mux_rr.wk,http2_mux_srpt=$(WORKLOAD_DIR)/http2_mux_srpt.wk
 QUEUES_FLAG   := $(if $(QUEUES),--queues $(QUEUES),)
 RESUME_FLAG   := $(if $(filter 1 true yes,$(RESUME)),--resume,)
 
@@ -130,7 +130,7 @@ build-bench: sync-bench
 
 workloads:
 	@mkdir -p "$(WORKLOAD_DIR)"
-	@if [ ! -f "$(WORKLOAD_DIR)/websearch.wk" ] || [ ! -f "$(WORKLOAD_DIR)/vl2.wk" ] || [ ! -f "$(WORKLOAD_DIR)/pageload.wk" ]; then \
+	@if [ ! -f "$(WORKLOAD_DIR)/websearch.wk" ] || [ ! -f "$(WORKLOAD_DIR)/vl2.wk" ] || [ ! -f "$(WORKLOAD_DIR)/pageload.wk" ] || [ ! -f "$(WORKLOAD_DIR)/http2_mux_rr.wk" ] || [ ! -f "$(WORKLOAD_DIR)/http2_mux_srpt.wk" ]; then \
 		python3 "$(SCRIPTS_DIR)/data/gen_workloads.py" --out-dir "$(WORKLOAD_DIR)"; \
 	fi
 	@if [ ! -f "$(WORKLOAD_DIR)/app.wk" ]; then \

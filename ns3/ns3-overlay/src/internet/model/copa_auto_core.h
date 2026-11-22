@@ -21,7 +21,7 @@
 #define COPA_DRAIN_SKIP_US     10000000ULL /* 10 s */
 #define COPA_DELTA_MIN_Q20     1049U       /* 0.001 * 2^20 */
 #define COPA_DELTA_MAX_Q20     524288U     /* 0.5   * 2^20 */
-#define COPA_DELTA_INIT_Q20    41943U      /* 0.04  * 2^20 */
+#define COPA_DELTA_INIT_Q20    524288U     /* 0.50  * 2^20 (safe Copa default; adapts down on jitter) */
 #define COPA_MAX_STEP_Q16      (2LL * COPA_LN2_Q16) /* ln(4) in Q16 */
 #define COPA_FAR_RATIO_Q16     26573LL     /* ln(1.5) in Q16 */
 
@@ -223,14 +223,20 @@ struct copa_auto_state {
     u64 drain_saved_rate_bps;
     u64 drain_soft_cwnd_q10;
     u64 drain_rate_bps;
+    u64 drain_rate_init_bps;
+    bool drain_rate_dropped;
     u64 drain_rtt_min_start_us;
     u64 drain_trusted_start_us;
     bool drain_trusted_verified;
     bool drain_hold_full;
     u64 drain_min_rtt_us;
+    u64 drain_round_min_rtt_us;
     u64 drain_round_start_us;
     u64 drain_prev_min_rtt_us;
+    u64 drain_prev_cum_min_us;
     u32 drain_flat_rounds;
+    u32 drain_no_drop_rounds;
+    u32 drain_rise_rounds;
     bool drain_congested;
     u64 drain_probe_dq_sum_us;
     u64 drain_probe_acks;
@@ -239,6 +245,9 @@ struct copa_auto_state {
     u64 loaded_since_us;
     u64 last_loaded_ack_us;
     u64 passive_j_at_us;
+    u64 app_cong_since_us;
+    u64 min_cwnd_since_us;
+    u64 last_floor_refresh_us;
     u64 low_window_us, low_min_us;
     u32 low_samples, low_windows, raised_windows;
     u64 raised_min_us, low_dq_sum_us;
@@ -589,9 +598,13 @@ static inline void copa_update_delta(struct copa_auto_state *ca,
     {
         bool update_ratio = true;
         if (ca->ratio_us == 0) {
-            if (rho_milli == 50 || rho_milli == 980) {
-                /* Conservative prior so delta still adapts instead of freezing */
+            if (rho_milli == 50) {
+                /* Conservative prior when link appears starved so delta can adapt down */
                 ratio_us = max_t(u64, rtt_min_us / 20, 500ULL);
+                update_ratio = false;
+            } else if (rho_milli == 980) {
+                /* Link is already saturated: k_us is an upper bound on true k; never inflate it */
+                ratio_us = min_t(u64, k_us, max_t(u64, rtt_min_us / 20, 500ULL));
                 update_ratio = false;
             } else if (!ca->pending_k_us) {
                 ca->pending_k_us = k_us;
@@ -645,11 +658,14 @@ static inline void copa_update_delta(struct copa_auto_state *ca,
         err_q16 = clamp_t(s64, err_q16, -COPA_MAX_STEP_Q16, COPA_MAX_STEP_Q16);
 
         if (err_q16 < 0) {
-            /* Additive increase of 1/delta (AIMD on 1/delta) */
+            /* Additive increase of 1/delta (AIMD on 1/delta), bounded by symmetric
+             * multiplicative step exp(0.5 * err) so large delta never crashes 5-10x in one segment. */
             u64 far_frac_milli = 0;
             u64 slope_milli = 10000ULL; /* fair_increase = 10.0 */
             u64 inv_delta_q10;
             u64 add_q10;
+            u32 aimd_delta_q20;
+            u32 mult_delta_q20;
 
             if (bdp_pkts > 30)
                 far_frac_milli = min_t(u64, div64_u64((bdp_pkts - 30) * 1000ULL, 170ULL), 1000ULL);
@@ -661,7 +677,10 @@ static inline void copa_update_delta(struct copa_auto_state *ca,
             /* -slope * err in Q10 = (slope_milli * (-err_q16)) / (1000 * 64) */
             add_q10 = div64_u64(slope_milli * (u64)(-err_q16), 64000ULL);
             inv_delta_q10 += add_q10;
-            next_delta_q20 = (u32)div64_u64(1ULL << 30, max_t(u64, inv_delta_q10, 1ULL));
+            aimd_delta_q20 = (u32)div64_u64(1ULL << 30, max_t(u64, inv_delta_q10, 1ULL));
+            step_q16 = err_q16 >> 1; /* negative, bounded by -ln(2) since err >= -ln(4) */
+            mult_delta_q20 = (u32)(((u64)base_delta_q20 * copa_exp_q16(step_q16)) >> COPA_Q16_SHIFT);
+            next_delta_q20 = max_t(u32, aimd_delta_q20, mult_delta_q20);
         } else {
             /* Multiplicative increase of delta (gain = 0.50) */
             step_q16 = err_q16 >> 1;
@@ -717,6 +736,17 @@ static inline void copa_finish_drain(struct copa_auto_state *ca,
         copa_minmax_reset(&ca->rtt_min, now_us, new_base);
         ca->floor_shift_streak = 0;
         ca->handover_drain_pending = false;
+        ca->last_nearly_empty_us = now_us;
+        ca->min_cwnd_since_us = 0;
+        ca->last_floor_refresh_us = 0;
+        ca->pending_k_us = 0;
+        ca->ratio_us = 0;
+        ca->delta_run_q20 = ca->cfg.init_delta_q20;
+        ca->dq_target_us = 0;
+        ca->startup_delta_q20 = 0;
+        ca->rounds -= ca->rounds % 8;
+        copa_reset_segment(ca);
+        ca->settle_halves = 2;
         if (copa_fixed_jitter(&ca->cfg)) {
             ca->has_jitter = true;
             ca->jitter_us = copa_fixed_jitter_us(&ca->cfg);
@@ -726,13 +756,18 @@ static inline void copa_finish_drain(struct copa_auto_state *ca,
     ca->trusted_min_us = new_base;
 
     if (ca->drain_kind == COPA_DRAIN_MEASURE_J) {
-        if (ca->drain_probe_acks > 0 && !ca->drain_congested) {
+        if (ca->drain_probe_acks > 0 && !ca->drain_congested &&
+            !(ca->drain_has_slot && ca->drain_rate_dropped)) {
             u64 mean_dq = div64_u64(ca->drain_probe_dq_sum_us, ca->drain_probe_acks);
             if (ca->drain_flat_rounds >= 2 &&
-                ca->drain_min_rtt_us > rtt_min_us &&
-                (ca->drain_min_rtt_us - rtt_min_us) > shift_thresh) {
+                ca->drain_min_rtt_us > rtt_min_us) {
                 u64 shift = ca->drain_min_rtt_us - rtt_min_us;
-                mean_dq = (mean_dq > shift) ? (mean_dq - shift) : 0;
+                u64 bw_est = copa_bw_estimate(ca, now_us, srtt_us);
+                u64 pkt_us = (bw_est > 0 && mss > 0)
+                                 ? div64_u64((u64)mss * 1000000ULL, bw_est)
+                                 : 0;
+                if (shift >= 2000ULL && pkt_us > 0 && shift <= 4ULL * pkt_us + 1000ULL)
+                    mean_dq = (mean_dq > shift) ? (mean_dq - shift) : 0;
             }
             /* Reject samples where queue clearly failed to drain (e.g. handover/outage backlog). */
             if (mean_dq <= max_t(u64, new_base, 30000ULL)) {
@@ -776,6 +811,12 @@ static inline void copa_finish_drain(struct copa_auto_state *ca,
             if (target_q10 < bdp_q10)
                 target_q10 = bdp_q10;
         }
+        if (ca->drain_rate_dropped) {
+            u64 cap_q10 = max_t(u64, (ca->drain_soft_cwnd_q10 * 5ULL) / 4ULL,
+                                (u64)COPA_MIN_CWND_PKTS << 10);
+            if (target_q10 > cap_q10)
+                target_q10 = cap_q10;
+        }
         if (target_q10 > ca->cwnd_q10) {
             ca->cwnd_q10 = clamp_t(u64, target_q10,
                                    (u64)COPA_MIN_CWND_PKTS << 10,
@@ -786,9 +827,15 @@ static inline void copa_finish_drain(struct copa_auto_state *ca,
 
     if (ca->drain_saved_rate_bps > 0 && srtt_us > 0 &&
         srtt_us <= 4 * max_t(u64, ca->standing_us, 1000)) {
+        u64 rec_cap = ca->drain_saved_rate_bps;
+        if (ca->drain_rate_dropped && ca->drain_rate_bps > 0) {
+            u64 live_cap = (ca->drain_rate_bps * 130ULL) / 100ULL;
+            if (live_cap < rec_cap)
+                rec_cap = live_cap;
+        }
         ca->drain_phase = COPA_PHASE_RECOVERING;
         ca->recover_until_us = now_us + srtt_us;
-        ca->recover_rate_cap_bps = ca->drain_saved_rate_bps;
+        ca->recover_rate_cap_bps = rec_cap;
     } else {
         ca->drain_phase = COPA_PHASE_NORMAL;
     }
@@ -815,7 +862,8 @@ static inline void copa_start_drain(struct copa_auto_state *ca,
     u64 min_bytes = (u64)COPA_MIN_CWND_PKTS * mss;
     u64 eff_bw = bw > 0 ? min_t(u64, bw, (cwnd_rate * 3) / 2) : cwnd_rate;
     u64 min_rate = div64_u64(min_bytes * 1000000ULL, max_t(u64, srtt_us, 10000ULL));
-    u64 gain_pct = (kind == COPA_DRAIN_MEASURE_J) ? 78ULL : (dq_us > 20000ULL ? 75ULL : 85ULL);
+    u64 gain_pct = (kind == COPA_DRAIN_MEASURE_J) ? 68ULL : (dq_us > 20000ULL ? 75ULL : 85ULL);
+    u64 soft_pct = (kind == COPA_DRAIN_MEASURE_J) ? 80ULL : 90ULL;
     u64 bdp_bytes, soft_q10, dl;
 
     if (eff_bw < div64_u64(min_bytes * 1000000ULL, stand))
@@ -824,12 +872,19 @@ static inline void copa_start_drain(struct copa_auto_state *ca,
     ca->drain_saved_rate_bps = copa_pacing_rate_bps(ca, mss, now_us);
     ca->drain_saved_cwnd_q10 = ca->cwnd_q10;
     ca->drain_rate_bps = max_t(u64, (eff_bw * gain_pct) / 100ULL, min_rate);
+    if (kind == COPA_DRAIN_REFRESH_RTT &&
+        ca->cwnd_q10 <= (((u64)COPA_MIN_CWND_PKTS + 1ULL) << 10) &&
+        cwnd_rate > ca->drain_rate_bps) {
+        ca->drain_rate_bps = cwnd_rate;
+    }
+    ca->drain_rate_init_bps = ca->drain_rate_bps;
+    ca->drain_rate_dropped = false;
     bdp_bytes = div64_u64(eff_bw * trusted, 1000000ULL);
-    soft_q10 = div64_u64((bdp_bytes * 9) / 10, max_t(u32, mss, 1U)) << 10;
+    soft_q10 = div64_u64((bdp_bytes * soft_pct) / 100ULL, max_t(u32, mss, 1U)) << 10;
     ca->drain_soft_cwnd_q10 = min_t(u64, max_t(u64, soft_q10, (u64)COPA_MIN_CWND_PKTS << 10), ca->cwnd_q10);
 
     if (kind == COPA_DRAIN_REFRESH_RTT) {
-        dl = max_t(u64, max_t(u64, max_dur_us, 150000ULL), max_t(u64, 4ULL * srtt_us, 2ULL * dq_us + srtt_us));
+        dl = max_t(u64, max_t(u64, max_dur_us, 250000ULL), max_t(u64, 6ULL * srtt_us, 2ULL * dq_us + 2ULL * srtt_us));
     } else {
         dl = max_t(u64, max_dur_us, 4ULL * srtt_us);
     }
@@ -847,9 +902,13 @@ static inline void copa_start_drain(struct copa_auto_state *ca,
     ca->drain_trusted_verified = (ca->trusted_min_us > 0);
     ca->drain_hold_full = hold_full;
     ca->drain_min_rtt_us = 0;
+    ca->drain_round_min_rtt_us = 0;
     ca->drain_round_start_us = now_us;
     ca->drain_prev_min_rtt_us = 0;
+    ca->drain_prev_cum_min_us = 0;
     ca->drain_flat_rounds = 0;
+    ca->drain_no_drop_rounds = 0;
+    ca->drain_rise_rounds = 0;
     ca->drain_congested = false;
     ca->drain_probe_dq_sum_us = 0;
     ca->drain_probe_acks = 0;
@@ -875,6 +934,17 @@ static inline void copa_on_loss(struct copa_auto_state *ca, u64 now_us, bool per
         ca->low_samples = 0;
         ca->seg_probe = true;
         ca->drain_phase = COPA_PHASE_NORMAL;
+        ca->mode = COPA_MODE_DEFAULT;
+        ca->competitive = false;
+        ca->last_nearly_empty_us = now_us;
+        if (ca->cfg.adaptive) {
+            ca->handover_drain_pending = true;
+            ca->pending_k_us = 0;
+            ca->ratio_us = 0;
+            ca->delta_run_q20 = 0;
+            ca->dq_target_us = 0;
+            ca->startup_delta_q20 = 0;
+        }
         ca->cwnd_q10 = (u64)COPA_MIN_CWND_PKTS << 10;
         ca->slow_start = true;
         ca->ss_confirm_since_us = 0;
@@ -1026,7 +1096,7 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
 {
     u64 prev_time = ca->last_time_us;
     u64 idle_thresh = max_t(u64, 4ULL * max_t(u64, srtt_us, 10000ULL), 300000ULL);
-    u64 min_rtt_win, rtt_min_us, standing_us, dq_us, bw, bdp_pkts;
+    u64 min_rtt_win, win_rtt_min_us, rtt_min_us, standing_us, dq_us, bw, bdp_pkts;
     bool recent_app_limited, holding, excluded, increase;
 
     if (now_us > ca->last_time_us)
@@ -1044,6 +1114,17 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
             ca->loaded_since_us = 0;
             ca->low_samples = 0;
             ca->seg_probe = true;
+            if (now_us - prev_time >= 500000ULL && !ca->last_ack_app_limited && !app_limited) {
+                ca->mode = COPA_MODE_DEFAULT;
+                ca->competitive = false;
+                ca->last_nearly_empty_us = now_us;
+                ca->handover_drain_pending = true;
+                ca->pending_k_us = 0;
+                ca->ratio_us = 0;
+                ca->delta_run_q20 = 0;
+                ca->dq_target_us = 0;
+                ca->startup_delta_q20 = 0;
+            }
         }
         if (!rtt_sample_us || (ca->valid_after_us &&
             rtt_sample_us > now_us - ca->valid_after_us))
@@ -1054,7 +1135,7 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
          * a bulk transfer keeps the bottleneck busy across many RTTs. */
         if (srtt_us > 4 * rtt_sample_us ||
             (ca->last_loaded_ack_us && now_us - ca->last_loaded_ack_us >
-             max_t(u64, 2 * ca->trusted_min_us, 50000))) {
+             max_t(u64, 2 * max_t(u64, srtt_us, ca->trusted_min_us), 50000))) {
             ca->loaded_since_us = 0;
         }
         if (!app_limited && srtt_us <= 4 * rtt_sample_us) {
@@ -1113,9 +1194,8 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
                       ? clamp_t(u64, 32ULL * srtt_us, 1000000ULL, COPA_MIN_RTT_WIN_US)
                       : COPA_MIN_RTT_WIN_US;
 
-    rtt_min_us = copa_minmax_running_min(&ca->rtt_min, min_rtt_win, now_us, rtt_sample_us);
-    if (ca->cfg.adaptive)
-        rtt_min_us = ca->trusted_min_us;
+    win_rtt_min_us = copa_minmax_running_min(&ca->rtt_min, min_rtt_win, now_us, rtt_sample_us);
+    rtt_min_us = ca->cfg.adaptive ? ca->trusted_min_us : win_rtt_min_us;
     standing_us = copa_minmax_running_min(&ca->rtt_standing, max_t(u64, srtt_us / 2, 1000ULL),
                                           now_us, rtt_sample_us);
     copa_minmax_running_max(&ca->rtt_max, max_t(u64, 4ULL * srtt_us, 1000ULL),
@@ -1149,7 +1229,8 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
     }
 
     holding = (ca->drain_phase == COPA_PHASE_DRAINING) ||
-              (!ca->competitive && ca->cfg.adaptive && (ca->slow_start || ca->delta_run_q20 == 0));
+              (!ca->competitive && ca->cfg.adaptive &&
+               (ca->slow_start || (ca->delta_run_q20 == 0 && ca->last_floor_refresh_us == 0)));
     if (holding)
         ca->last_nearly_empty_us = now_us;
     else
@@ -1226,9 +1307,13 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
         ca->round_deliv_bytes += (u64)acked_pkts * (u64)mss;
         if (ca->round_min_rtt_us == 0 || rtt_sample_us < ca->round_min_rtt_us)
             ca->round_min_rtt_us = rtt_sample_us;
-        if (ca->has_jitter &&
-            rtt_sample_us <= rtt_min_us + ca->jitter_us + COPA_IDLE_MARGIN_US) {
-            ca->round_idle++;
+        if (ca->has_jitter) {
+            u64 pkt_time_us = (bdp_pkts > 1) ? div64_u64(rtt_min_us, bdp_pkts) : COPA_IDLE_MARGIN_US;
+            u64 idle_margin = (ca->jitter_us >= 1000ULL)
+                                  ? clamp_t(u64, pkt_time_us, 300ULL, COPA_IDLE_MARGIN_US)
+                                  : COPA_IDLE_MARGIN_US;
+            if (rtt_sample_us <= rtt_min_us + ca->jitter_us + idle_margin)
+                ca->round_idle++;
         }
 
         if (now_us >= ca->round_start_us + srtt_us && ca->round_acks >= 2) {
@@ -1314,27 +1399,96 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
     }
 
     if (!ca->competitive) {
-        u32 fb = (ca->slow_start || ca->startup_delta_q20 == 0) ? ca->cfg.init_delta_q20 : ca->startup_delta_q20;
-        ca->delta_q20 = (ca->cfg.adaptive && ca->delta_run_q20 > 0) ? ca->delta_run_q20 : fb;
+        if (ca->cfg.adaptive && ca->has_jitter && ca->jitter_us >= 2500ULL && ca->delta_run_q20 == 0) {
+            /* Analytical unstarved delta ceiling: (R0 + j) / (BDP * j).
+             * On high-jitter links (LEO/cellular) this prevents starvation before AutoDelta
+             * completes its first 8-round segment (and across short app-limited RPCs),
+             * while remaining clamped to init_delta (0.50) on clean wired links. */
+            u64 eff_bdp = bdp_pkts;
+            if (ca->jitter_us >= 4000ULL && (ca->last_ack_app_limited || bdp_pkts >= 6ULL) && eff_bdp < 48ULL)
+                eff_bdp = 48ULL;
+            if (eff_bdp >= 10ULL) {
+                u64 sd = div64_u64((rtt_min_us + ca->jitter_us) << 20, eff_bdp * ca->jitter_us);
+                u32 sd_clamped = clamp_t(u32, (u32)min_t(u64, sd, (u64)ca->cfg.init_delta_q20),
+                                         20972U, ca->cfg.init_delta_q20);
+                if (ca->startup_delta_q20 == 0 || sd_clamped < ca->startup_delta_q20)
+                    ca->startup_delta_q20 = sd_clamped;
+            }
+        }
+        {
+            u32 fb = (ca->startup_delta_q20 > 0) ? ca->startup_delta_q20 : ca->cfg.init_delta_q20;
+            ca->delta_q20 = (ca->cfg.adaptive && ca->delta_run_q20 > 0) ? ca->delta_run_q20 : fb;
+        }
 
         /* Drive DrainController */
         if (ca->cfg.adaptive) {
             if (ca->drain_phase == COPA_PHASE_DRAINING) {
                 u64 elapsed = (now_us > ca->drain_start_us) ? (now_us - ca->drain_start_us) : 0;
-                u64 min_hold = max_t(u64, srtt_us, 20000ULL);
+                u64 min_hold = (ca->drain_kind == COPA_DRAIN_MEASURE_J)
+                                   ? max_t(u64, srtt_us, 35000ULL)
+                                   : max_t(u64, srtt_us, 20000ULL);
                 bool sampling, done;
+
+                /* Track live delivery-rate drops during drain only when queue is clearly
+                 * backed up and the network delivers strictly <85% of our drain pacing
+                 * rate (genuine mid-drain capacity drop; prevents pacing-jitter self-decay). */
+                if (ca->drain_idle_at_us == 0 && rate_bps > 0 &&
+                    rate_bps * 100ULL < ca->drain_rate_bps * 85ULL &&
+                    dq_us > max_t(u64, ca->jitter_us + 8000ULL, 10000ULL)) {
+                    u64 live_gain = (ca->drain_kind == COPA_DRAIN_MEASURE_J) ? 75ULL : 85ULL;
+                    u64 min_bytes = (u64)COPA_MIN_CWND_PKTS * mss;
+                    u64 min_rate = div64_u64(min_bytes * 1000000ULL, max_t(u64, srtt_us, 10000ULL));
+                    u64 live_rate = max_t(u64, (rate_bps * live_gain) / 100ULL, min_rate);
+                    if (live_rate < ca->drain_rate_bps) {
+                        ca->drain_rate_bps = live_rate;
+                        if (ca->drain_rate_init_bps > 0 && live_rate * 10ULL < ca->drain_rate_init_bps * 8ULL)
+                            ca->drain_rate_dropped = true;
+                    }
+                    if (mss > 0 && ca->drain_trusted_start_us > 0) {
+                        u64 live_soft_q10 = div64_u64((rate_bps * ca->drain_trusted_start_us * 85ULL) / 100ULL,
+                                                      1000000ULL * mss) << 10;
+                        live_soft_q10 = max_t(u64, live_soft_q10, (u64)COPA_MIN_CWND_PKTS << 10);
+                        if (live_soft_q10 < ca->drain_soft_cwnd_q10)
+                            ca->drain_soft_cwnd_q10 = live_soft_q10;
+                    }
+                }
 
                 if (ca->drain_min_rtt_us == 0 || rtt_sample_us < ca->drain_min_rtt_us)
                     ca->drain_min_rtt_us = rtt_sample_us;
+                if (ca->drain_round_min_rtt_us == 0 || rtt_sample_us < ca->drain_round_min_rtt_us)
+                    ca->drain_round_min_rtt_us = rtt_sample_us;
                 if (now_us >= ca->drain_round_start_us + max_t(u64, srtt_us, 10000ULL)) {
-                    if (ca->drain_prev_min_rtt_us > 0) {
-                        u64 tol = max_t(u64, 1000ULL, ca->drain_min_rtt_us / 50);
-                        if (ca->drain_prev_min_rtt_us <= ca->drain_min_rtt_us + tol)
-                            ca->drain_flat_rounds++;
-                        else
-                            ca->drain_flat_rounds = 0;
+                    if (ca->drain_round_min_rtt_us > 0) {
+                        if (ca->drain_prev_min_rtt_us > 0) {
+                            u64 diff = (ca->drain_prev_min_rtt_us > ca->drain_round_min_rtt_us)
+                                           ? (ca->drain_prev_min_rtt_us - ca->drain_round_min_rtt_us)
+                                           : (ca->drain_round_min_rtt_us - ca->drain_prev_min_rtt_us);
+                            u64 tol = (ca->drain_kind == COPA_DRAIN_REFRESH_RTT)
+                                          ? max_t(u64, max_t(u64, 2000ULL, ca->jitter_us + 2000ULL),
+                                                  ca->drain_round_min_rtt_us / 15ULL)
+                                          : max_t(u64, 1000ULL, ca->drain_round_min_rtt_us / 50ULL);
+                            if (diff <= tol)
+                                ca->drain_flat_rounds++;
+                            else
+                                ca->drain_flat_rounds = 0;
+                            if (ca->drain_round_min_rtt_us >
+                                ca->drain_prev_min_rtt_us + max_t(u64, 1000ULL, ca->drain_prev_min_rtt_us / 50ULL))
+                                ca->drain_rise_rounds++;
+                            else
+                                ca->drain_rise_rounds = 0;
+                        }
+                        if (ca->drain_prev_cum_min_us > 0) {
+                            u64 cum_tol = max_t(u64, 1000ULL, ca->drain_min_rtt_us / 20ULL);
+                            if (ca->drain_prev_cum_min_us <= ca->drain_min_rtt_us + cum_tol &&
+                                ca->drain_rise_rounds < 2)
+                                ca->drain_no_drop_rounds++;
+                            else
+                                ca->drain_no_drop_rounds = 0;
+                        }
+                        ca->drain_prev_cum_min_us = ca->drain_min_rtt_us;
+                        ca->drain_prev_min_rtt_us = ca->drain_round_min_rtt_us;
+                        ca->drain_round_min_rtt_us = 0;
                     }
-                    ca->drain_prev_min_rtt_us = ca->drain_min_rtt_us;
                     ca->drain_round_start_us = now_us;
                 }
                 if (ca->drain_idle_at_us == 0 && elapsed >= min_hold) {
@@ -1342,7 +1496,10 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
                     u64 btol = max_t(u64, 1000ULL, ca->drain_trusted_start_us / 20);
                     bool back = ca->drain_trusted_verified &&
                                 standing_us <= ca->drain_trusted_start_us + j + btol;
-                    bool plat = elapsed >= 2ULL * srtt_us && ca->drain_flat_rounds >= 2;
+                    bool plat = elapsed >= 2ULL * srtt_us &&
+                                ((ca->drain_kind == COPA_DRAIN_MEASURE_J)
+                                     ? (ca->drain_no_drop_rounds >= 2)
+                                     : (ca->drain_flat_rounds >= 2));
                     if (back || plat) {
                         ca->drain_idle_at_us = now_us;
                         if (ca->drain_kind == COPA_DRAIN_MEASURE_J && !ca->drain_hold_full) {
@@ -1374,58 +1531,81 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
                     ca->cwnd_q10 = max_t(u64, ca->cwnd_q10, (u64)COPA_MIN_CWND_PKTS << 10);
                     return (u32)(ca->cwnd_q10 >> 10);
                 }
-            } else if (ca->drain_phase == COPA_PHASE_NORMAL && !app_limited && ca->loaded_since_us &&
-                       now_us - ca->loaded_since_us >= max_t(u64, 3 * srtt_us, 200000) &&
-                       (!ca->passive_j_at_us || now_us - ca->passive_j_at_us >= COPA_DRAIN_SKIP_US)) {
-                if (ca->handover_drain_pending) {
+            } else if (ca->drain_phase == COPA_PHASE_NORMAL && !app_limited && ca->loaded_since_us) {
+                /* If cwnd has drained to the floor yet RTT remains persistently elevated,
+                 * verify whether base RTT rose (handover/reroute) before TCPCOOP triggers. */
+                if (!copa_fixed_jitter(&ca->cfg) && !ca->slow_start) {
+                    u64 shift_thresh = max_t(u64, 5000ULL, (rtt_min_us * 15ULL) / 100ULL);
+                    bool at_min_cwnd = ca->cwnd_q10 <= (((u64)COPA_MIN_CWND_PKTS + 1ULL) << 10);
+                    bool high_floor = standing_us > rtt_min_us + ca->jitter_us + shift_thresh;
+                    bool win_shifted = win_rtt_min_us > rtt_min_us + max_t(u64, shift_thresh, 10000ULL);
+                    if ((at_min_cwnd && high_floor) || win_shifted) {
+                        if (ca->min_cwnd_since_us == 0)
+                            ca->min_cwnd_since_us = now_us;
+                        if (now_us >= ca->min_cwnd_since_us + 2ULL * max_t(u64, srtt_us, 10000ULL) &&
+                            (ca->last_floor_refresh_us == 0 ||
+                             now_us >= ca->last_floor_refresh_us + 10000000ULL)) {
+                            ca->handover_drain_pending = true;
+                            ca->last_floor_refresh_us = now_us;
+                            ca->min_cwnd_since_us = 0;
+                        }
+                    } else {
+                        ca->min_cwnd_since_us = 0;
+                    }
+                }
+                if (ca->handover_drain_pending &&
+                    now_us - ca->loaded_since_us >= max_t(u64, 2ULL * srtt_us, 80000ULL)) {
                     ca->handover_drain_pending = false;
                     copa_start_drain(ca, COPA_DRAIN_REFRESH_RTT, false, 0,
                                      now_us, srtt_us, rtt_min_us, standing_us, dq_us,
-                                     mss, max_t(u64, 3ULL * srtt_us, 120000ULL), false);
+                                     mss, max_t(u64, 6ULL * srtt_us, 250000ULL), false);
                     return (u32)(ca->cwnd_q10 >> 10);
                 }
-                bool severe_backlog = dq_us > max_t(u64, rtt_min_us * 2ULL, 40000ULL);
-                if (!copa_fixed_jitter(&ca->cfg) && !ca->slow_start && !ca->first_probe_done &&
-                    !severe_backlog) {
-                    u64 max_dur = clamp_t(u64, 4ULL * srtt_us, 120000ULL, 350000ULL);
-                    copa_start_drain(ca, COPA_DRAIN_MEASURE_J, false, 0,
-                                     now_us, srtt_us, rtt_min_us, standing_us, dq_us,
-                                     mss, max_dur, false);
-                    return (u32)(ca->cwnd_q10 >> 10);
-                }
-                if (!copa_fixed_jitter(&ca->cfg) && !ca->slow_start && ca->first_probe_done) {
-                    u64 slot = div64_u64(now_us, COPA_PROBE_PERIOD_US);
-                    u64 phase = now_us - slot * COPA_PROBE_PERIOD_US;
-                    if (!severe_backlog &&
-                        (!ca->has_evaluated_slot || ca->evaluated_slot != slot) &&
-                        ca->has_probing_slot && ca->probing_slot == slot &&
-                        phase < ca->slot_duration_us) {
-                        bool hold_full = ca->slot_duration_us > copa_wanted_probe_dur(srtt_us) + 1000ULL;
-                        ca->evaluated_slot = slot;
-                        ca->has_evaluated_slot = true;
-                        copa_start_drain(ca, COPA_DRAIN_MEASURE_J, true, slot,
+                if (now_us - ca->loaded_since_us >= max_t(u64, 3 * srtt_us, 200000) &&
+                    (!ca->passive_j_at_us || now_us - ca->passive_j_at_us >= COPA_DRAIN_SKIP_US)) {
+                    bool severe_backlog = dq_us > max_t(u64, rtt_min_us * 2ULL, 40000ULL);
+                    if (!copa_fixed_jitter(&ca->cfg) && !ca->slow_start && !ca->first_probe_done &&
+                        !severe_backlog) {
+                        u64 max_dur = clamp_t(u64, 6ULL * srtt_us, 180000ULL, 350000ULL);
+                        copa_start_drain(ca, COPA_DRAIN_MEASURE_J, false, 0,
                                          now_us, srtt_us, rtt_min_us, standing_us, dq_us,
-                                         mss, ca->slot_duration_us, hold_full);
+                                         mss, max_dur, false);
                         return (u32)(ca->cwnd_q10 >> 10);
                     }
-                    if ((!ca->has_evaluated_slot || ca->evaluated_slot != slot) &&
-                        ca->has_decided_slot && ca->decided_slot == slot &&
-                        phase < ca->slot_duration_us &&
-                        (!ca->has_probing_slot || ca->probing_slot != slot)) {
-                        bool board_req = ca->board && (ca->board->drain_requests[slot & 3] == slot + 1);
-                        bool skip_idle = ca->last_app_idle_us > 0 &&
-                                         now_us < ca->last_app_idle_us + COPA_DRAIN_SKIP_US;
-                        bool drifted = (ca->trusted_min_us == 0) ||
-                                       (rtt_min_us > ca->trusted_min_us + max_t(u64, 1000ULL, ca->trusted_min_us / 50));
-                        ca->evaluated_slot = slot;
-                        ca->has_evaluated_slot = true;
-                        if (board_req || (slot >= ca->next_drain_slot && !skip_idle && drifted)) {
-                            if (ca->board && ca->board->drain_requests[slot & 3] < slot + 1)
-                                ca->board->drain_requests[slot & 3] = slot + 1;
-                            copa_start_drain(ca, COPA_DRAIN_REFRESH_RTT, true, slot,
+                    if (!copa_fixed_jitter(&ca->cfg) && !ca->slow_start && ca->first_probe_done) {
+                        u64 slot = div64_u64(now_us, COPA_PROBE_PERIOD_US);
+                        u64 phase = now_us - slot * COPA_PROBE_PERIOD_US;
+                        if (!severe_backlog &&
+                            (!ca->has_evaluated_slot || ca->evaluated_slot != slot) &&
+                            ca->has_probing_slot && ca->probing_slot == slot &&
+                            phase < ca->slot_duration_us) {
+                            bool hold_full = ca->slot_duration_us > copa_wanted_probe_dur(srtt_us) + 1000ULL;
+                            ca->evaluated_slot = slot;
+                            ca->has_evaluated_slot = true;
+                            copa_start_drain(ca, COPA_DRAIN_MEASURE_J, true, slot,
                                              now_us, srtt_us, rtt_min_us, standing_us, dq_us,
-                                             mss, 50000ULL, false);
+                                             mss, ca->slot_duration_us, hold_full);
                             return (u32)(ca->cwnd_q10 >> 10);
+                        }
+                        if ((!ca->has_evaluated_slot || ca->evaluated_slot != slot) &&
+                            ca->has_decided_slot && ca->decided_slot == slot &&
+                            phase < ca->slot_duration_us &&
+                            (!ca->has_probing_slot || ca->probing_slot != slot)) {
+                            bool board_req = ca->board && (ca->board->drain_requests[slot & 3] == slot + 1);
+                            bool skip_idle = ca->last_app_idle_us > 0 &&
+                                             now_us < ca->last_app_idle_us + COPA_DRAIN_SKIP_US;
+                            bool drifted = (ca->trusted_min_us == 0) ||
+                                           (win_rtt_min_us > ca->trusted_min_us + max_t(u64, 1000ULL, ca->trusted_min_us / 50));
+                            ca->evaluated_slot = slot;
+                            ca->has_evaluated_slot = true;
+                            if (board_req || (slot >= ca->next_drain_slot && !skip_idle && drifted)) {
+                                if (ca->board && ca->board->drain_requests[slot & 3] < slot + 1)
+                                    ca->board->drain_requests[slot & 3] = slot + 1;
+                                copa_start_drain(ca, COPA_DRAIN_REFRESH_RTT, true, slot,
+                                                 now_us, srtt_us, rtt_min_us, standing_us, dq_us,
+                                                 mss, 50000ULL, false);
+                                return (u32)(ca->cwnd_q10 >> 10);
+                            }
                         }
                     }
                 }
@@ -1474,13 +1654,28 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
     }
 
     if (app_limited) {
-        if (increase)
+        if (increase) {
+            ca->app_cong_since_us = 0;
             return (u32)(ca->cwnd_q10 >> 10);
+        }
         if (ca->cfg.adaptive) {
             u64 max_tail = max_t(u64, max_t(u64, 2ULL * ca->dq_target_us, rtt_min_us / 2), 30000ULL);
-            if (dq_us <= max_tail)
+            u64 app_ok = ca->dq_target_us > 0
+                             ? max_t(u64, (ca->dq_target_us * 3ULL) / 2ULL, ca->jitter_us + 2000ULL)
+                             : max_t(u64, ca->jitter_us + 2000ULL, min_t(u64, rtt_min_us / 6ULL, 10000ULL));
+            if (dq_us <= app_ok) {
+                ca->app_cong_since_us = 0;
                 return (u32)(ca->cwnd_q10 >> 10);
+            }
+            if (dq_us <= max_tail) {
+                if (ca->app_cong_since_us == 0)
+                    ca->app_cong_since_us = now_us;
+                if (now_us < ca->app_cong_since_us + 2ULL * max_t(u64, srtt_us, 10000ULL))
+                    return (u32)(ca->cwnd_q10 >> 10);
+            }
         }
+    } else {
+        ca->app_cong_since_us = 0;
     }
 
     /* Velocity update (Paper rule, once per SRTT) */
@@ -1540,10 +1735,6 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
                     return (u32)(ca->cwnd_q10 >> 10);
             }
             ca->ss_confirm_since_us = 0;
-            if (ca->startup_delta_q20 == 0 && bdp_pkts > 60) {
-                u32 sd = (u32)div64_u64(6ULL << 20, bdp_pkts);
-                ca->startup_delta_q20 = clamp_t(u32, sd, 5243U, ca->cfg.init_delta_q20);
-            }
         }
         ca->slow_start = false;
         {
