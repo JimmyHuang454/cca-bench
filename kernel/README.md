@@ -35,7 +35,7 @@ sysctl net.ipv4.tcp_available_congestion_control
 | `measurement_rtts` | `16` | `copa_auto_v2` 的测量周期（1～256 SRTT，加载 `tcp_copa_auto.ko` 时设置） |
 | `repeats` | `1` | 每个配置的重复次数 |
 | `max_bulk_s` | `0` | Bulk 最大运行秒数（`0` 表示按 `lines` 全长运行；如对 800s 的 `lumos` 可填 `120` 截断） |
-| `workload_timeout_s` | `300` | 单个 workload 的最大实际运行秒数，超时或未完成全部请求按 `timeout` 计 0 分 |
+| `workload_timeout_s` | `600` | 单个 workload 的最大实际运行秒数（`slow_uplink` 1 Mbps 跑完 `app.wk` 约需 500s），超时或未完成全部请求按 `timeout` 计 0 分 |
 | `max_shards` | `8` | 最大并发 GitHub Actions runner 数（每台 runner 固定 `parallel=1` 以避免 Mahimahi 调度抖动） |
 
 ### 方向映射与延迟回放语义

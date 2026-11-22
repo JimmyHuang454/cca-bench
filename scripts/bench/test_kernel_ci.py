@@ -173,15 +173,16 @@ class KernelCiTests(unittest.TestCase):
                     '0 # 1500\n0 - 1500 5\n1000 # 1500000\n1000 - 1350000 10\n',
                     encoding='utf-8',
                 )
-                if not allow_timeout:
+                if not allow_timeout or 'tiny' in expected_out.name:
                     if 'slow_cc' in mm_cmd[-1]:
-                        # Simulate timeout with 1/2 requests completed
+                        # Simulate timeout via marker file (bash exits 0 so mm-link doesn't mask 124 as 1)
+                        out_dir.joinpath('scene__q500000__tiny__slow_cc__r1.timeout').touch()
                         expected_out.write_text(
                             'id,size,client_send,server_recv,client_recv,rct\n'
                             '1,15000,1000000000,1010000000,1040000000,40.0\n',
                             encoding='utf-8',
                         )
-                        return subprocess.CompletedProcess(mm_cmd, 124, '', 'timed out')
+                        return subprocess.CompletedProcess(mm_cmd, 0, '', '')
                     expected_out.write_text(
                         'id,size,client_send,server_recv,client_recv,rct\n'
                         '1,15000,1000000000,1010000000,1040000000,40.0\n'

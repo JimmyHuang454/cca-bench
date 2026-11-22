@@ -21,7 +21,7 @@ on:
       kernel_ccs:
         description: "Linux congestion controls, comma-separated"
         type: string
-        default: "copa_auto_v2,copa_auto_nc,mortise_copa,bbr,cubic"
+        default: "copa,copa_auto_nc,mortise_copa,bbr,cubic"
         required: true
       queues:
         description: "Mahimahi bottleneck queue per direction (e.g. 500KB, 150KB,2MB, infinite)"
@@ -46,7 +46,7 @@ on:
       workload_timeout_s:
         description: "Max wall-clock seconds per workload run (timeout scores 0)"
         type: string
-        default: "300"
+        default: "600"
         required: true
       max_shards:
         description: "Max parallel GitHub Actions runners"

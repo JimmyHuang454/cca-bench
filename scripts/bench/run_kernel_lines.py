@@ -211,7 +211,17 @@ def build_lines_plan(
         if not wk_path.is_file():
             raise ValueError(f'workload file not found: {wk_path}')
         count, span_s = load_workload(wk_path)
-        work_info[wk] = {'path': str(wk_path.relative_to(root)), 'count': count, 'span_s': span_s}
+        total_bytes = sum(
+            int(line.split()[1])
+            for line in wk_path.read_text(encoding='utf-8').splitlines()
+            if line.strip() and not line.strip().startswith('#')
+        )
+        work_info[wk] = {
+            'path': str(wk_path.relative_to(root)),
+            'count': count,
+            'span_s': span_s,
+            'total_bytes': total_bytes,
+        }
 
     multiplier = len(ccs) * len(queues) * repeats
     units: list[dict] = []
@@ -222,7 +232,10 @@ def build_lines_plan(
                 est_s = max(eff_bulk_s, 10.0) * multiplier
             else:
                 span_s = work_info[wk]['span_s']
-                est_s = min(workload_timeout_s, max(span_s * 1.5, 45.0)) * multiplier
+                base_est = max(span_s * 1.5, 45.0)
+                if sc['name'] == 'slow_uplink':
+                    base_est = max(base_est, work_info[wk]['total_bytes'] * 8.0 / 1e6 * 1.1)
+                est_s = min(workload_timeout_s, base_est) * multiplier
             units.append({
                 'dataset': sc.get('dataset', dataset),
                 'scenario': sc['name'],
@@ -407,6 +420,8 @@ def evaluate_single_run(
     log_path = out_dir / f'{stem}.downlink.log'
     rct_path = out_dir / f'{stem}.rct.csv'
     err_path = out_dir / f'{stem}.err.log'
+    timeout_marker = out_dir / f'{stem}.timeout'
+    timeout_marker.unlink(missing_ok=True)
 
     row: dict = {
         'dataset': dataset_name,
@@ -472,14 +487,20 @@ def evaluate_single_run(
         row['requests_expected'] = expected_reqs
         timeout_secs = max(10, int(math.ceil(workload_timeout_s)))
 
+        # Mahimahi packetshell turns any non-zero child exit code (including timeout's 124)
+        # into exit status 1. Record timeout explicitly via a marker file so we can
+        # cleanly distinguish genuine timeouts from client crashes.
         client_cmd = (
             f'timeout -s INT -k 10 {timeout_secs} "{client_bin}" --connect "${{MAHIMAHI_BASE}}" '
-            f'--congestion "{kernel_cc}" --workload "{wk_path}" --output "{rct_path}"'
+            f'--congestion "{kernel_cc}" --workload "{wk_path}" --output "{rct_path}"; '
+            'status=$?; if [ "$status" -eq 124 ] || [ "$status" -eq 130 ] || '
+            '[ "$status" -eq 137 ] || [ "$status" -eq 143 ]; then '
+            f'touch "{timeout_marker}"; exit 0; fi; exit "$status"'
         )
         mm_cmd = build_mahimahi_command(conv, queue, log_path, client_cmd)
-        res = run_mm_cmd(mm_cmd, rct_path, log_path, allow_timeout=False)
+        res = run_mm_cmd(mm_cmd, rct_path, log_path, allow_timeout=True)
         elapsed_s = time.monotonic() - started
-        timed_out = res.returncode in (124, 130, 137, 143)
+        timed_out = timeout_marker.is_file() or res.returncode in (124, 130, 137, 143)
 
         link_stats = (
             eval_report.parse_downlink_log(log_path, min_rtt_ms=conv.base_rtt_ms_period, warmup_s=0.0)
@@ -540,6 +561,7 @@ def evaluate_single_run(
         })
         return row
     finally:
+        timeout_marker.unlink(missing_ok=True)
         if not keep_logs and log_path.is_file():
             log_path.unlink(missing_ok=True)
         if not keep_logs and workload_name == 'bulk' and rct_path.is_file():
@@ -630,7 +652,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     max_bulk_s = float(args.max_bulk_s if args.max_bulk_s is not None else (os.environ.get('MAX_BULK_S', '0') or '0'))
     workload_timeout_s = float(
         args.workload_timeout_s if args.workload_timeout_s is not None
-        else (os.environ.get('WORKLOAD_TIMEOUT_S', '300') or '300')
+        else (os.environ.get('WORKLOAD_TIMEOUT_S', '600') or '600')
     )
     bulk_warmup_s = float(
         args.bulk_warmup_s if args.bulk_warmup_s is not None else (os.environ.get('BULK_WARMUP_S', '0') or '0')
@@ -682,7 +704,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     max_bulk_s = float(args.max_bulk_s if args.max_bulk_s is not None else (os.environ.get('MAX_BULK_S', '0') or '0'))
     workload_timeout_s = float(
         args.workload_timeout_s if args.workload_timeout_s is not None
-        else (os.environ.get('WORKLOAD_TIMEOUT_S', '300') or '300')
+        else (os.environ.get('WORKLOAD_TIMEOUT_S', '600') or '600')
     )
     bulk_warmup_s = float(
         args.bulk_warmup_s if args.bulk_warmup_s is not None else (os.environ.get('BULK_WARMUP_S', '0') or '0')
