@@ -158,8 +158,8 @@ def cmd_patch_mortise(args: argparse.Namespace) -> int:
     for line in m.group(1).splitlines():
         if "cong_control" in line:
             print("Kernel cong_control signature:", line.strip())
+    bpf_c = bpf_dir / "mortise_copa.bpf.c"
     if re.search(r"\(\*cong_control\)\s*\([^)]*u32[^)]*int[^)]*rate_sample", m.group(1)):
-        bpf_c = bpf_dir / "mortise_copa.bpf.c"
         src = bpf_c.read_text(encoding="utf-8")
         old = "BPF_PROG(bpf_copa_main, struct sock *sk, const struct rate_sample *rs)"
         new = "BPF_PROG(bpf_copa_main, struct sock *sk, u32 ack, int flag, const struct rate_sample *rs)"
@@ -171,23 +171,54 @@ def cmd_patch_mortise(args: argparse.Namespace) -> int:
     else:
         print("Keeping 2-arg bpf_copa_main ABI")
 
-    # 2. Patch mortise-common/src/congestion.rs with copa_auto*, leocc, and mainline kernel CCs
+    # 1b. Generate mortise_copa_nc.bpf.c (identical Mortise Copa with mode_switch = false)
+    nc_bpf_c = bpf_dir / "mortise_copa_nc.bpf.c"
+    copa_src = bpf_c.read_text(encoding="utf-8")
+    if "copa->mode_switch = true;" in copa_src and '.name = "mortise_copa",' in copa_src:
+        nc_src = copa_src.replace("copa->mode_switch = true;", "copa->mode_switch = false;", 1)
+        nc_src = nc_src.replace('.name = "mortise_copa",', '.name = "mortise_copa_nc",', 1)
+        nc_bpf_c.write_text(nc_src, encoding="utf-8")
+        print(f"Generated {nc_bpf_c} (mode_switch = false)")
+
+    # 2. Patch mortise-common/src/congestion.rs with mortise_copa_nc, copa_auto*, leocc, and mainline kernel CCs
     cong_rs = mortise_dir / "mortise" / "mortise-common" / "src" / "congestion.rs"
     src = cong_rs.read_text(encoding="utf-8")
     if "CopaAuto," not in src:
-        enum_add = "".join(
+        enum_add = '    #[value(name = "mortise_copa_nc")]\n    MortiseCopaNc,\n' + "".join(
             f'    #[value(name = "{name}")]\n    {var},\n'
             for var, name in EXTRA_CONGESTION_VARIANTS
         )
-        disp_add = "".join(
+        disp_add = '            CongestionOpt::MortiseCopaNc => write!(f, "mortise_copa_nc"),\n' + "".join(
             f'            CongestionOpt::{var} => write!(f, "{name}"),\n'
             for var, name in EXTRA_CONGESTION_VARIANTS
         )
-        ca_add = "".join(
+        ca_add = '            CongestionOpt::MortiseCopaNc => (2, b"mortise_copa_nc"),\n' + "".join(
             f'            CongestionOpt::{var} => (0, b"{name}"),\n'
             for var, name in EXTRA_CONGESTION_VARIANTS
         )
-        load_add = "".join(
+        nc_load = (
+            '            CongestionOpt::MortiseCopaNc => {\n'
+            '                let sk_array_maps = vec![\n'
+            '                    SkArrayMap {\n'
+            '                        name: None,\n'
+            '                        mim: "mim_rtt".to_string(),\n'
+            '                        value_size: 16,\n'
+            '                        max_entries: 100000,\n'
+            '                    },\n'
+            '                    SkArrayMap {\n'
+            '                        name: None,\n'
+            '                        mim: "mim_increase".to_string(),\n'
+            '                        value_size: 8,\n'
+            '                        max_entries: 100000,\n'
+            '                    },\n'
+            '                ];\n'
+            '                ManagerOperation::Load {\n'
+            '                    path: "/home/vagrant/algorithm/bpf-kern/build/mortise_copa_nc.bpf.o".to_string(),\n'
+            '                    option: Some(ConnectOption { sk_array_maps }),\n'
+            '                }\n'
+            '            }\n'
+        )
+        load_add = nc_load + "".join(
             f'            CongestionOpt::{var} => ManagerOperation::Load {{ path: "".to_string(), option: None }},\n'
             for var, _ in EXTRA_CONGESTION_VARIANTS
         )
@@ -215,7 +246,22 @@ def cmd_patch_mortise(args: argparse.Namespace) -> int:
             raise RuntimeError("expected get_load_option end")
         src = src.replace(marker, marker + load_add, 1)
         cong_rs.write_text(src, encoding="utf-8")
-        print(f"Patched {cong_rs} with {len(EXTRA_CONGESTION_VARIANTS)} extra kernel CCs")
+        print(f"Patched {cong_rs} with mortise_copa_nc + {len(EXTRA_CONGESTION_VARIANTS)} extra kernel CCs")
+
+    # 3. Patch mortise-manager/src/bin/manager.rs to also load mortise_copa_nc (obj_id 2) and register its RingBuf
+    mgr_rs = mortise_dir / "mortise" / "mortise-manager" / "src" / "bin" / "manager.rs"
+    if mgr_rs.is_file():
+        mgr_src = mgr_rs.read_text(encoding="utf-8")
+        if "CongestionOpt::MortiseCopaNc" not in mgr_src:
+            old_list = "let ca_list = vec![CongestionOpt::MortiseCopa];"
+            new_list = "let ca_list = vec![CongestionOpt::MortiseCopa, CongestionOpt::MortiseCopaNc];"
+            old_rb = "obj_ids: vec![1]"
+            new_rb = "obj_ids: vec![1, 2]"
+            if old_list not in mgr_src or old_rb not in mgr_src:
+                raise RuntimeError(f"expected manager.rs ca_list/obj_ids not found in {mgr_rs}")
+            mgr_src = mgr_src.replace(old_list, new_list, 1).replace(old_rb, new_rb, 1)
+            mgr_rs.write_text(mgr_src, encoding="utf-8")
+            print(f"Patched {mgr_rs} to load mortise_copa_nc (obj_id 2) with RingBuf")
     return 0
 
 

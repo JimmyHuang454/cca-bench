@@ -42,6 +42,15 @@ enum copa_drain_kind {
     COPA_DRAIN_MEASURE_J   = 1,
 };
 
+enum copa_mode {
+    COPA_MODE_DEFAULT = 0,
+    COPA_MODE_TCPCOOP = 1,
+    COPA_MODE_LOSS    = 2,
+};
+
+#define COPA_LOSS_MODE_THRESH_MILLI 33U /* >= 1/30 (~3.33%) loss rate enters MODE_LOSS */
+#define COPA_TCPCOOP_RTTS           10ULL /* sustained non-empty queue window (Mortise TcpDetected) */
+
 /* Kathleen Nichols 3-sample windowed min/max filter (time in us) */
 struct copa_minmax_sample {
     u64 t;
@@ -170,9 +179,15 @@ struct copa_auto_state {
     u64 last_rec_time_us;
     u64 last_rec_cwnd_q10;
     bool slow_start;
-    bool competitive;
+    u8   mode;             /* COPA_MODE_DEFAULT / COPA_MODE_TCPCOOP / COPA_MODE_LOSS */
+    bool competitive;      /* true in COPA_MODE_TCPCOOP or COPA_MODE_LOSS */
     u64 last_nearly_empty_us;
     u64 last_delta_dec_us;
+    u64 loss_cycle_acked;
+    u64 loss_cycle_lost;
+    u64 prev_loss_cycle_us;
+    u32 prev_loss_rate_milli;
+    bool explicit_loss_fed;
     u64 last_time_us;
     bool last_ack_app_limited;
     bool seen_app_limited;
@@ -840,8 +855,17 @@ static inline void copa_start_drain(struct copa_auto_state *ca,
     ca->drain_probe_acks = 0;
 }
 
+static inline void copa_record_loss_pkts(struct copa_auto_state *ca, u32 lost_pkts)
+{
+    ca->explicit_loss_fed = true;
+    ca->loss_cycle_lost += lost_pkts;
+}
+
 static inline void copa_on_loss(struct copa_auto_state *ca, u64 now_us, bool persistent)
 {
+    if (!ca->explicit_loss_fed)
+        ca->loss_cycle_lost += 1;
+
     if (ca->drain_phase == COPA_PHASE_DRAINING && (persistent || ca->cfg.mode_switching))
         ca->drain_congested = true;
 
@@ -900,48 +924,90 @@ static inline void copa_on_loss(struct copa_auto_state *ca, u64 now_us, bool per
     }
 }
 
-static inline void copa_update_mode(struct copa_auto_state *ca, u64 now_us, u64 dq_us, u64 rtt_min_us)
+static inline void copa_update_mode(struct copa_auto_state *ca, u64 now_us, u64 dq_us,
+                                    u64 rtt_min_us, u32 acked_pkts)
 {
     u64 rtt_max_us = copa_minmax_get(&ca->rtt_max);
     u64 span_us = (rtt_max_us > rtt_min_us) ? (rtt_max_us - rtt_min_us) : 0;
     bool nearly_empty;
-    bool comp;
+    bool tcp_coop;
+    u8 next_mode;
 
     if (!ca->cfg.mode_switching)
         return;
 
+    /* 2 * rtt_min windowed loss-rate accounting (mirrors Mortise MODE_LOSS) */
+    ca->loss_cycle_acked += acked_pkts;
+    if (ca->prev_loss_cycle_us == 0) {
+        ca->prev_loss_cycle_us = now_us;
+    } else if (rtt_min_us > 0 && now_us >= ca->prev_loss_cycle_us + 2ULL * rtt_min_us) {
+        u64 total = ca->loss_cycle_lost + ca->loss_cycle_acked;
+        ca->prev_loss_rate_milli = total > 0
+            ? (u32)div64_u64(ca->loss_cycle_lost * 1000ULL, total)
+            : 0U;
+        ca->loss_cycle_lost = 0;
+        ca->loss_cycle_acked = 0;
+        ca->prev_loss_cycle_us = now_us;
+    }
+
+    /* TcpDetected check: queue stays above half of RTT span + 100us for 10 SRTTs */
     if (ca->cfg.adaptive) {
         if (ca->has_jitter && ca->jitter_us < 15000ULL) {
             u64 eff_dq = (dq_us > ca->jitter_us) ? (dq_us - ca->jitter_us) : 0;
             u64 eff_span = (span_us > ca->jitter_us) ? (span_us - ca->jitter_us) : 0;
-            nearly_empty = (eff_dq <= COPA_IDLE_MARGIN_US) || (eff_dq * 10 < eff_span);
+            nearly_empty = (eff_dq <= COPA_IDLE_MARGIN_US) || (eff_dq <= eff_span / 2ULL + 100ULL);
         } else {
-            nearly_empty = (dq_us == 0) || (dq_us * 10 < span_us);
+            nearly_empty = (dq_us == 0) || (dq_us <= span_us / 2ULL + 100ULL);
         }
-        if (!ca->competitive &&
+        if (ca->mode == COPA_MODE_DEFAULT &&
             (ca->last_ack_app_limited ||
              (ca->dq_target_us > 0 && dq_us * 100 <= 115ULL * ca->dq_target_us))) {
             nearly_empty = true;
         }
     } else {
-        nearly_empty = (dq_us == 0) || (dq_us * 10 < span_us);
+        nearly_empty = (dq_us == 0) || (dq_us <= span_us / 2ULL + 100ULL);
     }
 
     if (nearly_empty)
         ca->last_nearly_empty_us = now_us;
 
-    comp = (now_us > ca->last_nearly_empty_us) &&
-           ((now_us - ca->last_nearly_empty_us) > 5ULL * ca->srtt_us);
-    if (comp != ca->competitive) {
+    tcp_coop = (now_us > ca->last_nearly_empty_us) &&
+               ((now_us - ca->last_nearly_empty_us) > COPA_TCPCOOP_RTTS * ca->srtt_us);
+
+    /* Mode priority (matching Mortise): MODE_LOSS > MODE_TCPCOOP > MODE_DEFAULT */
+    if (ca->prev_loss_rate_milli >= COPA_LOSS_MODE_THRESH_MILLI) {
+        next_mode = COPA_MODE_LOSS;
+    } else if (tcp_coop) {
+        next_mode = COPA_MODE_TCPCOOP;
+    } else {
+        next_mode = COPA_MODE_DEFAULT;
+    }
+
+    if (next_mode != ca->mode) {
+        u8 prev_mode = ca->mode;
         u32 ceil = ca->cfg.adaptive ? COPA_DELTA_MAX_Q20 : ca->cfg.init_delta_q20;
-        ca->competitive = comp;
-        if (comp && ca->cfg.adaptive && ca->peak_bdp_pkts_q10 > (150ULL << 10)) {
-            /* High-BDP clamp >= 0.02 */
-            ca->delta_q20 = clamp_t(u32, ca->delta_q20, 20972U, ceil);
+        ca->mode = next_mode;
+        ca->competitive = (next_mode != COPA_MODE_DEFAULT);
+        if (next_mode == COPA_MODE_TCPCOOP) {
+            if (prev_mode == COPA_MODE_DEFAULT) {
+                if (ca->cfg.adaptive && ca->peak_bdp_pkts_q10 > (150ULL << 10)) {
+                    /* High-BDP clamp >= 0.02 */
+                    ca->delta_q20 = clamp_t(u32, ca->delta_q20, 20972U, ceil);
+                } else {
+                    ca->delta_q20 = ceil;
+                }
+            } else {
+                ca->delta_q20 = clamp_t(u32, ca->delta_q20, COPA_DELTA_MIN_Q20, ceil);
+            }
+            ca->last_delta_dec_us = 0;
+        } else if (next_mode == COPA_MODE_LOSS) {
+            /* Keep current delta (capped at ceil) so loss events back off monotonically */
+            ca->delta_q20 = clamp_t(u32, ca->delta_q20, COPA_DELTA_MIN_Q20, ceil);
+            ca->last_delta_dec_us = 0;
         } else {
             ca->delta_q20 = ceil;
+            ca->last_delta_dec_us = 0;
         }
-        ca->last_delta_dec_us = 0;
     }
 }
 
@@ -1087,7 +1153,7 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
     if (holding)
         ca->last_nearly_empty_us = now_us;
     else
-        copa_update_mode(ca, now_us, dq_us, rtt_min_us);
+        copa_update_mode(ca, now_us, dq_us, rtt_min_us, acked_pkts);
 
     if (ca->cfg.adaptive) {
         if (ca->trusted_min_us > 0) {
@@ -1365,8 +1431,8 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
                 }
             }
         }
-    } else {
-        /* Competitive mode: abort drain; AIMD on 1/delta with deep-buffer cap */
+    } else if (ca->mode == COPA_MODE_TCPCOOP) {
+        /* TCP-Coop competitive mode: abort drain; AIMD on 1/delta with deep-buffer cap */
         u64 bloat_ceil = max_t(u64, 3ULL * rtt_min_us, 90000ULL);
         ca->drain_phase = COPA_PHASE_NORMAL;
         /* 0.05 in Q20 = 52429 */
@@ -1380,6 +1446,9 @@ static inline u32 copa_on_ack(struct copa_auto_state *ca,
             if (ca->delta_q20 < COPA_DELTA_MIN_Q20)
                 ca->delta_q20 = COPA_DELTA_MIN_Q20;
         }
+    } else {
+        /* COPA_MODE_LOSS: abort drain; hold delta (only back off on loss, do not shrink) */
+        ca->drain_phase = COPA_PHASE_NORMAL;
     }
 
     /* Target rate vs current rate */

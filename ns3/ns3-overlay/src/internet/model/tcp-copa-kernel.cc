@@ -198,6 +198,10 @@ TcpCopaKernel::CongControl(Ptr<TcpSocketState> tcb,
     }
 
     u32 acked_pkts = rs.m_ackedSacked > 0 ? std::max<u32>(rs.m_ackedSacked / mss, 1U) : 1U;
+    if (rs.m_bytesLoss > 0)
+    {
+        copa_record_loss_pkts(&m_ca, std::max<u32>((u32)rs.m_bytesLoss / mss, 1U));
+    }
     u64 rate_bps = rs.m_deliveryRate.GetBitRate() / 8ULL;
     bool app_limited = rs.m_isAppLimited;
     bool low_flight = rs.m_isAppLimited && (rs.m_priorInFlight <= 4U * mss);

@@ -270,6 +270,8 @@ static void tcp_copa_cong_control(struct sock *sk,
 
 	mss = max_t(u32, tp->mss_cache, 536U);
 	acked_pkts = (rs && rs->acked_sacked > 0) ? (u32)rs->acked_sacked : 1U;
+	if (rs && rs->losses > 0)
+		copa_record_loss_pkts(ca, (u32)rs->losses);
 	if (rs && rs->delivered > 0 && rs->interval_us > 0) {
 		rate_bps = div64_u64((u64)rs->delivered * (u64)mss * 1000000ULL,
 				     (u64)rs->interval_us);

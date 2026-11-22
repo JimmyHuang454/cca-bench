@@ -316,12 +316,97 @@ static void test_manual_jitter_and_loss_brake(void)
     puts("[PASS] manual jitter_us (0 & 3ms) and shallow-buffer loss brake");
 }
 
+static void test_tcpcoop_and_loss_mode(void)
+{
+    struct copa_auto_state ca;
+    struct copa_probe_board board = { 0 };
+    struct copa_auto_cfg cfg = {
+        .adaptive = true,
+        .mode_switching = true,
+        .jitter_us = 0,
+        .theta_milli = 500,
+        .init_delta_q20 = COPA_DELTA_INIT_Q20,
+    };
+    u64 now = 1000000ULL;
+    u32 delta_before, delta_after_ack, delta_after_loss;
+    int i;
+
+    copa_state_init(&ca, cfg, &board, now, 20);
+    ca.slow_start = false;
+    /* Establish rtt_min = 20 ms and rtt_max = 60 ms (span = 40 ms) */
+    copa_on_ack(&ca, now, 20000ULL, 20000ULL, 2, 1448, 5000000ULL, false, false);
+    now += 10000ULL;
+    copa_on_ack(&ca, now, 60000ULL, 30000ULL, 2, 1448, 5000000ULL, false, false);
+    assert(ca.mode == COPA_MODE_DEFAULT);
+
+    /* Sustained standing queue (50 ms -> dq = 30 ms > span/2 = 20 ms) for > 10 SRTTs enters TCPCOOP */
+    for (i = 0; i < 40; i++) {
+        now += 15000ULL;
+        copa_on_ack(&ca, now, 50000ULL, 30000ULL, 2, 1448, 5000000ULL, false, false);
+    }
+    assert(ca.mode == COPA_MODE_TCPCOOP);
+    assert(ca.competitive == true);
+
+    /* Loss-free ACK in TCPCOOP shrinks delta (more aggressive) */
+    delta_before = ca.delta_q20;
+    now += 15000ULL;
+    copa_on_ack(&ca, now, 50000ULL, 30000ULL, 4, 1448, 5000000ULL, false, false);
+    assert(ca.delta_q20 < delta_before);
+
+    /* Loss in TCPCOOP doubles delta (capped at ceil) */
+    delta_before = ca.delta_q20;
+    copa_on_loss(&ca, now + 50000ULL, false);
+    assert(ca.delta_q20 >= delta_before);
+
+    /* High loss rate (>= 3.33% over 2 * rtt_min = 40 ms) takes priority and enters MODE_LOSS */
+    copa_record_loss_pkts(&ca, 5);
+    now += 45000ULL;
+    copa_on_ack(&ca, now, 50000ULL, 30000ULL, 10, 1448, 5000000ULL, false, false);
+    assert(ca.mode == COPA_MODE_LOSS);
+    assert(ca.competitive == true);
+
+    /* In MODE_LOSS: loss-free ACKs do NOT shrink delta, while loss still doubles delta */
+    ca.delta_q20 = 100000U;
+    delta_before = ca.delta_q20;
+    now += 10000ULL;
+    copa_on_ack(&ca, now, 50000ULL, 30000ULL, 4, 1448, 5000000ULL, false, false);
+    delta_after_ack = ca.delta_q20;
+    assert(delta_after_ack == delta_before);
+    copa_on_loss(&ca, now + 50000ULL, false);
+    delta_after_loss = ca.delta_q20;
+    assert(delta_after_loss == delta_before * 2U);
+
+    /* After a clean loss cycle and drained queue, returns to MODE_DEFAULT */
+    now += 50000ULL;
+    copa_on_ack(&ca, now, 20000ULL, 25000ULL, 10, 1448, 5000000ULL, false, false);
+    now += 50000ULL;
+    copa_on_ack(&ca, now, 20000ULL, 22000ULL, 10, 1448, 5000000ULL, false, false);
+    assert(ca.mode == COPA_MODE_DEFAULT);
+    assert(ca.competitive == false);
+
+    /* With mode_switching = false (copa_auto_nc), never leaves MODE_DEFAULT */
+    cfg.mode_switching = false;
+    copa_state_init(&ca, cfg, &board, now, 20);
+    ca.slow_start = false;
+    copa_on_ack(&ca, now, 20000ULL, 20000ULL, 2, 1448, 5000000ULL, false, false);
+    copa_record_loss_pkts(&ca, 10);
+    for (i = 0; i < 40; i++) {
+        now += 15000ULL;
+        copa_on_ack(&ca, now, 55000ULL, 30000ULL, 2, 1448, 5000000ULL, false, false);
+    }
+    assert(ca.mode == COPA_MODE_DEFAULT);
+    assert(ca.competitive == false);
+
+    puts("[PASS] test_tcpcoop_and_loss_mode");
+}
+
 int main(void)
 {
 	test_passive_observations();
 	test_bulk_write_boundaries();
 	test_outage_samples();
 	test_manual_jitter_and_loss_brake();
+	test_tcpcoop_and_loss_mode();
 	test_math_ln_exp();
 	test_target_dq();
 	test_slow_start_and_steady();

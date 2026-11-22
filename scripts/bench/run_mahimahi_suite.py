@@ -468,8 +468,10 @@ def has_deliveries(path: Path) -> bool:
 
 
 def resolve_mortise_cc(cc: str) -> str:
-    """Map suite CC label (e.g. copa_auto_theta0.98) to Linux kernel TCP CCA name."""
+    """Map suite CC label (e.g. copa, copa_auto_theta0.98) to Linux kernel TCP CCA name."""
     norm = cc.replace("-", "_")
+    if norm == "copa":
+        return "copa_orig"
     m = re.match(r"^copa_auto_theta([0-9]*\.?[0-9]+)$", norm)
     if m:
         theta_milli = int(round(float(m.group(1)) * 1000))

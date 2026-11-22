@@ -142,12 +142,13 @@ jobs:
           chmod +x "$RUNNER_TEMP/bpftool"
           "$RUNNER_TEMP/bpftool" btf dump file /sys/kernel/btf/vmlinux format c > "$RUNNER_TEMP/Mortise/algorithm/bpf-kern/include/vmlinux.h"
           python3 scripts/bench/ci_runner.py patch-mortise --mortise-dir "$RUNNER_TEMP/Mortise"
-          make -C "$RUNNER_TEMP/Mortise/algorithm/bpf-kern" build/mortise_copa.bpf.o CLANG=/usr/bin/clang
+          make -C "$RUNNER_TEMP/Mortise/algorithm/bpf-kern" build/mortise_copa.bpf.o build/mortise_copa_nc.bpf.o CLANG=/usr/bin/clang
           cargo build --release --locked --manifest-path "$RUNNER_TEMP/Mortise/mortise/Cargo.toml" -p traffic -p mortise-manager
 
           mkdir -p "$RUNNER_TEMP/tools/Mortise/algorithm/bpf-kern/build" \
                    "$RUNNER_TEMP/tools/Mortise/mortise/target/release"
           cp "$RUNNER_TEMP/Mortise/algorithm/bpf-kern/build/mortise_copa.bpf.o" \
+             "$RUNNER_TEMP/Mortise/algorithm/bpf-kern/build/mortise_copa_nc.bpf.o" \
              "$RUNNER_TEMP/tools/Mortise/algorithm/bpf-kern/build/"
           cp "$RUNNER_TEMP/Mortise/mortise/target/release/client" \
              "$RUNNER_TEMP/Mortise/mortise/target/release/server" \

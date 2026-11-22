@@ -29,6 +29,8 @@ class KernelCiTests(unittest.TestCase):
         self.assertIn(('CopaAutoV2', 'copa_auto_v2'), ci_runner.EXTRA_CONGESTION_VARIANTS)
         self.assertIn(('CopaAutoNcJ0', 'copa_auto_nc_j0'), ci_runner.EXTRA_CONGESTION_VARIANTS)
         self.assertEqual(run_mahimahi_suite.resolve_mortise_cc('copa-auto-v2'), 'copa_auto_v2')
+        self.assertEqual(run_mahimahi_suite.resolve_mortise_cc('copa'), 'copa_orig')
+        self.assertEqual(run_kernel_lines.resolve_kernel_cc('copa'), 'copa_orig')
         self.assertEqual(run_kernel_lines.resolve_kernel_cc('copa-auto-v2'), 'copa_auto_v2')
         self.assertEqual(run_kernel_lines.resolve_kernel_cc('copa_auto_theta0.98'), 'copa_auto_t98')
         self.assertFalse(hasattr(ci_runner, 'cmd_run_quinn'))
@@ -44,7 +46,9 @@ class KernelCiTests(unittest.TestCase):
                 encoding='utf-8',
             )
             (bpf / 'mortise_copa.bpf.c').write_text(
-                'BPF_PROG(bpf_copa_main, struct sock *sk, const struct rate_sample *rs)\n',
+                'BPF_PROG(bpf_copa_main, struct sock *sk, const struct rate_sample *rs)\n'
+                'copa->mode_switch = true;\n'
+                '.name = "mortise_copa",\n',
                 encoding='utf-8',
             )
             rust = root / 'mortise/mortise-common/src/congestion.rs'
@@ -57,10 +61,27 @@ class KernelCiTests(unittest.TestCase):
                 '                option: None,\n            },\n',
                 encoding='utf-8',
             )
+            mgr = root / 'mortise/mortise-manager/src/bin/manager.rs'
+            mgr.parent.mkdir(parents=True)
+            mgr.write_text(
+                'let ca_list = vec![CongestionOpt::MortiseCopa];\n'
+                'req: ManagerOperation::RegisterRingBuf { obj_ids: vec![1] }.into(),\n',
+                encoding='utf-8',
+            )
             self.assertEqual(ci_runner.cmd_patch_mortise(argparse.Namespace(mortise_dir=tmp)), 0)
             self.assertIn('u32 ack, int flag', (bpf / 'mortise_copa.bpf.c').read_text(encoding='utf-8'))
-            self.assertIn('name = "copa_auto_v2"', rust.read_text(encoding='utf-8'))
-            self.assertIn('CongestionOpt::CopaAutoV2 => (0, b"copa_auto_v2")', rust.read_text(encoding='utf-8'))
+            nc_src = (bpf / 'mortise_copa_nc.bpf.c').read_text(encoding='utf-8')
+            self.assertIn('u32 ack, int flag', nc_src)
+            self.assertIn('copa->mode_switch = false;', nc_src)
+            self.assertIn('.name = "mortise_copa_nc",', nc_src)
+            rust_src = rust.read_text(encoding='utf-8')
+            self.assertIn('name = "copa_auto_v2"', rust_src)
+            self.assertIn('CongestionOpt::CopaAutoV2 => (0, b"copa_auto_v2")', rust_src)
+            self.assertIn('CongestionOpt::MortiseCopaNc => (2, b"mortise_copa_nc")', rust_src)
+            self.assertIn('mortise_copa_nc.bpf.o', rust_src)
+            mgr_src = mgr.read_text(encoding='utf-8')
+            self.assertIn('CongestionOpt::MortiseCopaNc', mgr_src)
+            self.assertIn('obj_ids: vec![1, 2]', mgr_src)
 
     def test_generate_bulk_workload_respects_mortise_frame_limit(self):
         with tempfile.TemporaryDirectory() as tmp:

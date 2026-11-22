@@ -105,8 +105,10 @@ def parse_csv_list(raw: str, *, default: list[str] | None = None) -> list[str]:
 
 
 def resolve_kernel_cc(cc: str) -> str:
-    """Map suite CC label (e.g. copa-auto-v2, copa_auto_theta0.98) to Linux kernel TCP CCA name."""
+    """Map suite CC label (e.g. copa, copa-auto-v2, copa_auto_theta0.98) to Linux kernel TCP CCA name."""
     norm = cc.strip().replace('-', '_')
+    if norm == 'copa':
+        return 'copa_orig'
     m = re.match(r'^copa_auto_theta([0-9]*\.?[0-9]+)$', norm)
     if m:
         theta_milli = int(round(float(m.group(1)) * 1000))
