@@ -472,6 +472,8 @@ def resolve_mortise_cc(cc: str) -> str:
     norm = cc.replace("-", "_")
     if norm == "copa":
         return "copa_orig"
+    if norm == "copa_orig_nc":
+        return "copa_nc"
     m = re.match(r"^copa_auto_theta([0-9]*\.?[0-9]+)$", norm)
     if m:
         theta_milli = int(round(float(m.group(1)) * 1000))

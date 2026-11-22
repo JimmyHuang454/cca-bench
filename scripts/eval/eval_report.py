@@ -22,6 +22,13 @@ def mortise_retrans_penalty(r: float) -> float:
     return 0.5
 
 
+def validate_tail_percentile(p: float) -> float:
+    val = float(p)
+    if not math.isfinite(val) or val <= 0.0 or val > 100.0:
+        raise ValueError(f"tail_percentile must be in (0, 100], got {p!r}")
+    return val
+
+
 def percentile(sorted_vals: list[float], p: float) -> float:
     if not sorted_vals:
         return math.nan
@@ -38,8 +45,10 @@ def parse_downlink_log(
     min_rtt_ms: float = 20.0,
     warmup_s: float = 0.0,
     max_s: float | None = None,
+    tail_percentile: float = 95.0,
 ) -> dict[str, Any]:
     """Parse Mahimahi mm-link --downlink-log over [warmup_s, max_s] relative to first timestamp."""
+    tail_p = validate_tail_percentile(tail_percentile)
     first_ts: float | None = None
     last_ts: float | None = None
     win_start_ts = 0.0
@@ -126,16 +135,19 @@ def parse_downlink_log(
     if first_ts is None or last_ts is None or last_ts <= first_ts:
         return {
             "duration_s": math.nan,
+            "tail_percentile": tail_p,
             "delivered_bytes": 0,
             "capacity_mbps": math.nan,
             "throughput_mbps": math.nan,
             "utilization": math.nan,
             "qdelay_avg_ms": math.nan,
             "qdelay_p95_ms": math.nan,
+            "qdelay_tail_ms": math.nan,
             "est_rtt_ms": math.nan,
             "util_power": math.nan,
             "norm_power": math.nan,
             "norm_power_p95": math.nan,
+            "norm_power_tail": math.nan,
             "tput_power": math.nan,
             "drop_rate": math.nan,
         }
@@ -165,11 +177,14 @@ def parse_downlink_log(
     qdelays.sort()
     qdelay_avg = (sum(qdelays) / len(qdelays)) if qdelays else math.nan
     qdelay_p95 = percentile(qdelays, 0.95)
+    qdelay_tail = percentile(qdelays, tail_p / 100.0)
     est_rtt_ms = (min_rtt_ms + qdelay_avg) if not math.isnan(qdelay_avg) else math.nan
     est_rtt_p95_ms = (min_rtt_ms + qdelay_p95) if not math.isnan(qdelay_p95) else math.nan
+    est_rtt_tail_ms = (min_rtt_ms + qdelay_tail) if not math.isnan(qdelay_tail) else math.nan
     util_power = (util / (est_rtt_ms / 1000.0)) if (est_rtt_ms and est_rtt_ms > 0 and not math.isnan(util)) else math.nan
     norm_power = (util / (est_rtt_ms / min_rtt_ms)) if (est_rtt_ms and est_rtt_ms > 0 and not math.isnan(util)) else math.nan
     norm_power_p95 = (util / (est_rtt_p95_ms / min_rtt_ms)) if (est_rtt_p95_ms and est_rtt_p95_ms > 0 and not math.isnan(util)) else math.nan
+    norm_power_tail = (util / (est_rtt_tail_ms / min_rtt_ms)) if (est_rtt_tail_ms and est_rtt_tail_ms > 0 and not math.isnan(util)) else math.nan
     tput_power = (tput_mbps / est_rtt_ms) if (est_rtt_ms and est_rtt_ms > 0 and not math.isnan(tput_mbps)) else math.nan
 
     total_offered = delivered_bytes + dropped_bytes
@@ -177,16 +192,19 @@ def parse_downlink_log(
 
     return {
         "duration_s": duration_s,
+        "tail_percentile": tail_p,
         "delivered_bytes": delivered_bytes,
         "capacity_mbps": cap_mbps,
         "throughput_mbps": tput_mbps,
         "utilization": util,
         "qdelay_avg_ms": qdelay_avg,
         "qdelay_p95_ms": qdelay_p95,
+        "qdelay_tail_ms": qdelay_tail,
         "est_rtt_ms": est_rtt_ms,
         "util_power": util_power,
         "norm_power": norm_power,
         "norm_power_p95": norm_power_p95,
+        "norm_power_tail": norm_power_tail,
         "tput_power": tput_power,
         "drop_rate": drop_rate,
     }
@@ -197,8 +215,10 @@ def parse_rct_csv(
     delivered_bytes: int = 0,
     base_rtt_ms: float = 20.0,
     capacity_mbps: float = math.nan,
+    tail_percentile: float = 95.0,
 ) -> dict[str, Any]:
     """Parse Mortise-compatible RCT CSV (`id,size,client_send,server_recv,client_recv,rct`)."""
+    tail_p = validate_tail_percentile(tail_percentile)
     if not path.exists():
         return {}
     sizes: list[int] = []
@@ -246,6 +266,7 @@ def parse_rct_csv(
 
     fct_slowdown = math.nan
     fct_slowdown_p95 = math.nan
+    fct_slowdown_tail = math.nan
     if isinstance(capacity_mbps, (int, float)) and not math.isnan(capacity_mbps) and capacity_mbps > 0:
         cap_bytes_per_ms = capacity_mbps * 1e6 / 8.0 / 1000.0
         log_sum = 0.0
@@ -258,16 +279,20 @@ def parse_rct_csv(
         fct_slowdown = math.exp(log_sum / len(rcts_ms))
         slowdowns.sort()
         fct_slowdown_p95 = percentile(slowdowns, 0.95)
+        fct_slowdown_tail = percentile(slowdowns, tail_p / 100.0)
 
     return {
+        "tail_percentile": tail_p,
         "requests": len(rcts_ms),
         "rct_mean_ms": sum(rcts_ms) / len(rcts_ms),
         "rct_p50_ms": percentile(sorted_rcts, 0.50),
         "rct_p95_ms": percentile(sorted_rcts, 0.95),
+        "rct_tail_ms": percentile(sorted_rcts, tail_p / 100.0),
         "retrans_pkts": retrans_pkts,
         "retrans_ratio": retrans_ratio,
         "fct_slowdown": fct_slowdown,
         "fct_slowdown_p95": fct_slowdown_p95,
+        "fct_slowdown_tail": fct_slowdown_tail,
         "mortise_qoe": sum(qoe_vals) / len(qoe_vals),
     }
 
@@ -364,24 +389,29 @@ def mean_valid(rows: list[dict[str, Any]], key: str) -> float:
 CSV_INT_FIELDS = {"requests", "retrans_pkts"}
 CSV_FLOAT_FIELDS = {
     "duration_s",
+    "tail_percentile",
     "capacity_mbps",
     "throughput_mbps",
     "utilization",
     "qdelay_avg_ms",
     "qdelay_p95_ms",
+    "qdelay_tail_ms",
     "base_rtt_ms",
     "est_rtt_ms",
     "util_power",
     "norm_power",
     "norm_power_p95",
+    "norm_power_tail",
     "tput_power",
     "drop_rate",
     "rct_mean_ms",
     "rct_p50_ms",
     "rct_p95_ms",
+    "rct_tail_ms",
     "retrans_ratio",
     "fct_slowdown",
     "fct_slowdown_p95",
+    "fct_slowdown_tail",
     "rct_slowdown",
     "mortise_qoe",
 }
@@ -445,7 +475,9 @@ def main() -> None:
     parser.add_argument("--min-rtt-ms", type=float, default=20.0, help="Base propagation RTT in ms")
     parser.add_argument("--bulk-warmup-s", type=float, default=5.0, help="Warmup seconds skipped for bulk runs")
     parser.add_argument("--bulk-end-s", type=float, default=None, help="Optional end timestamp (s) for bulk window")
+    parser.add_argument("--tail-percentile", type=float, default=95.0, help="Tail percentile in (0, 100] (e.g. 50, 90, 95, 99)")
     args = parser.parse_args()
+    tail_p = validate_tail_percentile(args.tail_percentile)
 
     input_dirs = [d for d in args.input_dir if d.exists()]
     logs: list[Path] = []
@@ -465,7 +497,11 @@ def main() -> None:
         rtt_file = log_path.with_name(f"{meta['trace']}.base-rtt-ms")
         base_rtt_ms = float(rtt_file.read_text()) if rtt_file.exists() else args.min_rtt_ms
         row: dict[str, Any] = {**meta, "base_rtt_ms": base_rtt_ms}
-        row.update(parse_downlink_log(log_path, min_rtt_ms=base_rtt_ms, warmup_s=warmup, max_s=max_s))
+        row.update(
+            parse_downlink_log(
+                log_path, min_rtt_ms=base_rtt_ms, warmup_s=warmup, max_s=max_s, tail_percentile=tail_p
+            )
+        )
 
         rct_path = log_path.with_name(f"{stem}.rct.csv")
         row.update(
@@ -474,6 +510,7 @@ def main() -> None:
                 delivered_bytes=row.get("delivered_bytes", 0),
                 base_rtt_ms=base_rtt_ms,
                 capacity_mbps=row.get("capacity_mbps", math.nan),
+                tail_percentile=tail_p,
             )
         )
 
@@ -503,26 +540,31 @@ def main() -> None:
         "cc",
         "repeat",
         "duration_s",
+        "tail_percentile",
         "capacity_mbps",
         "throughput_mbps",
         "utilization",
         "qdelay_avg_ms",
         "qdelay_p95_ms",
+        "qdelay_tail_ms",
         "base_rtt_ms",
         "est_rtt_ms",
         "util_power",
         "norm_power",
         "norm_power_p95",
+        "norm_power_tail",
         "tput_power",
         "drop_rate",
         "requests",
         "rct_mean_ms",
         "rct_p50_ms",
         "rct_p95_ms",
+        "rct_tail_ms",
         "retrans_pkts",
         "retrans_ratio",
         "fct_slowdown",
         "fct_slowdown_p95",
+        "fct_slowdown_tail",
         "mortise_qoe",
     ]
     with args.out_csv.open("w", newline="", encoding="utf-8") as f:

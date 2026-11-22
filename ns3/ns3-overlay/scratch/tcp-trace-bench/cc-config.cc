@@ -23,7 +23,8 @@ bool
 IsCopaKernelName(const std::string& name)
 {
     const std::string cc = BaseCc(name);
-    return cc == "copa" || cc == "copa-auto" || cc == "copa_auto" || cc == "copa_auto_nc" ||
+    return cc == "copa" || cc == "copa_nc" || cc == "copa_orig_nc" ||
+           cc == "copa-auto" || cc == "copa_auto" || cc == "copa_auto_nc" ||
            cc == "copa_auto_nc_j0" || cc == "copa_auto_nc_j3" || cc == "copa_orig" ||
            cc.rfind("copa-d", 0) == 0 || cc.rfind("copa_auto_theta", 0) == 0 ||
            cc.rfind("copa_auto_nc_theta", 0) == 0;
@@ -97,6 +98,12 @@ ConfigureCcFlow(uint32_t nodeId,
     {
         adaptive = false;
         modeSwitching = !nosw;
+        initDeltaQ20 = 524288U; /* 0.50 * 2^20 */
+    }
+    else if (cc == "copa_nc" || cc == "copa_orig_nc")
+    {
+        adaptive = false;
+        modeSwitching = false;
         initDeltaQ20 = 524288U; /* 0.50 * 2^20 */
     }
     else if (cc.rfind("copa-d", 0) == 0)

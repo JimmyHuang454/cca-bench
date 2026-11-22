@@ -15,16 +15,50 @@ if _BENCH_DIR not in sys.path:
 
 from lines_common import DEFAULT_ONE_WAY_DELAY_MS, atomic_write
 
+DEFAULT_TAIL_PERCENTILE = 95.0
+
+TAIL_P95_FALLBACKS = {
+    'qdelay_tail_ms': 'qdelay_p95_ms',
+    'norm_power_tail': 'norm_power_p95',
+    'rct_tail_ms': 'rct_p95_ms',
+    'fct_slowdown_tail': 'fct_slowdown_p95',
+}
+
 RUNS_CSV_FIELDS = [
-    'scenario', 'workload', 'cc', 'repeat', 'status', 'error', 'duration_s', 'capacity_mbps',
-    'throughput_mbps', 'utilization', 'qdelay_avg_ms', 'qdelay_p95_ms', 'base_rtt_ms', 'est_rtt_ms',
-    'util_power', 'norm_power', 'norm_power_p95', 'drop_rate', 'requests_expected', 'requests',
-    'rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'fct_slowdown', 'fct_slowdown_p95', 'mortise_qoe',
+    'scenario', 'workload', 'cc', 'repeat', 'status', 'error', 'duration_s', 'tail_percentile',
+    'capacity_mbps', 'throughput_mbps', 'utilization', 'qdelay_avg_ms', 'qdelay_p95_ms', 'qdelay_tail_ms',
+    'base_rtt_ms', 'est_rtt_ms', 'util_power', 'norm_power', 'norm_power_p95', 'norm_power_tail',
+    'drop_rate', 'requests_expected', 'requests', 'rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'rct_tail_ms',
+    'fct_slowdown', 'fct_slowdown_p95', 'fct_slowdown_tail', 'mortise_qoe',
 ]
 
 
-def mean(rows: list[dict], field: str) -> str:
-    values = [float(r[field]) for r in rows if r.get(field) not in ('', None) and math.isfinite(float(r[field]))]
+def validate_tail_percentile(p: float) -> float:
+    val = float(p)
+    if not math.isfinite(val) or val <= 0.0 or val > 100.0:
+        raise ValueError(f'tail_percentile must be in (0, 100], got {p!r}')
+    return val
+
+
+def tail_label(p: float = DEFAULT_TAIL_PERCENTILE) -> str:
+    return f'P{validate_tail_percentile(p):g}'
+
+
+def row_metric_raw(row: dict, field: str, tail_percentile: float = DEFAULT_TAIL_PERCENTILE):
+    val = row.get(field)
+    if val in ('', None) and field in TAIL_P95_FALLBACKS and math.isclose(tail_percentile, 95.0):
+        val = row.get(TAIL_P95_FALLBACKS[field])
+    return val
+
+
+def mean(rows: list[dict], field: str, tail_percentile: float = DEFAULT_TAIL_PERCENTILE) -> str:
+    values = []
+    for r in rows:
+        raw = row_metric_raw(r, field, tail_percentile)
+        if raw not in ('', None):
+            v = float(raw)
+            if math.isfinite(v):
+                values.append(v)
     return f'{statistics.mean(values):.3f}' if values else '-'
 
 
@@ -37,23 +71,29 @@ def ranking_entries(
     ccs: list[str],
     workloads: list[str],
     repeats: int,
+    tail_percentile: float = DEFAULT_TAIL_PERCENTILE,
 ) -> list[dict]:
     """Rank complete runs using unrounded per-algorithm averages.
 
     kind:
-      - 'bulk'         : bulk norm_power (higher is better)
-      - 'bulk_p95'     : bulk norm_power_p95 (higher is better)
-      - 'workload'     : workload fct_slowdown (lower is better)
-      - 'workload_p95' : workload fct_slowdown_p95 (lower is better)
-      - 'combined'     : sqrt(norm_power_p95 / geomean(workload fct_slowdown_p95)) (higher is better)
+      - 'bulk'                      : bulk norm_power (higher is better)
+      - 'bulk_tail' / 'bulk_p95'    : bulk norm_power_tail at tail_percentile (higher is better)
+      - 'workload'                  : workload fct_slowdown (lower is better)
+      - 'workload_tail'/'workload_p95': workload fct_slowdown_tail at tail_percentile (lower is better)
+      - 'combined'                  : sqrt(norm_power_tail / geomean(workload fct_slowdown_tail)) (higher is better)
     """
+    tail_p = validate_tail_percentile(tail_percentile)
+
     def metric(cc: str, wk: str, field: str, positive: bool) -> tuple[float | None, bool, int]:
         selected = [r for r in rows if r['scenario'] == scenario and r['cc'] == cc and r['workload'] == wk]
         good = [r for r in selected if r['status'] == 'success']
         values = []
         for row in good:
             try:
-                value = float(row[field])
+                raw = row_metric_raw(row, field, tail_p)
+                if raw in ('', None):
+                    continue
+                value = float(raw)
                 if math.isfinite(value) and (value > 0 if positive else value >= 0):
                     values.append(value)
             except (KeyError, TypeError, ValueError):
@@ -66,10 +106,10 @@ def ranking_entries(
         valid = complete and len(values) == repeats
         return (statistics.mean(values) if values else None), valid, len(good)
 
-    is_workload = kind in ('workload', 'workload_p95')
-    is_bulk = kind in ('bulk', 'bulk_p95')
-    bulk_field = 'norm_power_p95' if kind in ('bulk_p95', 'combined') else 'norm_power'
-    slow_field = 'fct_slowdown_p95' if kind in ('workload_p95', 'combined') else 'fct_slowdown'
+    is_workload = kind in ('workload', 'workload_p95', 'workload_tail')
+    is_bulk = kind in ('bulk', 'bulk_p95', 'bulk_tail')
+    bulk_field = 'norm_power_tail' if kind in ('bulk_p95', 'bulk_tail', 'combined') else 'norm_power'
+    slow_field = 'fct_slowdown_tail' if kind in ('workload_p95', 'workload_tail', 'combined') else 'fct_slowdown'
 
     entries = []
     for cc in ccs:
@@ -108,7 +148,11 @@ def ranking_entries(
                 for r in selected:
                     if r['status'] == 'success':
                         try:
-                            sample = float(r[slow_field])
+                            raw = row_metric_raw(r, slow_field, tail_p)
+                            if raw in ('', None):
+                                success_valid = False
+                                continue
+                            sample = float(raw)
                             success_valid &= math.isfinite(sample) and sample > 0
                         except (KeyError, TypeError, ValueError):
                             success_valid = False
@@ -161,19 +205,24 @@ def overall_ranking(
     ccs: list[str],
     workloads: list[str],
     repeats: int,
+    tail_percentile: float = DEFAULT_TAIL_PERCENTILE,
 ) -> tuple[list[dict], list[str]]:
-    """Compare algorithms against each scenario's best complete P95 result."""
+    """Compare algorithms against each scenario's best complete tail-percentile result."""
+    tail_p = validate_tail_percentile(tail_percentile)
     if 'bulk' not in workloads:
         return [], ['总排名需要 bulk 结果。']
     if not scenarios:
         return [], ['没有可比较的场景。']
-    kind = 'combined' if any(w != 'bulk' for w in workloads) else 'bulk_p95'
+    kind = 'combined' if any(w != 'bulk' for w in workloads) else 'bulk_tail'
     values = {cc: [] for cc in ccs}
     wins = {cc: 0 for cc in ccs}
     completed = {cc: 0 for cc in ccs}
     missing_baselines = []
     for scenario in scenarios:
-        entries = ranking_entries(rows, scenario['name'], '', kind, ccs=ccs, workloads=workloads, repeats=repeats)
+        entries = ranking_entries(
+            rows, scenario['name'], '', kind,
+            ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p,
+        )
         qualified = [e for e in entries if e['valid'] and e['value'] is not None]
         best = max((e['value'] for e in qualified), default=0.0)
         if best <= 0:
@@ -225,12 +274,17 @@ def overall_ranking_table(
     ccs: list[str],
     workloads: list[str],
     repeats: int,
+    tail_percentile: float = DEFAULT_TAIL_PERCENTILE,
 ) -> list[str]:
-    entries, warnings = overall_ranking(scenarios, rows, ccs=ccs, workloads=workloads, repeats=repeats)
+    tail_p = validate_tail_percentile(tail_percentile)
+    p_lbl = tail_label(tail_p)
+    entries, warnings = overall_ranking(
+        scenarios, rows, ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p
+    )
     metric = (
-        '单场景综合评分（基于 P95 Norm Power 与 P95 FCT Slowdown）'
+        f'单场景综合评分（基于 {p_lbl} Norm Power 与 {p_lbl} FCT Slowdown）'
         if any(w != 'bulk' for w in workloads)
-        else '单场景 Bulk P95 Norm Power'
+        else f'单场景 Bulk {p_lbl} Norm Power'
     )
     result = [
         '## 所有场景总排名', '',
@@ -264,8 +318,10 @@ def workload_ranking(
     ccs: list[str],
     workloads: list[str],
     repeats: int,
+    tail_percentile: float = DEFAULT_TAIL_PERCENTILE,
 ) -> tuple[list[dict], list[str]]:
-    """Compare one workload across scenarios using P95 metrics against each scenario's best."""
+    """Compare one workload across scenarios using tail-percentile metrics against each scenario's best."""
+    tail_p = validate_tail_percentile(tail_percentile)
     if not scenarios:
         return [], ['没有可比较的场景。']
     bulk = workload_name == 'bulk'
@@ -276,8 +332,8 @@ def workload_ranking(
     for scene in scenarios:
         name = scene['name']
         entries = ranking_entries(
-            rows, name, workload_name, 'bulk_p95' if bulk else 'workload_p95',
-            ccs=ccs, workloads=workloads, repeats=repeats,
+            rows, name, workload_name, 'bulk_tail' if bulk else 'workload_tail',
+            ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p,
         )
         valid = [e for e in entries if e['valid'] and e['value'] is not None]
         best = (max(e['value'] for e in valid) if bulk else min(e['value'] for e in valid)) if valid else 0
@@ -301,7 +357,10 @@ def workload_ranking(
                 for r in selected:
                     if r['status'] == 'success':
                         try:
-                            v = float(r['fct_slowdown_p95'])
+                            raw = row_metric_raw(r, 'fct_slowdown_tail', tail_p)
+                            if raw in ('', None):
+                                continue
+                            v = float(raw)
                             if math.isfinite(v) and v > 0:
                                 good_values.append(v)
                         except (KeyError, TypeError, ValueError):
@@ -353,16 +412,21 @@ def workload_ranking_tables(
     ccs: list[str],
     workloads: list[str],
     repeats: int,
+    tail_percentile: float = DEFAULT_TAIL_PERCENTILE,
 ) -> list[str]:
+    tail_p = validate_tail_percentile(tail_percentile)
+    p_lbl = tail_label(tail_p)
     result = [
         '## 各负载所有场景排名', '',
-        '每个场景等权，先将 P95 指标换算为相对该场景最优值的得分，再对所有场景取几何均值。',
-        'Bulk 得分为算法 P95 Norm Power / 最优 P95 Norm Power；其他负载得分为最优 P95 FCT Slowdown / 算法 P95 FCT Slowdown。',
+        f'每个场景等权，先将 {p_lbl} 指标换算为相对该场景最优值的得分，再对所有场景取几何均值。',
+        f'Bulk 得分为算法 {p_lbl} Norm Power / 最优 {p_lbl} Norm Power；其他负载得分为最优 {p_lbl} FCT Slowdown / 算法 {p_lbl} FCT Slowdown。',
         'workload 超时按 0 分计算；进程错误或缺失结果不参与排名。', '',
     ]
     for wk in workloads:
-        entries, warnings = workload_ranking(scenarios, rows, wk, ccs=ccs, workloads=workloads, repeats=repeats)
-        result.extend([f'### {wk}：所有场景排名（P95）', ''])
+        entries, warnings = workload_ranking(
+            scenarios, rows, wk, ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p
+        )
+        result.extend([f'### {wk}：所有场景排名（{p_lbl}）', ''])
         if warnings:
             result.extend(warnings + [''])
         if entries:
@@ -389,7 +453,10 @@ def ranking_tables(
     ccs: list[str],
     workloads: list[str],
     repeats: int,
+    tail_percentile: float = DEFAULT_TAIL_PERCENTILE,
 ) -> list[str]:
+    tail_p = validate_tail_percentile(tail_percentile)
+    p_lbl = tail_label(tail_p)
     result = [
         '## 算法排名', '',
         '每个场景分别排名；指标为各次成功运行的算术平均，使用未四舍五入的值计算。',
@@ -406,12 +473,15 @@ def ranking_tables(
 
     if 'bulk' in workloads:
         result.extend([
-            '### Bulk：P95 Norm Power', '',
-            '| 场景 | 排名 | 算法 | 成功/总次数 | P95 Norm Power ↑ | 相对最优差距 | 状态 |',
+            f'### Bulk：{p_lbl} Norm Power', '',
+            f'| 场景 | 排名 | 算法 | 成功/总次数 | {p_lbl} Norm Power ↑ | 相对最优差距 | 状态 |',
             '|---|---:|---|---:|---:|---:|---|',
         ])
         for scenario in scenarios:
-            for e in ranking_entries(rows, scenario['name'], 'bulk', 'bulk_p95', ccs=ccs, workloads=workloads, repeats=repeats):
+            for e in ranking_entries(
+                rows, scenario['name'], 'bulk', 'bulk_tail',
+                ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p,
+            ):
                 result.append(row([scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['norm']), e['gap'], e['status']], e))
         result.append('')
         result.extend([
@@ -420,17 +490,23 @@ def ranking_tables(
             '|---|---:|---|---:|---:|---:|---|',
         ])
         for scenario in scenarios:
-            for e in ranking_entries(rows, scenario['name'], 'bulk', 'bulk', ccs=ccs, workloads=workloads, repeats=repeats):
+            for e in ranking_entries(
+                rows, scenario['name'], 'bulk', 'bulk',
+                ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p,
+            ):
                 result.append(row([scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['norm']), e['gap'], e['status']], e))
         result.append('')
     for wk in (w for w in workloads if w != 'bulk'):
         result.extend([
-            f'### {wk}：P95 FCT Slowdown', '',
-            '| 场景 | 排名 | 算法 | 成功/总次数 | P95 FCT Slowdown ↓ | 相对最优差距 | 状态 |',
+            f'### {wk}：{p_lbl} FCT Slowdown', '',
+            f'| 场景 | 排名 | 算法 | 成功/总次数 | {p_lbl} FCT Slowdown ↓ | 相对最优差距 | 状态 |',
             '|---|---:|---|---:|---:|---:|---|',
         ])
         for scenario in scenarios:
-            for e in ranking_entries(rows, scenario['name'], wk, 'workload_p95', ccs=ccs, workloads=workloads, repeats=repeats):
+            for e in ranking_entries(
+                rows, scenario['name'], wk, 'workload_tail',
+                ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p,
+            ):
                 result.append(row([scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['slow'], 'x'), e['gap'], e['status']], e))
         result.append('')
         result.extend([
@@ -439,30 +515,44 @@ def ranking_tables(
             '|---|---:|---|---:|---:|---:|---|',
         ])
         for scenario in scenarios:
-            for e in ranking_entries(rows, scenario['name'], wk, 'workload', ccs=ccs, workloads=workloads, repeats=repeats):
+            for e in ranking_entries(
+                rows, scenario['name'], wk, 'workload',
+                ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p,
+            ):
                 result.append(row([scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['slow'], 'x'), e['gap'], e['status']], e))
         result.append('')
     non_bulk = [w for w in workloads if w != 'bulk']
     if 'bulk' in workloads and non_bulk:
-        headers = ['场景', '排名', '算法', '成功/总次数', 'P95 Norm Power']
-        headers.extend(f'{wk} P95 Slowdown' for wk in non_bulk)
-        headers.extend(['P95 Slowdown 几何均值', '综合评分 ↑', '相对最优差距', '状态'])
+        headers = ['场景', '排名', '算法', '成功/总次数', f'{p_lbl} Norm Power']
+        headers.extend(f'{wk} {p_lbl} Slowdown' for wk in non_bulk)
+        headers.extend([f'{p_lbl} Slowdown 几何均值', '综合评分 ↑', '相对最优差距', '状态'])
         result.extend([
-            '### 综合排名（基于 P95）', '',
-            '各 workload 的 P95 FCT Slowdown 重复运行先取算术平均，再对所有 workload 等权取几何均值；综合评分 = sqrt(P95 Norm Power / P95 Slowdown 几何均值)。',
+            f'### 综合排名（基于 {p_lbl}）', '',
+            f'各 workload 的 {p_lbl} FCT Slowdown 重复运行先取算术平均，再对所有 workload 等权取几何均值；综合评分 = sqrt({p_lbl} Norm Power / {p_lbl} Slowdown 几何均值)。',
             '所有 workload 和 bulk 均需完成全部重复；workload 超时的场景综合评分为 0。', '',
             '| ' + ' | '.join(headers) + ' |',
             '|' + '|'.join(['---'] * len(headers)) + '|',
         ])
         for scenario in scenarios:
-            for e in ranking_entries(rows, scenario['name'], '', 'combined', ccs=ccs, workloads=workloads, repeats=repeats):
+            for e in ranking_entries(
+                rows, scenario['name'], '', 'combined',
+                ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p,
+            ):
                 cells = [scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['norm'])]
                 cells.extend(fmt(e['workload_slows'].get(wk), 'x') for wk in non_bulk)
                 cells.extend([fmt(e['slow'], 'x'), fmt(e['value']), e['gap'], e['status']])
                 result.append(row(cells, e))
         result.append('')
-    result.extend(workload_ranking_tables(scenarios, rows, ccs=ccs, workloads=workloads, repeats=repeats))
-    result.extend(overall_ranking_table(scenarios, rows, ccs=ccs, workloads=workloads, repeats=repeats))
+    result.extend(
+        workload_ranking_tables(
+            scenarios, rows, ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p
+        )
+    )
+    result.extend(
+        overall_ranking_table(
+            scenarios, rows, ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p
+        )
+    )
     return result
 
 
@@ -476,6 +566,7 @@ def render_report(
     ccs: list[str],
     workloads: list[str],
     repeats: int,
+    tail_percentile: float = DEFAULT_TAIL_PERCENTILE,
     tcp_segment_size_bytes: int | None = 1448,
     default_one_way_delay_ms: float = DEFAULT_ONE_WAY_DELAY_MS,
     workload_max_s: float = 1800.0,
@@ -483,6 +574,8 @@ def render_report(
     extra_header_lines: list[str] | None = None,
     extra_config_lines: list[str] | None = None,
 ) -> str:
+    tail_p = validate_tail_percentile(tail_percentile)
+    p_lbl = tail_label(tail_p)
     ok = sum(row['status'] == 'success' for row in rows)
     expected = len(scenarios) * len(ccs) * len(workloads) * repeats
     text = [
@@ -490,6 +583,7 @@ def render_report(
         f'- 数据集：{dataset_label}',
         f'- 算法：{", ".join(ccs)}',
         f'- 负载：{", ".join(workloads)}',
+        f'- 尾部分位点：{p_lbl}',
     ]
     if tcp_segment_size_bytes is not None:
         text.append(f'- TCP 数据段大小：{tcp_segment_size_bytes} 字节')
@@ -512,18 +606,18 @@ def render_report(
         if wk == 'bulk':
             fields = [
                 'capacity_mbps', 'throughput_mbps', 'utilization', 'qdelay_avg_ms',
-                'qdelay_p95_ms', 'util_power', 'norm_power', 'norm_power_p95', 'drop_rate',
+                'qdelay_tail_ms', 'util_power', 'norm_power', 'norm_power_tail', 'drop_rate',
             ]
             text.append(
-                '| 场景 | 算法 | 成功/总次数 | 容量 Mbps | 吞吐 Mbps | 利用率 | 平均排队延迟 ms | P95 排队延迟 ms | Power ↑ | Norm Power ↑ | P95 Norm Power ↑ | 门控丢包率 |'
+                f'| 场景 | 算法 | 成功/总次数 | 容量 Mbps | 吞吐 Mbps | 利用率 | 平均排队延迟 ms | {p_lbl} 排队延迟 ms | Power ↑ | Norm Power ↑ | {p_lbl} Norm Power ↑ | 门控丢包率 |'
             )
         else:
             info = work.get(wk)
             if info:
                 text.extend([f"文件：`{info['path']}`；数据块数：{info['count']}；到达跨度：{info['span_s']:.3f} s", ''])
-            fields = ['duration_s', 'requests', 'rct_mean_ms', 'rct_p95_ms', 'fct_slowdown', 'fct_slowdown_p95', 'mortise_qoe']
+            fields = ['duration_s', 'requests', 'rct_mean_ms', 'rct_tail_ms', 'fct_slowdown', 'fct_slowdown_tail', 'mortise_qoe']
             text.append(
-                '| 场景 | 算法 | 成功/总次数 | Workload 完成时间 s | 完成数据块 | 平均数据块完成时间 ms | P95 数据块完成时间 ms | FCT Slowdown ↓ | P95 FCT Slowdown ↓ | Mortise QoE |'
+                f'| 场景 | 算法 | 成功/总次数 | Workload 完成时间 s | 完成数据块 | 平均数据块完成时间 ms | {p_lbl} 数据块完成时间 ms | FCT Slowdown ↓ | {p_lbl} FCT Slowdown ↓ | Mortise QoE |'
             )
         text.append('|' + '|'.join(['---'] * (3 + len(fields))) + '|')
         for scenario in scenarios:
@@ -531,10 +625,10 @@ def render_report(
                 subset = [r for r in rows if r['scenario'] == scenario['name'] and r['cc'] == cc and r['workload'] == wk]
                 good = [r for r in subset if r['status'] == 'success']
                 text.append(
-                    '| ' + ' | '.join([scenario['name'], cc, f'{len(good)}/{repeats}'] + [mean(good, f) for f in fields]) + ' |'
+                    '| ' + ' | '.join([scenario['name'], cc, f'{len(good)}/{repeats}'] + [mean(good, f, tail_p) for f in fields]) + ' |'
                 )
         text.append('')
-    text.extend(ranking_tables(scenarios, rows, ccs=ccs, workloads=workloads, repeats=repeats))
+    text.extend(ranking_tables(scenarios, rows, ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p))
     text.extend(['## 场景与运行配置', ''])
     if any('up_delay' not in s.get('files', {}) or 'down_delay' not in s.get('files', {}) for s in scenarios):
         text.append(f'- 缺失延迟文件时，单向基础延迟：{default_one_way_delay_ms:g} ms。')
@@ -573,17 +667,20 @@ def print_overview(
     ccs: list[str],
     workloads: list[str],
     repeats: int,
+    tail_percentile: float = DEFAULT_TAIL_PERCENTILE,
 ) -> None:
     """Print equal-weight scenario summaries, excluding incomplete groups."""
+    tail_p = validate_tail_percentile(tail_percentile)
+    p_lbl = tail_label(tail_p)
     groups: dict[tuple[str, str, str], list[dict]] = {}
     for row in rows:
         groups.setdefault((row['scenario'], row['cc'], row['workload']), []).append(row)
     expected_repeats = {str(i) for i in range(1, repeats + 1)}
-    columns = [('Norm Power', 'bulk', 'norm_power'), ('P95 Norm Power', 'bulk', 'norm_power_p95')] if 'bulk' in workloads else []
+    columns = [('Norm Power', 'bulk', 'norm_power'), (f'{p_lbl} Norm Power', 'bulk', 'norm_power_tail')] if 'bulk' in workloads else []
     for wk in workloads:
         if wk != 'bulk':
             columns.append((f'{wk} FCT', wk, 'fct_slowdown'))
-            columns.append((f'{wk} P95 FCT', wk, 'fct_slowdown_p95'))
+            columns.append((f'{wk} {p_lbl} FCT', wk, 'fct_slowdown_tail'))
     table = [['Algorithm'] + [col[0] for col in columns]]
     for cc in ccs:
         cells = [cc]
@@ -598,7 +695,16 @@ def print_overview(
                 ):
                     continue
                 try:
-                    samples = [float(r[metric]) for r in group]
+                    samples = []
+                    missing_val = False
+                    for r in group:
+                        raw = row_metric_raw(r, metric, tail_p)
+                        if raw in ('', None):
+                            missing_val = True
+                            break
+                        samples.append(float(raw))
+                    if missing_val:
+                        continue
                 except (KeyError, TypeError, ValueError):
                     continue
                 if any(not math.isfinite(v) or (v < 0 if wk == 'bulk' else v <= 0) for v in samples):
@@ -615,7 +721,7 @@ def print_overview(
         table.append(cells)
     widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
     print('\n结果概览  ·  数值后为完整场景数 / 总场景数')
-    print('  Norm Power / P95 Norm Power：场景算术均值；FCT / P95 FCT Slowdown：场景几何均值。')
+    print(f'  Norm Power / {p_lbl} Norm Power：场景算术均值；FCT / {p_lbl} FCT Slowdown：场景几何均值。')
     print('  覆盖场景数不同时，算法结果不宜直接比较。')
     for index, row in enumerate(table):
         print('  ' + '  '.join(value.ljust(widths[i]) for i, value in enumerate(row)))

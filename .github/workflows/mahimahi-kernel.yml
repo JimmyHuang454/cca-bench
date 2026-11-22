@@ -53,6 +53,11 @@ on:
         type: string
         default: "20"
         required: true
+      tail_percentile:
+        description: "Tail percentile for queuing delay, Norm Power, RCT, FCT Slowdown & rankings (e.g. 50, 90, 95, 99)"
+        type: string
+        default: "95"
+        required: true
 
 permissions:
   contents: read
@@ -83,6 +88,7 @@ jobs:
           MAX_BULK_S: ${{ inputs.max_bulk_s }}
           WORKLOAD_TIMEOUT_S: ${{ inputs.workload_timeout_s }}
           MAX_SHARDS: ${{ inputs.max_shards }}
+          TAIL_PERCENTILE: ${{ inputs.tail_percentile }}
         run: python3 scripts/bench/run_kernel_lines.py plan
 
   build:
@@ -237,6 +243,7 @@ jobs:
           MAX_BULK_S: ${{ inputs.max_bulk_s }}
           WORKLOAD_TIMEOUT_S: ${{ inputs.workload_timeout_s }}
           BULK_WARMUP_S: "0"
+          TAIL_PERCENTILE: ${{ inputs.tail_percentile }}
         shell: bash
         run: |
           set -euxo pipefail

@@ -413,6 +413,7 @@ main(int argc, char* argv[])
     uint32_t debugMs = 0;
     std::string workloadFile;
     double baseRttMs = 0.0;
+    double tailPercentile = 95.0;
     bool evalJson = false;
 
     CommandLine cmd(__FILE__);
@@ -483,8 +484,12 @@ main(int argc, char* argv[])
     cmd.AddValue("debugMs", "Emit Copa-Auto internal telemetry every N ms (0=off)", debugMs);
     cmd.AddValue("workloadFile", "Optional Mortise <gap_ms> <size_bytes> .wk workload", workloadFile);
     cmd.AddValue("baseRttMs", "Optional override total base RTT in ms (0=use bottleneckDelay/accessDelay)", baseRttMs);
+    cmd.AddValue("tailPercentile", "Configurable tail percentile in (0, 100] for qdelay/norm_power/RCT/FCT slowdown", tailPercentile);
     cmd.AddValue("evalJson", "Print single-line JSON compatible with mahimahi_eval.py", evalJson);
     cmd.Parse(argc, argv);
+
+    NS_ABORT_MSG_UNLESS(std::isfinite(tailPercentile) && tailPercentile > 0.0 && tailPercentile <= 100.0,
+                        "Invalid --tailPercentile (expected (0, 100]): " << tailPercentile);
 
     if (profile == "lines")
     {
@@ -937,23 +942,29 @@ main(int argc, char* argv[])
     if (evalJson)
     {
         double effBaseRttMs = (baseRttMs > 0.0) ? baseRttMs : (2.0 * (bottleneckDelayMs + accessDelayMs));
-        if ((profile == "file" || profile == "lines") && !g_baseRttSamples[0].empty())
+        if (profile == "lines")
+        {
+            const double durMs = std::max(stopTime * 1000.0, 1e-3);
+            effBaseRttMs = (LineIntegral(g_upDelay, durMs, g_linePeriodMs) +
+                            LineIntegral(g_downDelay, durMs, g_linePeriodMs)) /
+                           durMs;
+        }
+        else if (profile == "file" && !g_baseRttSamples[0].empty())
         {
             double sumBase = 0.0;
             for (double base : g_baseRttSamples[0]) sumBase += base;
             effBaseRttMs = sumBase / g_baseRttSamples[0].size();
         }
-        if (profile == "lines" && g_baseRttSamples[0].empty()) effBaseRttMs = LineValue(g_upDelay, 0) + LineValue(g_downDelay, 0);
         std::vector<double> qd;
         uint64_t delivPkts = 0;
         uint64_t dropPkts = 0;
         if (g_mmDataGate)
         {
-            if (profile != "lines") qd = g_mmDataGate->GetQDelaysMs();
+            qd = g_mmDataGate->GetQDelaysMs();
             delivPkts = g_mmDataGate->GetDeliveredPkts();
             dropPkts = g_mmDataGate->GetDroppedPkts();
         }
-        if (qd.empty())
+        if (qd.empty() && profile != "lines")
         {
             const auto& rttSrc = (!g_rttSamples.empty() && !g_rttSamples[0].empty())
                                      ? g_rttSamples[0]
@@ -961,7 +972,7 @@ main(int argc, char* argv[])
             qd.reserve(rttSrc.size());
             for (size_t i = 0; i < rttSrc.size(); ++i)
             {
-                double base = (profile == "file" || profile == "lines") && i < g_baseRttSamples[0].size()
+                double base = (profile == "file") && i < g_baseRttSamples[0].size()
                                   ? g_baseRttSamples[0][i] : effBaseRttMs;
                 qd.push_back(std::max(rttSrc[i] - base, 0.0));
             }
@@ -981,36 +992,43 @@ main(int argc, char* argv[])
             qdAvg /= static_cast<double>(qd.size());
         }
         double qdP95 = Percentile(qd, 95);
+        double qdTail = Percentile(qd, tailPercentile);
         double dropRate = (delivPkts + dropPkts > 0)
                               ? static_cast<double>(dropPkts) / static_cast<double>(delivPkts + dropPkts)
                               : 0.0;
         double util = (avgCap > 1e-6) ? (sum / avgCap) : 0.0;
         double estRttMs = effBaseRttMs + qdAvg;
         double estRttP95Ms = effBaseRttMs + qdP95;
+        double estRttTailMs = effBaseRttMs + qdTail;
         double utilPower = (estRttMs > 1e-6) ? (util / (estRttMs / 1000.0)) : 0.0;
         double normPower = utilPower * (effBaseRttMs / 1000.0);
         double normPowerP95 = (estRttP95Ms > 1e-6) ? (util * effBaseRttMs / estRttP95Ms) : 0.0;
+        double normPowerTail = (estRttTailMs > 1e-6) ? (util * effBaseRttMs / estRttTailMs) : 0.0;
         double tputPower = (estRttMs > 1e-6) ? (sum / (estRttMs / 1000.0)) : 0.0;
 
         std::ostringstream js;
         js << std::fixed << std::setprecision(6);
         js << "{\"duration_s\":" << measured
+           << ",\"tail_percentile\":" << tailPercentile
            << ",\"capacity_mbps\":" << avgCap
            << ",\"throughput_mbps\":" << sum
            << ",\"utilization\":" << util
            << ",\"qdelay_avg_ms\":" << qdAvg
            << ",\"qdelay_p95_ms\":" << qdP95
+           << ",\"qdelay_tail_ms\":" << qdTail
            << ",\"base_rtt_ms\":" << effBaseRttMs
            << ",\"est_rtt_ms\":" << estRttMs
            << ",\"util_power\":" << utilPower
            << ",\"norm_power\":" << normPower
            << ",\"norm_power_p95\":" << normPowerP95
+           << ",\"norm_power_tail\":" << normPowerTail
            << ",\"tput_power\":" << tputPower
            << ",\"drop_rate\":" << dropRate;
         if (appMode && appRx)
         {
             std::vector<double> rcts = appRx->rctsMs;
-            double meanRct = 0.0, p50Rct = 0.0, p95Rct = 0.0, fctSlowdown = 0.0, fctSlowdownP95 = 0.0, mortiseQoe = 0.0;
+            double meanRct = 0.0, p50Rct = 0.0, p95Rct = 0.0, tailRct = 0.0;
+            double fctSlowdown = 0.0, fctSlowdownP95 = 0.0, fctSlowdownTail = 0.0, mortiseQoe = 0.0;
             if (!rcts.empty())
             {
                 double qoeSum = 0.0, logSdSum = 0.0;
@@ -1048,9 +1066,11 @@ main(int argc, char* argv[])
                 mortiseQoe = qoeSum / static_cast<double>(rcts.size());
                 fctSlowdown = std::exp(logSdSum / static_cast<double>(rcts.size()));
                 fctSlowdownP95 = Percentile(sds, 95);
+                fctSlowdownTail = Percentile(sds, tailPercentile);
                 std::vector<double> sortedRcts = rcts;
                 p50Rct = Percentile(sortedRcts, 50);
                 p95Rct = Percentile(sortedRcts, 95);
+                tailRct = Percentile(sortedRcts, tailPercentile);
             }
             uint64_t retx = g_retx.empty() ? 0 : g_retx[0];
             double retxRatio = (delivPkts + retx > 0)
@@ -1061,16 +1081,32 @@ main(int argc, char* argv[])
                << ",\"rct_mean_ms\":" << meanRct
                << ",\"rct_p50_ms\":" << p50Rct
                << ",\"rct_p95_ms\":" << p95Rct
+               << ",\"rct_tail_ms\":" << tailRct
                << ",\"retrans_pkts\":" << retx
                << ",\"retrans_ratio\":" << retxRatio
                << ",\"fct_slowdown\":" << fctSlowdown
                << ",\"fct_slowdown_p95\":" << fctSlowdownP95
+               << ",\"fct_slowdown_tail\":" << fctSlowdownTail
                << ",\"mortise_qoe\":" << mortiseQoe;
         }
         js << "}\n";
         std::cout << js.str() << std::flush;
         Simulator::Destroy();
         return 0;
+    }
+
+    if (rttSampleLog && g_mmDataGate)
+    {
+        std::ofstream qdLog(prefix + "-qdelay-samples.csv");
+        qdLog << "time_s,qdelay_ms\n";
+        const auto& qdTimes = g_mmDataGate->GetQDelayTimesS();
+        const auto& qdVals = g_mmDataGate->GetQDelaysMs();
+        const size_t m = std::min(qdTimes.size(), qdVals.size());
+        qdLog << std::setprecision(12);
+        for (size_t i = 0; i < m; ++i)
+        {
+            qdLog << qdTimes[i] << "," << qdVals[i] << "\n";
+        }
     }
 
     std::ofstream json(prefix + "-metrics.json");

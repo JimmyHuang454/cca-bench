@@ -615,5 +615,52 @@ class TraceBenchTests(unittest.TestCase):
                     proc.communicate()
 
 
+    def test_custom_tail_percentile_updates_cli_report_overview_and_resume_cache(self):
+        binary = bench.BINARY
+        if not binary.exists():
+            self.skipTest('build tcp-trace-bench first')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lines = root / 'lines' / 'sample'
+            lines.mkdir(parents=True)
+            (lines / 'a.up.txt').write_text('0,5\n1000,0\n')
+            (lines / 'a.down.txt').write_text('0,5\n1000,0\n')
+            work = root / 'datasets/workloads'
+            work.mkdir(parents=True)
+            (work / 'tiny.wk').write_text('0 1000\n10 2000\n')
+
+            out99 = io.StringIO()
+            with patch.multiple(bench, ROOT=root, LINES_DIR=lines, RESULTS_DIR=root / 'results',
+                                BINARY=binary, CCS=['cubic'], WORKLOADS=['bulk', 'tiny'],
+                                REPEATS=1, TAIL_PERCENTILE=99, RESUME=True), \
+                    contextlib.redirect_stdout(out99):
+                self.assertEqual(bench.main(), 0)
+            self.assertIn('P99 Norm Power', out99.getvalue())
+            self.assertIn('tiny P99 FCT', out99.getvalue())
+            report99 = next((root / 'results').rglob('report.md')).read_text()
+            self.assertIn('- 尾部分位点：P99', report99)
+            self.assertIn('P99 排队延迟 ms', report99)
+            self.assertIn('P99 Norm Power ↑', report99)
+            self.assertIn('P99 数据块完成时间 ms', report99)
+            self.assertIn('P99 FCT Slowdown ↓', report99)
+            self.assertIn('### 综合排名（基于 P99）', report99)
+            self.assertIn('### bulk：所有场景排名（P99）', report99)
+            meta99 = json.loads(next((root / 'results').rglob('metadata.json')).read_text())
+            self.assertEqual(meta99['tail_percentile'], 99.0)
+
+            # Switching TAIL_PERCENTILE to 50 must invalidate RESUME cache and rerun with --tailPercentile=50
+            out50 = io.StringIO()
+            with patch.multiple(bench, ROOT=root, LINES_DIR=lines, RESULTS_DIR=root / 'results',
+                                BINARY=binary, CCS=['cubic'], WORKLOADS=['bulk', 'tiny'],
+                                REPEATS=1, TAIL_PERCENTILE=50, RESUME=True), \
+                    contextlib.redirect_stdout(out50):
+                self.assertEqual(bench.main(), 0)
+            self.assertIn('已恢复：0  |  待运行：2', out50.getvalue())
+            self.assertIn('P50 Norm Power', out50.getvalue())
+            report50 = next((root / 'results').rglob('report.md')).read_text()
+            self.assertIn('- 尾部分位点：P50', report50)
+            self.assertIn('### 综合排名（基于 P50）', report50)
+
+
 if __name__ == '__main__':
     unittest.main()

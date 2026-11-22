@@ -28,9 +28,13 @@ class KernelCiTests(unittest.TestCase):
     def test_v2_and_nc_j0_are_valid_kernel_client_options_and_quinn_removed(self):
         self.assertIn(('CopaAutoV2', 'copa_auto_v2'), ci_runner.EXTRA_CONGESTION_VARIANTS)
         self.assertIn(('CopaAutoNcJ0', 'copa_auto_nc_j0'), ci_runner.EXTRA_CONGESTION_VARIANTS)
+        self.assertIn(('CopaNc', 'copa_nc'), ci_runner.EXTRA_CONGESTION_VARIANTS)
         self.assertEqual(run_mahimahi_suite.resolve_mortise_cc('copa-auto-v2'), 'copa_auto_v2')
         self.assertEqual(run_mahimahi_suite.resolve_mortise_cc('copa'), 'copa_orig')
+        self.assertEqual(run_mahimahi_suite.resolve_mortise_cc('copa_nc'), 'copa_nc')
         self.assertEqual(run_kernel_lines.resolve_kernel_cc('copa'), 'copa_orig')
+        self.assertEqual(run_kernel_lines.resolve_kernel_cc('copa_nc'), 'copa_nc')
+        self.assertEqual(run_kernel_lines.resolve_kernel_cc('copa_orig_nc'), 'copa_nc')
         self.assertEqual(run_kernel_lines.resolve_kernel_cc('copa-auto-v2'), 'copa_auto_v2')
         self.assertEqual(run_kernel_lines.resolve_kernel_cc('copa_auto_theta0.98'), 'copa_auto_t98')
         self.assertFalse(hasattr(ci_runner, 'cmd_run_quinn'))
@@ -284,6 +288,104 @@ class KernelCiTests(unittest.TestCase):
             self.assertIn('500KB', report_md)
             with csv_path.open(newline='', encoding='utf-8') as f:
                 self.assertEqual(len(list(csv.DictReader(f))), 4)
+
+    def test_custom_tail_percentile_propagates_through_kernel_plan_run_and_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene = root / 'scene'
+            scene.mkdir()
+            (scene / 'up.txt').write_text('0,12m\n2000,0\n', encoding='utf-8')
+            (scene / 'down.txt').write_text('0,12m\n2000,0\n', encoding='utf-8')
+            (scene / 'up.delay.txt').write_text('0,10\n# end_ms=2000\n', encoding='utf-8')
+            (scene / 'down.delay.txt').write_text('0,10\n# end_ms=2000\n', encoding='utf-8')
+            wk_file = root / 'tiny.wk'
+            wk_file.write_text('0 15000\n10 15000\n', encoding='utf-8')
+
+            _, plan_meta_99 = run_kernel_lines.build_lines_plan(
+                dataset='basic',
+                scenarios_filter=['asymmetric_delay'],
+                workloads=['bulk', 'app'],
+                ccs=['cubic'],
+                queues=['500KB'],
+                repeats=1,
+                max_bulk_s=0.0,
+                workload_timeout_s=300.0,
+                bulk_warmup_s=0.0,
+                max_shards=2,
+                tail_percentile=99.0,
+                root=ROOT,
+            )
+            self.assertEqual(plan_meta_99['tail_percentile'], 99.0)
+
+            conv = lines_to_mahimahi.convert_scenario(lines_common.discover(scene)[0], root / 'conv')
+            out_dir = root / 'shard99'
+            out_dir.mkdir()
+
+            def fake_run_mm(mm_cmd, expected_out, link_log, *, allow_timeout=False):
+                link_log.write_text(
+                    '0 # 1500\n0 - 1500 5\n500 - 1500 10\n1000 # 1500000\n1000 - 1350000 100\n',
+                    encoding='utf-8',
+                )
+                if not allow_timeout or 'tiny' in expected_out.name:
+                    expected_out.write_text(
+                        'id,size,client_send,server_recv,client_recv,rct\n'
+                        '1,15000,1000000000,1010000000,1040000000,40.0\n'
+                        '2,15000,1010000000,1020000000,1210000000,200.0\n'
+                        '0,0,0,0,0,0\n',
+                        encoding='utf-8',
+                    )
+                return subprocess.CompletedProcess(mm_cmd, 0, '', '')
+
+            work_info = {'tiny': {'path': str(wk_file), 'count': 2, 'span_s': 0.01}}
+            rows = []
+            with patch.object(run_kernel_lines, 'run_mm_cmd', side_effect=fake_run_mm):
+                for wk in ('bulk', 'tiny'):
+                    rows.append(run_kernel_lines.evaluate_single_run(
+                        conv=conv,
+                        dataset_name='basic',
+                        workload_name=wk,
+                        cc='cubic',
+                        queue='500000',
+                        repeat=1,
+                        client_bin=Path('/bin/true'),
+                        bulk_wk=wk_file,
+                        work_info=work_info,
+                        out_dir=out_dir,
+                        workload_timeout_s=30.0,
+                        bulk_warmup_s=0.0,
+                        keep_logs=False,
+                        tail_percentile=99.0,
+                    ))
+
+            bulk_row = next(r for r in rows if r['workload'] == 'bulk')
+            tiny_row = next(r for r in rows if r['workload'] == 'tiny')
+            self.assertEqual(bulk_row['tail_percentile'], 99.0)
+            self.assertLess(bulk_row['norm_power_tail'], bulk_row['norm_power_p95'])
+            self.assertGreater(tiny_row['fct_slowdown_tail'], tiny_row['fct_slowdown_p95'])
+
+            run_kernel_lines.trace_report.write_runs_csv(
+                out_dir / 'shard_runs.csv', rows, extra_fields=run_kernel_lines.KERNEL_CSV_EXTRA_FIELDS
+            )
+            plan_meta = {
+                'dataset': 'basic',
+                'scenarios': [{'name': 'scene', 'duration_s': 2.0, 'has_up_delay': True, 'has_down_delay': True}],
+                'workloads': ['bulk', 'tiny'],
+                'work_info': work_info,
+                'ccs': ['cubic'],
+                'queues': ['500000'],
+                'repeats': 1,
+                'tail_percentile': 99.0,
+                'max_bulk_s': 0.0,
+                'workload_timeout_s': 30.0,
+                'bulk_warmup_s': 0.0,
+            }
+            _, _, report_md = run_kernel_lines.summarize_results(out_dir, root / 'summary99', plan_meta=plan_meta)
+            self.assertIn('- 尾部分位点：P99', report_md)
+            self.assertIn('P99 排队延迟 ms', report_md)
+            self.assertIn('P99 Norm Power ↑', report_md)
+            self.assertIn('P99 FCT Slowdown ↓', report_md)
+            self.assertIn('### 综合排名（基于 P99）', report_md)
+            self.assertIn('### bulk：所有场景排名（P99）', report_md)
 
 
 if __name__ == '__main__':

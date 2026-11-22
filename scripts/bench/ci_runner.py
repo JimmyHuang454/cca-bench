@@ -38,6 +38,7 @@ EXTRA_CONGESTION_VARIANTS: list[tuple[str, str]] = [
     ("CopaAutoT98", "copa_auto_t98"),
     ("CopaAutoT", "copa_auto_t"),
     ("CopaOrig", "copa_orig"),
+    ("CopaNc", "copa_nc"),
     ("Leocc", "leocc"),
     ("Cdg", "cdg"),
     ("Veno", "veno"),

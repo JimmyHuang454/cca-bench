@@ -228,6 +228,11 @@ class MahimahiGate : public ErrorModel
         return m_qdelaysMs;
     }
 
+    const std::vector<double>& GetQDelayTimesS() const
+    {
+        return m_qdelayTimesS;
+    }
+
     uint64_t GetDeliveredPkts() const
     {
         return m_deliveredPkts;
@@ -347,6 +352,7 @@ class MahimahiGate : public ErrorModel
                 if (Simulator::Now().GetSeconds() >= m_statsWarmupS)
                 {
                     m_qdelaysMs.push_back((Simulator::Now() - enq).GetSeconds() * 1000.0);
+                    m_qdelayTimesS.push_back(Simulator::Now().GetSeconds());
                     m_deliveredPkts++;
                 }
                 m_reinject = true;
@@ -370,6 +376,7 @@ class MahimahiGate : public ErrorModel
     double m_loss{0.0};                 ///< Random loss probability
     std::deque<Time> m_enqTimes;        ///< Enqueue timestamps matching m_buffer
     std::vector<double> m_qdelaysMs;    ///< Per-packet queuing delays after warmup [ms]
+    std::vector<double> m_qdelayTimesS; ///< Delivery timestamps matching m_qdelaysMs [s]
     double m_statsWarmupS{0.0};         ///< Warmup cutoff for qdelay/drop stats [s]
     uint64_t m_deliveredPkts{0};        ///< Packets delivered after warmup
     uint64_t m_droppedPkts{0};          ///< Packets dropped after warmup

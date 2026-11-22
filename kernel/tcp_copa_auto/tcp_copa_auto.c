@@ -191,6 +191,18 @@ static void tcp_copa_init_orig(struct sock *sk)
 	tcp_copa_init_common(sk, cfg);
 }
 
+static void tcp_copa_init_orig_nc(struct sock *sk)
+{
+	struct copa_auto_cfg cfg = {
+		.adaptive = false,
+		.mode_switching = false,
+		.jitter_us = -1,
+		.theta_milli = 500,
+		.init_delta_q20 = COPA_DELTA_MAX_Q20, /* 0.50 */
+	};
+	tcp_copa_init_common(sk, cfg);
+}
+
 static void tcp_copa_release(struct sock *sk)
 {
 	struct tcp_copa_priv *priv = inet_csk_ca(sk);
@@ -326,6 +338,7 @@ DEFINE_COPA_OPS(tcp_copa_auto_t90_ops,   "copa_auto_t90",   tcp_copa_init_auto_t
 DEFINE_COPA_OPS(tcp_copa_auto_t98_ops,   "copa_auto_t98",   tcp_copa_init_auto_t98);
 DEFINE_COPA_OPS(tcp_copa_auto_t_ops,     "copa_auto_t",     tcp_copa_init_auto_t);
 DEFINE_COPA_OPS(tcp_copa_orig_ops,       "copa_orig",       tcp_copa_init_orig);
+DEFINE_COPA_OPS(tcp_copa_nc_ops,         "copa_nc",         tcp_copa_init_orig_nc);
 
 static struct tcp_congestion_ops * const copa_ops_list[] = {
 	&tcp_copa_v2_ops,
@@ -336,6 +349,7 @@ static struct tcp_congestion_ops * const copa_ops_list[] = {
 	&tcp_copa_auto_t98_ops,
 	&tcp_copa_auto_t_ops,
 	&tcp_copa_orig_ops,
+	&tcp_copa_nc_ops,
 };
 
 static int __init tcp_copa_auto_register(void)
@@ -350,7 +364,7 @@ static int __init tcp_copa_auto_register(void)
 			return ret;
 		}
 	}
-	pr_info("tcp_copa_auto: registered copa_auto, copa_auto_nc, copa_auto_nc_j0, copa_auto_t90, copa_auto_t98, copa_auto_t, copa_orig\n");
+	pr_info("tcp_copa_auto: registered copa_auto_v2, copa_auto, copa_auto_nc, copa_auto_nc_j0, copa_auto_t90, copa_auto_t98, copa_auto_t, copa_orig, copa_nc\n");
 	return 0;
 }
 

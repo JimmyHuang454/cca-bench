@@ -57,7 +57,8 @@ sysctl net.ipv4.tcp_available_congestion_control
 | `copa_auto` | `tcp_copa_auto.ko`（本仓库） | 自适应 $\delta$（$\theta=0.50$），开启竞争模式切换 |
 | `copa_auto_theta<X>` | `tcp_copa_auto.ko`（本仓库） | 自定义 $\theta \in [0.01, 0.995]$，如 `copa_auto_theta0.9`、`copa_auto_theta0.98` |
 | `copa_auto_nc` / `copa_auto_nc_j0` | `tcp_copa_auto.ko`（本仓库） | 自适应 $\delta$，关闭竞争模式切换 |
-| `copa` / `copa_orig` | `tcp_copa_auto.ko`（本仓库） | 原版固定 $\delta=0.50$ Copa（`copa` 自动映射到内核 `copa_orig`，与 ns-3 `copa` 一致） |
+| `copa` / `copa_orig` | `tcp_copa_auto.ko`（本仓库） | 原版固定 $\delta=0.50$ Copa，开启竞争模式（`copa` 自动映射到内核 `copa_orig`） |
+| `copa_nc` | `tcp_copa_auto.ko`（本仓库） | 原版固定 $\delta=0.50$ Copa，关闭竞争模式（纯默认模式消融对照） |
 | `mortise_copa` | eBPF（[BobAnkh/Mortise](https://github.com/BobAnkh/Mortise)） | Mortise 官方 eBPF Copa（开启竞争模式 `mode_switch=true` + 在线调参） |
 | `mortise_copa_nc` | eBPF（[BobAnkh/Mortise](https://github.com/BobAnkh/Mortise)） | Mortise eBPF Copa（关闭竞争模式 `mode_switch=false`，保留在线 $\delta$ 调参） |
 | `leocc` | `tcp_leocc.ko`（本仓库） | LEO 低轨卫星专用算法（选择时自动编译加载） |

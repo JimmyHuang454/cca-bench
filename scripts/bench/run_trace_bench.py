@@ -30,8 +30,9 @@ ROOT = Path(__file__).resolve().parents[2]
 # LINES_DIR = ROOT / 'datasets/lines/lumos'
 LINES_DIR = ROOT / 'datasets/lines/basic'
 WORKLOADS = ['bulk', 'websearch', 'pageload', 'app']
-CCS = ['cubic', 'bbr', 'copa_auto_nc', 'copa', 'vegas', 'westwood', 'illinois', 'veno', 'yeah', 'hybla']
+CCS = ['copa_nc', 'cubic', 'copa_auto', 'bbr', 'copa_auto_nc', 'copa', 'vegas', 'westwood', 'illinois', 'veno', 'yeah', 'hybla']
 REPEATS = 2
+TAIL_PERCENTILE = 95  # Tail percentile for qdelay, Norm Power, RCT, FCT Slowdown & rankings (e.g. 50, 90, 95, 99).
 RESUME = True  # False: rerun all combinations and replace their results.
 MAX_WORKERS = os.cpu_count() or 1  # Maximum concurrent ns-3 processes; 1 runs serially.
 WORKLOAD_MAX_SIMULATION_S = 1800.0  # Maximum simulated time from the start, not wall time.
@@ -57,34 +58,46 @@ def result_directory(directory: Path) -> Path:
 
 def ranking_entries(rows: list[dict], scenario: str, workload_name: str, kind: str) -> list[dict]:
     return trace_report.ranking_entries(
-        rows, scenario, workload_name, kind, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS
+        rows, scenario, workload_name, kind,
+        ccs=CCS, workloads=WORKLOADS, repeats=REPEATS, tail_percentile=TAIL_PERCENTILE,
     )
 
 
 def overall_ranking(scenarios: list[dict], rows: list[dict]) -> tuple[list[dict], list[str]]:
-    return trace_report.overall_ranking(scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS)
+    return trace_report.overall_ranking(
+        scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS, tail_percentile=TAIL_PERCENTILE
+    )
 
 
 def overall_ranking_table(scenarios: list[dict], rows: list[dict]) -> list[str]:
-    return trace_report.overall_ranking_table(scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS)
+    return trace_report.overall_ranking_table(
+        scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS, tail_percentile=TAIL_PERCENTILE
+    )
 
 
 def workload_ranking(scenarios: list[dict], rows: list[dict], workload_name: str) -> tuple[list[dict], list[str]]:
     return trace_report.workload_ranking(
-        scenarios, rows, workload_name, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS
+        scenarios, rows, workload_name,
+        ccs=CCS, workloads=WORKLOADS, repeats=REPEATS, tail_percentile=TAIL_PERCENTILE,
     )
 
 
 def workload_ranking_tables(scenarios: list[dict], rows: list[dict]) -> list[str]:
-    return trace_report.workload_ranking_tables(scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS)
+    return trace_report.workload_ranking_tables(
+        scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS, tail_percentile=TAIL_PERCENTILE
+    )
 
 
 def ranking_tables(scenarios: list[dict], rows: list[dict]) -> list[str]:
-    return trace_report.ranking_tables(scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS)
+    return trace_report.ranking_tables(
+        scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS, tail_percentile=TAIL_PERCENTILE
+    )
 
 
 def print_overview(scenarios: list[dict], rows: list[dict]) -> None:
-    trace_report.print_overview(scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS)
+    trace_report.print_overview(
+        scenarios, rows, ccs=CCS, workloads=WORKLOADS, repeats=REPEATS, tail_percentile=TAIL_PERCENTILE
+    )
 
 
 class Progress:
@@ -208,6 +221,7 @@ def write_report(output: Path, scenarios: list[dict], rows: list[dict], work: di
         ccs=CCS,
         workloads=WORKLOADS,
         repeats=REPEATS,
+        tail_percentile=TAIL_PERCENTILE,
         tcp_segment_size_bytes=TCP_SEGMENT_SIZE_BYTES,
         default_one_way_delay_ms=DEFAULT_ONE_WAY_DELAY_MS,
         workload_max_s=WORKLOAD_MAX_SIMULATION_S,
@@ -232,6 +246,7 @@ def main() -> int:
                 or not CCS or len(set(CCS)) != len(CCS) or not WORKLOADS or len(set(WORKLOADS)) != len(WORKLOADS)
                 or not math.isfinite(WORKLOAD_MAX_SIMULATION_S) or WORKLOAD_MAX_SIMULATION_S <= 0):
             raise ValueError('invalid algorithms, workloads or repeats')
+        tail_p = trace_report.validate_tail_percentile(TAIL_PERCENTILE)
         print('\nTCP Trace Bench\n' + '=' * 40, flush=True)
         print(f'数据集：{LINES_DIR}\n正在读取并校验输入…', flush=True)
         scenarios = discover(LINES_DIR)
@@ -254,7 +269,7 @@ def main() -> int:
         raw_dir = output / 'runs'
         raw_dir.mkdir(exist_ok=True)
         metadata = {'lines_dir': str(LINES_DIR), 'ccs': CCS, 'workloads': {k: {**v, 'path': str(v['path'])} for k, v in work.items()},
-                    'repeats': REPEATS, 'max_workers': MAX_WORKERS, 'default_one_way_delay_ms': DEFAULT_ONE_WAY_DELAY_MS,
+                    'repeats': REPEATS, 'tail_percentile': tail_p, 'max_workers': MAX_WORKERS, 'default_one_way_delay_ms': DEFAULT_ONE_WAY_DELAY_MS,
                     'workload_max_simulation_s': WORKLOAD_MAX_SIMULATION_S,
                     'scenarios': [{'name': s['name'], 'duration_s': s['duration_s'],
                                    'files': {k: {'path': str(v), 'sha256': digest(v)} for k, v in s['files'].items()}} for s in scenarios],
@@ -278,7 +293,8 @@ def main() -> int:
                         cmd = [str(BINARY), '--profile=lines', f'--upTrace={files["up"]}', f'--downTrace={files["down"]}',
                                f'--stopTime={stop_s}', f'--ccs={cc}', f'--run={repeat}',
                                f'--defaultDelayMs={DEFAULT_ONE_WAY_DELAY_MS}',
-                               f'--segmentSize={TCP_SEGMENT_SIZE_BYTES}', '--evalJson=1']
+                               f'--segmentSize={TCP_SEGMENT_SIZE_BYTES}',
+                               f'--tailPercentile={tail_p:g}', '--evalJson=1']
                         for direction in ('up', 'down'):
                             if direction + '_delay' in files:
                                 cmd.append(f'--{direction}DelayFile={files[direction + "_delay"]}')
@@ -325,7 +341,10 @@ def main() -> int:
                 if job['expected'] is not None and int(data.get('requests', 0)) != job['expected']:
                     row['status'] = 'timeout'
                     row['error'] = f"达到最大仿真时长 {WORKLOAD_MAX_SIMULATION_S:g} s，数据块完成 {data.get('requests', 0)}/{job['expected']}，计 0 分"
-                    for field in ('rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'fct_slowdown', 'fct_slowdown_p95', 'mortise_qoe'):
+                    for field in (
+                        'rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'rct_tail_ms',
+                        'fct_slowdown', 'fct_slowdown_p95', 'fct_slowdown_tail', 'mortise_qoe',
+                    ):
                         row[field] = ''
                 else:
                     row['status'] = 'success'

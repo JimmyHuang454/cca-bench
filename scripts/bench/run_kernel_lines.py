@@ -109,6 +109,8 @@ def resolve_kernel_cc(cc: str) -> str:
     norm = cc.strip().replace('-', '_')
     if norm == 'copa':
         return 'copa_orig'
+    if norm == 'copa_orig_nc':
+        return 'copa_nc'
     m = re.match(r'^copa_auto_theta([0-9]*\.?[0-9]+)$', norm)
     if m:
         theta_milli = int(round(float(m.group(1)) * 1000))
@@ -190,9 +192,11 @@ def build_lines_plan(
     workload_timeout_s: float,
     bulk_warmup_s: float,
     max_shards: int,
+    tail_percentile: float = trace_report.DEFAULT_TAIL_PERCENTILE,
     root: Path = ROOT,
 ) -> tuple[dict, dict]:
     """Compute balanced GitHub Actions matrix shards and full plan metadata."""
+    tail_p = trace_report.validate_tail_percentile(tail_percentile)
     if repeats < 1:
         raise ValueError('repeats must be >= 1')
     if max_shards < 1:
@@ -290,6 +294,7 @@ def build_lines_plan(
         'ccs': ccs,
         'queues': queues,
         'repeats': repeats,
+        'tail_percentile': tail_p,
         'max_bulk_s': max_bulk_s,
         'workload_timeout_s': workload_timeout_s,
         'bulk_warmup_s': bulk_warmup_s,
@@ -416,7 +421,9 @@ def evaluate_single_run(
     workload_timeout_s: float,
     bulk_warmup_s: float,
     keep_logs: bool,
+    tail_percentile: float = trace_report.DEFAULT_TAIL_PERCENTILE,
 ) -> dict:
+    tail_p = trace_report.validate_tail_percentile(tail_percentile)
     kernel_cc = resolve_kernel_cc(cc)
     stem = f'{conv.name}__q{queue}__{workload_name}__{cc}__r{repeat}'
     log_path = out_dir / f'{stem}.downlink.log'
@@ -436,6 +443,7 @@ def evaluate_single_run(
         'status': 'failed',
         'error': '',
         'duration_s': conv.bulk_duration_s if workload_name == 'bulk' else '',
+        'tail_percentile': tail_p,
     }
 
     started = time.monotonic()
@@ -462,22 +470,30 @@ def evaluate_single_run(
                 min_rtt_ms=conv.base_rtt_ms_bulk,
                 warmup_s=bulk_warmup_s,
                 max_s=conv.bulk_duration_s,
+                tail_percentile=tail_p,
             )
             row.update({
                 'duration_s': stats['duration_s'],
+                'tail_percentile': tail_p,
                 'capacity_mbps': stats['capacity_mbps'],
                 'throughput_mbps': stats['throughput_mbps'],
                 'utilization': stats['utilization'],
                 'qdelay_avg_ms': stats['qdelay_avg_ms'],
                 'qdelay_p95_ms': stats['qdelay_p95_ms'],
+                'qdelay_tail_ms': stats['qdelay_tail_ms'],
                 'base_rtt_ms': conv.base_rtt_ms_bulk,
                 'est_rtt_ms': stats['est_rtt_ms'],
                 'util_power': stats['util_power'],
                 'norm_power': stats['norm_power'],
                 'norm_power_p95': stats['norm_power_p95'],
+                'norm_power_tail': stats['norm_power_tail'],
                 'drop_rate': stats['drop_rate'],
             })
-            if math.isnan(stats['throughput_mbps']) or math.isnan(stats['norm_power']) or math.isnan(stats['norm_power_p95']):
+            if (
+                math.isnan(stats['throughput_mbps'])
+                or math.isnan(stats['norm_power'])
+                or math.isnan(stats['norm_power_tail'])
+            ):
                 row['error'] = 'invalid bulk metrics parsed from downlink.log'
                 return row
             row['status'] = 'success'
@@ -506,7 +522,9 @@ def evaluate_single_run(
         timed_out = timeout_marker.is_file() or res.returncode in (124, 130, 137, 143)
 
         link_stats = (
-            eval_report.parse_downlink_log(log_path, min_rtt_ms=conv.base_rtt_ms_period, warmup_s=0.0)
+            eval_report.parse_downlink_log(
+                log_path, min_rtt_ms=conv.base_rtt_ms_period, warmup_s=0.0, tail_percentile=tail_p
+            )
             if log_path.is_file()
             else {}
         )
@@ -519,6 +537,7 @@ def evaluate_single_run(
             delivered_bytes=link_stats.get('delivered_bytes', 0),
             base_rtt_ms=conv.base_rtt_ms_period,
             capacity_mbps=cap_mbps,
+            tail_percentile=tail_p,
         )
         completed = int(rct_stats.get('requests', 0))
         row['requests'] = completed
@@ -537,7 +556,10 @@ def evaluate_single_run(
             row['error'] = (
                 f'达到最大运行时间 {workload_timeout_s:g} s，数据块完成 {completed}/{expected_reqs}，计 0 分'
             )
-            for field in ('rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'fct_slowdown', 'fct_slowdown_p95', 'mortise_qoe'):
+            for field in (
+                'rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'rct_tail_ms',
+                'fct_slowdown', 'fct_slowdown_p95', 'fct_slowdown_tail', 'mortise_qoe',
+            ):
                 row[field] = ''
             return row
 
@@ -550,16 +572,20 @@ def evaluate_single_run(
         wall_s = rct_wall_duration_s(rct_path)
         row.update({
             'duration_s': wall_s if wall_s is not None else elapsed_s,
+            'tail_percentile': tail_p,
             'throughput_mbps': link_stats.get('throughput_mbps', ''),
             'utilization': link_stats.get('utilization', ''),
             'qdelay_avg_ms': link_stats.get('qdelay_avg_ms', ''),
             'qdelay_p95_ms': link_stats.get('qdelay_p95_ms', ''),
+            'qdelay_tail_ms': link_stats.get('qdelay_tail_ms', ''),
             'est_rtt_ms': link_stats.get('est_rtt_ms', ''),
             'rct_mean_ms': rct_stats.get('rct_mean_ms', ''),
             'rct_p50_ms': rct_stats.get('rct_p50_ms', ''),
             'rct_p95_ms': rct_stats.get('rct_p95_ms', ''),
+            'rct_tail_ms': rct_stats.get('rct_tail_ms', ''),
             'fct_slowdown': rct_stats.get('fct_slowdown', ''),
             'fct_slowdown_p95': rct_stats.get('fct_slowdown_p95', ''),
+            'fct_slowdown_tail': rct_stats.get('fct_slowdown_tail', ''),
             'mortise_qoe': rct_stats.get('mortise_qoe', ''),
             'status': 'success',
         })
@@ -662,6 +688,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
         args.bulk_warmup_s if args.bulk_warmup_s is not None else (os.environ.get('BULK_WARMUP_S', '0') or '0')
     )
     max_shards = int(args.max_shards or os.environ.get('MAX_SHARDS', '8') or '8')
+    tail_percentile = trace_report.validate_tail_percentile(
+        args.tail_percentile if args.tail_percentile is not None else (os.environ.get('TAIL_PERCENTILE', '95') or '95')
+    )
 
     scenarios_filter = parse_csv_list(scenarios_raw) if scenarios_raw.strip() else None
     workloads = parse_csv_list(workloads_raw, default=['bulk'])
@@ -679,6 +708,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         workload_timeout_s=workload_timeout_s,
         bulk_warmup_s=bulk_warmup_s,
         max_shards=max_shards,
+        tail_percentile=tail_percentile,
     )
 
     outputs = {
@@ -713,6 +743,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     bulk_warmup_s = float(
         args.bulk_warmup_s if args.bulk_warmup_s is not None else (os.environ.get('BULK_WARMUP_S', '0') or '0')
     )
+    tail_percentile = trace_report.validate_tail_percentile(
+        args.tail_percentile if args.tail_percentile is not None else (os.environ.get('TAIL_PERCENTILE', '95') or '95')
+    )
+    p_tag = f'p{tail_percentile:g}'
     keep_logs = args.keep_logs or os.environ.get('KEEP_LOGS', '0') == '1'
 
     out_dir = Path(args.out_dir)
@@ -803,13 +837,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                     workload_timeout_s=workload_timeout_s,
                     bulk_warmup_s=bulk_warmup_s,
                     keep_logs=keep_logs,
+                    tail_percentile=tail_percentile,
                 )
                 dt = time.monotonic() - t0
                 tag = 'OK' if row['status'] == 'success' else row['status'].upper()
                 extra = (
-                    f"tput={row.get('throughput_mbps', '-')}Mbps norm_power={row.get('norm_power', '-')} p95_np={row.get('norm_power_p95', '-')}"
+                    f"tput={row.get('throughput_mbps', '-')}Mbps norm_power={row.get('norm_power', '-')} {p_tag}_np={row.get('norm_power_tail', '-')}"
                     if wk == 'bulk' and row['status'] == 'success'
-                    else f"slowdown={row.get('fct_slowdown', '-')}x p95_sd={row.get('fct_slowdown_p95', '-')}x"
+                    else f"slowdown={row.get('fct_slowdown', '-')}x {p_tag}_sd={row.get('fct_slowdown_tail', '-')}x"
                     if row['status'] == 'success'
                     else row.get('error', '')
                 )
@@ -834,6 +869,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         'ccs': ccs,
         'queues': queues,
         'repeats': repeats,
+        'tail_percentile': tail_percentile,
         'parallel': parallel,
         'max_bulk_s': max_bulk_s,
         'workload_timeout_s': workload_timeout_s,
@@ -890,6 +926,9 @@ def summarize_results(
         workloads = list(plan_meta['workloads'])
         queues = list(plan_meta['queues'])
         repeats = int(plan_meta['repeats'])
+        tail_percentile = trace_report.validate_tail_percentile(
+            plan_meta.get('tail_percentile', trace_report.DEFAULT_TAIL_PERCENTILE)
+        )
         dataset_label = f"datasets/lines/{plan_meta['dataset']}"
         max_bulk_s = float(plan_meta.get('max_bulk_s', 0.0))
         workload_timeout_s = float(plan_meta.get('workload_timeout_s', 300.0))
@@ -901,6 +940,11 @@ def summarize_results(
         workloads = list(dict.fromkeys(r['workload'] for r in rows))
         queues = list(dict.fromkeys(r.get('queue_bytes', '500000') for r in rows))
         repeats = max(int(r.get('repeat', 1)) for r in rows)
+        row_tail = next((r.get('tail_percentile') for r in rows if r.get('tail_percentile') not in ('', None)), None)
+        meta_tail = shard_metas[0].get('tail_percentile') if shard_metas else None
+        tail_percentile = trace_report.validate_tail_percentile(
+            meta_tail if meta_tail is not None else (row_tail if row_tail is not None else trace_report.DEFAULT_TAIL_PERCENTILE)
+        )
         dataset_label = ', '.join(sorted({r.get('dataset', 'lines') for r in rows}))
         max_bulk_s = 0.0
         workload_timeout_s = 300.0
@@ -959,6 +1003,7 @@ def summarize_results(
         ccs=ccs,
         workloads=workloads,
         repeats=repeats,
+        tail_percentile=tail_percentile,
         tcp_segment_size_bytes=None,
         default_one_way_delay_ms=DEFAULT_ONE_WAY_DELAY_MS,
         workload_max_s=workload_timeout_s,
@@ -1041,6 +1086,7 @@ def main() -> int:
     p_plan.add_argument('--workload-timeout-s', type=float, default=None)
     p_plan.add_argument('--bulk-warmup-s', type=float, default=None)
     p_plan.add_argument('--max-shards', type=int, default=None)
+    p_plan.add_argument('--tail-percentile', type=float, default=None)
 
     p_run = sub.add_parser('run')
     p_run.add_argument('--mortise-dir', required=True)
@@ -1053,6 +1099,7 @@ def main() -> int:
     p_run.add_argument('--max-bulk-s', type=float, default=None)
     p_run.add_argument('--workload-timeout-s', type=float, default=None)
     p_run.add_argument('--bulk-warmup-s', type=float, default=None)
+    p_run.add_argument('--tail-percentile', type=float, default=None)
     p_run.add_argument('--keep-logs', action='store_true')
 
     p_sum = sub.add_parser('summarize')
