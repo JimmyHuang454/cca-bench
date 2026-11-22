@@ -1,16 +1,6 @@
 name: ns-3 CCAs Bench
 
 on:
-  push:
-    branches: ["master", "main"]
-    paths:
-      - .github/workflows/ns3-bench.yml
-      - ns3/ns3-overlay/**
-      - ns3/setup_ns3.sh
-      - kernel/tcp_copa_auto/**
-      - scripts/**
-      - datasets/lines/**
-      - datasets/workloads/**
   workflow_dispatch:
     inputs:
       mode:
