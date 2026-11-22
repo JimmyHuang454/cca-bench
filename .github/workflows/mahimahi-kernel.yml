@@ -21,7 +21,7 @@ on:
       kernel_ccs:
         description: "Linux congestion controls, comma-separated"
         type: string
-        default: "copa,copa_auto_nc,mortise_copa,bbr,cubic"
+        default: "copa,copa_auto_nc,mortise_copa,mortise_copa_nc,bbr,cubic"
         required: true
       queues:
         description: "Mahimahi bottleneck queue per direction (e.g. 500KB, 150KB,2MB, infinite)"
