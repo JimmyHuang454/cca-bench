@@ -135,6 +135,7 @@ def parse_downlink_log(
             "est_rtt_ms": math.nan,
             "util_power": math.nan,
             "norm_power": math.nan,
+            "norm_power_p95": math.nan,
             "tput_power": math.nan,
             "drop_rate": math.nan,
         }
@@ -165,8 +166,10 @@ def parse_downlink_log(
     qdelay_avg = (sum(qdelays) / len(qdelays)) if qdelays else math.nan
     qdelay_p95 = percentile(qdelays, 0.95)
     est_rtt_ms = (min_rtt_ms + qdelay_avg) if not math.isnan(qdelay_avg) else math.nan
+    est_rtt_p95_ms = (min_rtt_ms + qdelay_p95) if not math.isnan(qdelay_p95) else math.nan
     util_power = (util / (est_rtt_ms / 1000.0)) if (est_rtt_ms and est_rtt_ms > 0 and not math.isnan(util)) else math.nan
     norm_power = (util / (est_rtt_ms / min_rtt_ms)) if (est_rtt_ms and est_rtt_ms > 0 and not math.isnan(util)) else math.nan
+    norm_power_p95 = (util / (est_rtt_p95_ms / min_rtt_ms)) if (est_rtt_p95_ms and est_rtt_p95_ms > 0 and not math.isnan(util)) else math.nan
     tput_power = (tput_mbps / est_rtt_ms) if (est_rtt_ms and est_rtt_ms > 0 and not math.isnan(tput_mbps)) else math.nan
 
     total_offered = delivered_bytes + dropped_bytes
@@ -183,6 +186,7 @@ def parse_downlink_log(
         "est_rtt_ms": est_rtt_ms,
         "util_power": util_power,
         "norm_power": norm_power,
+        "norm_power_p95": norm_power_p95,
         "tput_power": tput_power,
         "drop_rate": drop_rate,
     }
@@ -241,14 +245,19 @@ def parse_rct_csv(
     qoe_vals = [v * (1.0 - penalty) for v in req_tput_mb_s]
 
     fct_slowdown = math.nan
+    fct_slowdown_p95 = math.nan
     if isinstance(capacity_mbps, (int, float)) and not math.isnan(capacity_mbps) and capacity_mbps > 0:
         cap_bytes_per_ms = capacity_mbps * 1e6 / 8.0 / 1000.0
         log_sum = 0.0
+        slowdowns: list[float] = []
         for sz, rct in zip(sizes, rcts_ms):
             ideal_ms = base_rtt_ms + (sz / cap_bytes_per_ms)
             sd = max(rct / ideal_ms, 1.0)
+            slowdowns.append(sd)
             log_sum += math.log(sd)
         fct_slowdown = math.exp(log_sum / len(rcts_ms))
+        slowdowns.sort()
+        fct_slowdown_p95 = percentile(slowdowns, 0.95)
 
     return {
         "requests": len(rcts_ms),
@@ -258,6 +267,7 @@ def parse_rct_csv(
         "retrans_pkts": retrans_pkts,
         "retrans_ratio": retrans_ratio,
         "fct_slowdown": fct_slowdown,
+        "fct_slowdown_p95": fct_slowdown_p95,
         "mortise_qoe": sum(qoe_vals) / len(qoe_vals),
     }
 
@@ -363,6 +373,7 @@ CSV_FLOAT_FIELDS = {
     "est_rtt_ms",
     "util_power",
     "norm_power",
+    "norm_power_p95",
     "tput_power",
     "drop_rate",
     "rct_mean_ms",
@@ -370,6 +381,7 @@ CSV_FLOAT_FIELDS = {
     "rct_p95_ms",
     "retrans_ratio",
     "fct_slowdown",
+    "fct_slowdown_p95",
     "rct_slowdown",
     "mortise_qoe",
 }
@@ -500,6 +512,7 @@ def main() -> None:
         "est_rtt_ms",
         "util_power",
         "norm_power",
+        "norm_power_p95",
         "tput_power",
         "drop_rate",
         "requests",
@@ -509,6 +522,7 @@ def main() -> None:
         "retrans_pkts",
         "retrans_ratio",
         "fct_slowdown",
+        "fct_slowdown_p95",
         "mortise_qoe",
     ]
     with args.out_csv.open("w", newline="", encoding="utf-8") as f:

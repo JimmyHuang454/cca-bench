@@ -474,9 +474,10 @@ def evaluate_single_run(
                 'est_rtt_ms': stats['est_rtt_ms'],
                 'util_power': stats['util_power'],
                 'norm_power': stats['norm_power'],
+                'norm_power_p95': stats['norm_power_p95'],
                 'drop_rate': stats['drop_rate'],
             })
-            if math.isnan(stats['throughput_mbps']) or math.isnan(stats['norm_power']):
+            if math.isnan(stats['throughput_mbps']) or math.isnan(stats['norm_power']) or math.isnan(stats['norm_power_p95']):
                 row['error'] = 'invalid bulk metrics parsed from downlink.log'
                 return row
             row['status'] = 'success'
@@ -536,7 +537,7 @@ def evaluate_single_run(
             row['error'] = (
                 f'达到最大运行时间 {workload_timeout_s:g} s，数据块完成 {completed}/{expected_reqs}，计 0 分'
             )
-            for field in ('rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'fct_slowdown', 'mortise_qoe'):
+            for field in ('rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'fct_slowdown', 'fct_slowdown_p95', 'mortise_qoe'):
                 row[field] = ''
             return row
 
@@ -558,6 +559,7 @@ def evaluate_single_run(
             'rct_p50_ms': rct_stats.get('rct_p50_ms', ''),
             'rct_p95_ms': rct_stats.get('rct_p95_ms', ''),
             'fct_slowdown': rct_stats.get('fct_slowdown', ''),
+            'fct_slowdown_p95': rct_stats.get('fct_slowdown_p95', ''),
             'mortise_qoe': rct_stats.get('mortise_qoe', ''),
             'status': 'success',
         })
@@ -805,9 +807,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 dt = time.monotonic() - t0
                 tag = 'OK' if row['status'] == 'success' else row['status'].upper()
                 extra = (
-                    f"tput={row.get('throughput_mbps', '-')}Mbps norm_power={row.get('norm_power', '-')}"
+                    f"tput={row.get('throughput_mbps', '-')}Mbps norm_power={row.get('norm_power', '-')} p95_np={row.get('norm_power_p95', '-')}"
                     if wk == 'bulk' and row['status'] == 'success'
-                    else f"slowdown={row.get('fct_slowdown', '-')}x"
+                    else f"slowdown={row.get('fct_slowdown', '-')}x p95_sd={row.get('fct_slowdown_p95', '-')}x"
                     if row['status'] == 'success'
                     else row.get('error', '')
                 )

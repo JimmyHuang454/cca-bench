@@ -16,11 +16,11 @@ TCP 数据走上行，ACK 走下行。容量可以用每毫秒 1500 字节发包
 
 输出固定在 `results/trace-bench/<数据集>/`：`runs.csv` 为逐次运行结果，`report.md` 按场景、算法和负载汇总，`metadata.json` 保存文件摘要及内部配置，`runs/` 保存每次运行的日志和断点。每次完成一个组合就更新报告和断点；部分运行失败或数据块未全部完成时保留报告并返回非零退出码。FCT slowdown 的理想值使用每个数据块产生时的基础 RTT 和全程平均上行容量，是动态链路下的近似。
 
-报告按场景给出 bulk Norm Power 排名，并按场景和 workload 给出 FCT Slowdown 排名。综合排名按场景将所有选定 workload 一起计算：每种 workload 的重复运行先取算术平均，再对各 workload 等权取几何均值；综合分数为 `sqrt(Norm Power / Slowdown 几何均值)`。所有数值使用未按表格精度四舍五入的重复运行平均值计算。bulk 须成功且指标有效；workload 的任一重复超时则该场景综合分数为 0，其他运行错误或结果缺失则不参与排名。基准为零时不计算差距。
+报告按场景给出 bulk P95 Norm Power / Norm Power 排名，并按场景和 workload 给出 P95 FCT Slowdown / FCT Slowdown 排名。综合排名按场景基于 P95 指标将所有选定 workload 一起计算：每种 workload 的 P95 FCT Slowdown 重复运行先取算术平均，再对各 workload 等权取几何均值；综合分数为 `sqrt(P95 Norm Power / P95 Slowdown 几何均值)`。所有数值使用未按表格精度四舍五入的重复运行平均值计算。bulk 须成功且指标有效；workload 的任一重复超时则该场景综合分数为 0，其他运行错误或结果缺失则不参与排名。基准为零时不计算差距。
 
-每个负载另有所有场景排名：bulk 使用各场景的算法 Norm Power 除以最优 Norm Power，其他负载使用最优 FCT Slowdown 除以算法的 FCT Slowdown，再对各场景的相对得分等权取几何均值。
+每个负载另有所有场景排名（基于 P95）：bulk 使用各场景的算法 P95 Norm Power 除以最优 P95 Norm Power，其他负载使用最优 P95 FCT Slowdown 除以算法的 P95 FCT Slowdown，再对各场景的相对得分等权取几何均值。
 
-所有负载综合总排名先将各算法的单场景综合评分除以该场景最高综合评分，再对相对得分按场景等权取几何均值。只选 bulk 时使用 Norm Power。workload 超时的场景得 0 分，使该算法的几何总分为 0；进程错误和缺失结果仍不参与排名。任一场景没有有效正数基准时不计算总分。并列最优各计一次场景最优次数。
+所有负载综合总排名先将各算法的单场景综合评分除以该场景最高综合评分，再对相对得分按场景等权取几何均值。只选 bulk 时使用 P95 Norm Power。workload 超时的场景得 0 分，使该算法的几何总分为 0；进程错误和缺失结果仍不参与排名。任一场景没有有效正数基准时不计算总分。并列最优各计一次场景最优次数。
 
 `run_trace_bench.py` 中的 `RESUME = True` 默认启用断点续跑：重启时跳过输入、程序和参数一致的成功及仿真超时结果，进程错误重新执行。设置为 `False` 可重新运行全部组合并覆盖对应结果。更改 lines、workload、二进制或运行参数后，对应旧断点不再复用；不同数据集同名目录也不会复用旧断点。调度和报告修改不会让旧结果失效；修改 Python 中的仿真语义时需要更新 `SIMULATION_SIGNATURE`。历史时间戳目录不会自动删除。
 

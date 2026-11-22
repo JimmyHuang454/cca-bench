@@ -18,8 +18,8 @@ from lines_common import DEFAULT_ONE_WAY_DELAY_MS, atomic_write
 RUNS_CSV_FIELDS = [
     'scenario', 'workload', 'cc', 'repeat', 'status', 'error', 'duration_s', 'capacity_mbps',
     'throughput_mbps', 'utilization', 'qdelay_avg_ms', 'qdelay_p95_ms', 'base_rtt_ms', 'est_rtt_ms',
-    'util_power', 'norm_power', 'drop_rate', 'requests_expected', 'requests', 'rct_mean_ms', 'rct_p50_ms',
-    'rct_p95_ms', 'fct_slowdown', 'mortise_qoe',
+    'util_power', 'norm_power', 'norm_power_p95', 'drop_rate', 'requests_expected', 'requests',
+    'rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'fct_slowdown', 'fct_slowdown_p95', 'mortise_qoe',
 ]
 
 
@@ -38,7 +38,15 @@ def ranking_entries(
     workloads: list[str],
     repeats: int,
 ) -> list[dict]:
-    """Rank complete runs using unrounded per-algorithm averages."""
+    """Rank complete runs using unrounded per-algorithm averages.
+
+    kind:
+      - 'bulk'         : bulk norm_power (higher is better)
+      - 'bulk_p95'     : bulk norm_power_p95 (higher is better)
+      - 'workload'     : workload fct_slowdown (lower is better)
+      - 'workload_p95' : workload fct_slowdown_p95 (lower is better)
+      - 'combined'     : sqrt(norm_power_p95 / geomean(workload fct_slowdown_p95)) (higher is better)
+    """
     def metric(cc: str, wk: str, field: str, positive: bool) -> tuple[float | None, bool, int]:
         selected = [r for r in rows if r['scenario'] == scenario and r['cc'] == cc and r['workload'] == wk]
         good = [r for r in selected if r['status'] == 'success']
@@ -58,21 +66,26 @@ def ranking_entries(
         valid = complete and len(values) == repeats
         return (statistics.mean(values) if values else None), valid, len(good)
 
+    is_workload = kind in ('workload', 'workload_p95')
+    is_bulk = kind in ('bulk', 'bulk_p95')
+    bulk_field = 'norm_power_p95' if kind in ('bulk_p95', 'combined') else 'norm_power'
+    slow_field = 'fct_slowdown_p95' if kind in ('workload_p95', 'combined') else 'fct_slowdown'
+
     entries = []
     for cc in ccs:
         timeout = False
-        norm, norm_ok, bulk_count = metric(cc, 'bulk', 'norm_power', False)
+        norm, norm_ok, bulk_count = metric(cc, 'bulk', bulk_field, False)
         wk_stats = (
-            {wk: metric(cc, wk, 'fct_slowdown', True) for wk in (w for w in workloads if w != 'bulk')}
+            {wk: metric(cc, wk, slow_field, True) for wk in (w for w in workloads if w != 'bulk')}
             if kind == 'combined'
             else {}
         )
         slow, slow_ok, workload_count = (
-            metric(cc, workload_name, 'fct_slowdown', True) if kind == 'workload' else (None, False, 0)
+            metric(cc, workload_name, slow_field, True) if is_workload else (None, False, 0)
         )
-        if kind == 'bulk':
+        if is_bulk:
             value, valid, count = norm, norm_ok, f'{bulk_count}/{repeats}'
-        elif kind == 'workload':
+        elif is_workload:
             value, valid, count = slow, slow_ok, f'{workload_count}/{repeats}'
             selected = [r for r in rows if r['scenario'] == scenario and r['cc'] == cc and r['workload'] == workload_name]
             timeout = any(r['status'] == 'timeout' for r in selected)
@@ -95,7 +108,7 @@ def ranking_entries(
                 for r in selected:
                     if r['status'] == 'success':
                         try:
-                            sample = float(r['fct_slowdown'])
+                            sample = float(r[slow_field])
                             success_valid &= math.isfinite(sample) and sample > 0
                         except (KeyError, TypeError, ValueError):
                             success_valid = False
@@ -116,12 +129,12 @@ def ranking_entries(
             'rank': '-',
             'gap': '-',
             'status': (
-                '超时（0分）' if timeout and (kind == 'workload' or valid)
+                '超时（0分）' if timeout and (is_workload or valid)
                 else '完整' if valid else '不完整或指标无效'
             ),
         })
 
-    lower_better = kind == 'workload'
+    lower_better = is_workload
     qualified = [e for e in entries if e['valid'] and e['value'] is not None]
     qualified.sort(key=lambda e: (e['value'] if lower_better else -e['value'], e['cc']))
     if qualified and qualified[0]['value'] > 0:
@@ -149,12 +162,12 @@ def overall_ranking(
     workloads: list[str],
     repeats: int,
 ) -> tuple[list[dict], list[str]]:
-    """Compare algorithms against each scenario's best complete result."""
+    """Compare algorithms against each scenario's best complete P95 result."""
     if 'bulk' not in workloads:
         return [], ['总排名需要 bulk 结果。']
     if not scenarios:
         return [], ['没有可比较的场景。']
-    kind = 'combined' if any(w != 'bulk' for w in workloads) else 'bulk'
+    kind = 'combined' if any(w != 'bulk' for w in workloads) else 'bulk_p95'
     values = {cc: [] for cc in ccs}
     wins = {cc: 0 for cc in ccs}
     completed = {cc: 0 for cc in ccs}
@@ -214,7 +227,11 @@ def overall_ranking_table(
     repeats: int,
 ) -> list[str]:
     entries, warnings = overall_ranking(scenarios, rows, ccs=ccs, workloads=workloads, repeats=repeats)
-    metric = '单场景综合评分' if any(w != 'bulk' for w in workloads) else '单场景 Bulk Norm Power'
+    metric = (
+        '单场景综合评分（基于 P95 Norm Power 与 P95 FCT Slowdown）'
+        if any(w != 'bulk' for w in workloads)
+        else '单场景 Bulk P95 Norm Power'
+    )
     result = [
         '## 所有场景总排名', '',
         f'每个场景等权：先将 {metric} 除以该场景最优值，再对所有场景的相对得分取几何均值。',
@@ -248,7 +265,7 @@ def workload_ranking(
     workloads: list[str],
     repeats: int,
 ) -> tuple[list[dict], list[str]]:
-    """Compare one workload across scenarios, using each scenario's best as baseline."""
+    """Compare one workload across scenarios using P95 metrics against each scenario's best."""
     if not scenarios:
         return [], ['没有可比较的场景。']
     bulk = workload_name == 'bulk'
@@ -259,7 +276,7 @@ def workload_ranking(
     for scene in scenarios:
         name = scene['name']
         entries = ranking_entries(
-            rows, name, workload_name, 'bulk' if bulk else 'workload',
+            rows, name, workload_name, 'bulk_p95' if bulk else 'workload_p95',
             ccs=ccs, workloads=workloads, repeats=repeats,
         )
         valid = [e for e in entries if e['valid'] and e['value'] is not None]
@@ -284,7 +301,7 @@ def workload_ranking(
                 for r in selected:
                     if r['status'] == 'success':
                         try:
-                            v = float(r['fct_slowdown'])
+                            v = float(r['fct_slowdown_p95'])
                             if math.isfinite(v) and v > 0:
                                 good_values.append(v)
                         except (KeyError, TypeError, ValueError):
@@ -339,13 +356,13 @@ def workload_ranking_tables(
 ) -> list[str]:
     result = [
         '## 各负载所有场景排名', '',
-        '每个场景等权，先将指标换算为相对该场景最优值的得分，再对所有场景取几何均值。',
-        'Bulk 得分为算法 Norm Power / 最优 Norm Power；其他负载得分为最优 FCT Slowdown / 算法 FCT Slowdown。',
+        '每个场景等权，先将 P95 指标换算为相对该场景最优值的得分，再对所有场景取几何均值。',
+        'Bulk 得分为算法 P95 Norm Power / 最优 P95 Norm Power；其他负载得分为最优 P95 FCT Slowdown / 算法 P95 FCT Slowdown。',
         'workload 超时按 0 分计算；进程错误或缺失结果不参与排名。', '',
     ]
     for wk in workloads:
         entries, warnings = workload_ranking(scenarios, rows, wk, ccs=ccs, workloads=workloads, repeats=repeats)
-        result.extend([f'### {wk}：所有场景排名', ''])
+        result.extend([f'### {wk}：所有场景排名（P95）', ''])
         if warnings:
             result.extend(warnings + [''])
         if entries:
@@ -389,7 +406,16 @@ def ranking_tables(
 
     if 'bulk' in workloads:
         result.extend([
-            '### Bulk：Norm Power', '',
+            '### Bulk：P95 Norm Power', '',
+            '| 场景 | 排名 | 算法 | 成功/总次数 | P95 Norm Power ↑ | 相对最优差距 | 状态 |',
+            '|---|---:|---|---:|---:|---:|---|',
+        ])
+        for scenario in scenarios:
+            for e in ranking_entries(rows, scenario['name'], 'bulk', 'bulk_p95', ccs=ccs, workloads=workloads, repeats=repeats):
+                result.append(row([scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['norm']), e['gap'], e['status']], e))
+        result.append('')
+        result.extend([
+            '### Bulk：Norm Power（均值参考）', '',
             '| 场景 | 排名 | 算法 | 成功/总次数 | Norm Power ↑ | 相对最优差距 | 状态 |',
             '|---|---:|---|---:|---:|---:|---|',
         ])
@@ -399,7 +425,16 @@ def ranking_tables(
         result.append('')
     for wk in (w for w in workloads if w != 'bulk'):
         result.extend([
-            f'### {wk}：FCT Slowdown', '',
+            f'### {wk}：P95 FCT Slowdown', '',
+            '| 场景 | 排名 | 算法 | 成功/总次数 | P95 FCT Slowdown ↓ | 相对最优差距 | 状态 |',
+            '|---|---:|---|---:|---:|---:|---|',
+        ])
+        for scenario in scenarios:
+            for e in ranking_entries(rows, scenario['name'], wk, 'workload_p95', ccs=ccs, workloads=workloads, repeats=repeats):
+                result.append(row([scenario['name'], e['rank'], e['cc'], e['count'], fmt(e['slow'], 'x'), e['gap'], e['status']], e))
+        result.append('')
+        result.extend([
+            f'### {wk}：FCT Slowdown（几何均值参考）', '',
             '| 场景 | 排名 | 算法 | 成功/总次数 | FCT Slowdown ↓ | 相对最优差距 | 状态 |',
             '|---|---:|---|---:|---:|---:|---|',
         ])
@@ -409,12 +444,12 @@ def ranking_tables(
         result.append('')
     non_bulk = [w for w in workloads if w != 'bulk']
     if 'bulk' in workloads and non_bulk:
-        headers = ['场景', '排名', '算法', '成功/总次数', 'Norm Power']
-        headers.extend(f'{wk} Slowdown' for wk in non_bulk)
-        headers.extend(['Slowdown 几何均值', '综合评分 ↑', '相对最优差距', '状态'])
+        headers = ['场景', '排名', '算法', '成功/总次数', 'P95 Norm Power']
+        headers.extend(f'{wk} P95 Slowdown' for wk in non_bulk)
+        headers.extend(['P95 Slowdown 几何均值', '综合评分 ↑', '相对最优差距', '状态'])
         result.extend([
-            '### 综合排名', '',
-            '各 workload 的重复运行先取算术平均，再对所有 workload 等权取几何均值；综合评分 = sqrt(Norm Power / Slowdown 几何均值)。',
+            '### 综合排名（基于 P95）', '',
+            '各 workload 的 P95 FCT Slowdown 重复运行先取算术平均，再对所有 workload 等权取几何均值；综合评分 = sqrt(P95 Norm Power / P95 Slowdown 几何均值)。',
             '所有 workload 和 bulk 均需完成全部重复；workload 超时的场景综合评分为 0。', '',
             '| ' + ' | '.join(headers) + ' |',
             '|' + '|'.join(['---'] * len(headers)) + '|',
@@ -477,18 +512,18 @@ def render_report(
         if wk == 'bulk':
             fields = [
                 'capacity_mbps', 'throughput_mbps', 'utilization', 'qdelay_avg_ms',
-                'qdelay_p95_ms', 'util_power', 'norm_power', 'drop_rate',
+                'qdelay_p95_ms', 'util_power', 'norm_power', 'norm_power_p95', 'drop_rate',
             ]
             text.append(
-                '| 场景 | 算法 | 成功/总次数 | 容量 Mbps | 吞吐 Mbps | 利用率 | 平均排队延迟 ms | P95 排队延迟 ms | Power ↑ | Norm Power ↑ | 门控丢包率 |'
+                '| 场景 | 算法 | 成功/总次数 | 容量 Mbps | 吞吐 Mbps | 利用率 | 平均排队延迟 ms | P95 排队延迟 ms | Power ↑ | Norm Power ↑ | P95 Norm Power ↑ | 门控丢包率 |'
             )
         else:
             info = work.get(wk)
             if info:
                 text.extend([f"文件：`{info['path']}`；数据块数：{info['count']}；到达跨度：{info['span_s']:.3f} s", ''])
-            fields = ['duration_s', 'requests', 'rct_mean_ms', 'rct_p95_ms', 'fct_slowdown', 'mortise_qoe']
+            fields = ['duration_s', 'requests', 'rct_mean_ms', 'rct_p95_ms', 'fct_slowdown', 'fct_slowdown_p95', 'mortise_qoe']
             text.append(
-                '| 场景 | 算法 | 成功/总次数 | Workload 完成时间 s | 完成数据块 | 平均数据块完成时间 ms | P95 数据块完成时间 ms | FCT Slowdown ↓ | Mortise QoE |'
+                '| 场景 | 算法 | 成功/总次数 | Workload 完成时间 s | 完成数据块 | 平均数据块完成时间 ms | P95 数据块完成时间 ms | FCT Slowdown ↓ | P95 FCT Slowdown ↓ | Mortise QoE |'
             )
         text.append('|' + '|'.join(['---'] * (3 + len(fields))) + '|')
         for scenario in scenarios:
@@ -544,8 +579,11 @@ def print_overview(
     for row in rows:
         groups.setdefault((row['scenario'], row['cc'], row['workload']), []).append(row)
     expected_repeats = {str(i) for i in range(1, repeats + 1)}
-    columns = [('Norm Power', 'bulk', 'norm_power')] if 'bulk' in workloads else []
-    columns += [(f'{wk} FCT', wk, 'fct_slowdown') for wk in workloads if wk != 'bulk']
+    columns = [('Norm Power', 'bulk', 'norm_power'), ('P95 Norm Power', 'bulk', 'norm_power_p95')] if 'bulk' in workloads else []
+    for wk in workloads:
+        if wk != 'bulk':
+            columns.append((f'{wk} FCT', wk, 'fct_slowdown'))
+            columns.append((f'{wk} P95 FCT', wk, 'fct_slowdown_p95'))
     table = [['Algorithm'] + [col[0] for col in columns]]
     for cc in ccs:
         cells = [cc]
@@ -577,7 +615,7 @@ def print_overview(
         table.append(cells)
     widths = [max(len(row[i]) for row in table) for i in range(len(table[0]))]
     print('\n结果概览  ·  数值后为完整场景数 / 总场景数')
-    print('  Norm Power：场景算术均值；FCT Slowdown：场景几何均值。')
+    print('  Norm Power / P95 Norm Power：场景算术均值；FCT / P95 FCT Slowdown：场景几何均值。')
     print('  覆盖场景数不同时，算法结果不宜直接比较。')
     for index, row in enumerate(table):
         print('  ' + '  '.join(value.ljust(widths[i]) for i, value in enumerate(row)))

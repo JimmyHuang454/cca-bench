@@ -119,11 +119,12 @@ class TraceBenchTests(unittest.TestCase):
             for repeat in (1, 2):
                 rows.append({'scenario': 'a', 'cc': cc, 'repeat': repeat, 'workload': 'bulk',
                              'status': 'success' if cc != 'partial' or repeat == 1 else 'failed',
-                             'norm_power': norm})
+                             'norm_power': norm, 'norm_power_p95': norm})
                 rows.append({'scenario': 'a', 'cc': cc, 'repeat': repeat, 'workload': 'websearch',
-                             'status': 'success', 'fct_slowdown': slow})
+                             'status': 'success', 'fct_slowdown': slow, 'fct_slowdown_p95': slow})
                 rows.append({'scenario': 'a', 'cc': cc, 'repeat': repeat, 'workload': 'pageload',
-                             'status': 'success', 'fct_slowdown': 4.0 if cc == 'tie' else 1.0})
+                             'status': 'success', 'fct_slowdown': 4.0 if cc == 'tie' else 1.0,
+                             'fct_slowdown_p95': 4.0 if cc == 'tie' else 1.0})
         with patch.multiple(bench, CCS=['best', 'tie', 'partial'], REPEATS=2,
                             WORKLOADS=['bulk', 'websearch', 'pageload']):
             bulk = bench.ranking_entries(rows, 'a', 'bulk', 'bulk')
@@ -145,9 +146,9 @@ class TraceBenchTests(unittest.TestCase):
             combined = bench.ranking_entries(incomplete, 'a', '', 'combined')
             self.assertEqual(next(e for e in combined if e['cc'] == 'tie')['rank'], '-')
             tables = '\n'.join(bench.ranking_tables([{'name': 'a'}], rows))
-            self.assertEqual(tables.count('### 综合排名'), 1)
-            self.assertIn('websearch Slowdown', tables)
-            self.assertIn('pageload Slowdown', tables)
+            self.assertEqual(tables.count('### 综合排名（基于 P95）'), 1)
+            self.assertIn('websearch P95 Slowdown', tables)
+            self.assertIn('pageload P95 Slowdown', tables)
 
     def test_ranking_zero_and_missing_metrics_have_no_false_winner(self):
         rows = [{'scenario': 'a', 'cc': cc, 'repeat': 1, 'workload': 'bulk',
@@ -164,23 +165,47 @@ class TraceBenchTests(unittest.TestCase):
         for cc in ('a', 'b', 'incomplete'):
             rows.extend([
                 {'scenario': 'scene', 'cc': cc, 'workload': 'bulk', 'repeat': 1,
-                 'status': 'success' if cc != 'incomplete' else 'failed', 'norm_power': 0.5},
+                 'status': 'success' if cc != 'incomplete' else 'failed', 'norm_power': 0.5, 'norm_power_p95': 0.5},
                 {'scenario': 'scene', 'cc': cc, 'workload': 'websearch', 'repeat': 1,
-                 'status': 'success', 'fct_slowdown': 2.0},
+                 'status': 'success', 'fct_slowdown': 2.0, 'fct_slowdown_p95': 2.0},
             ])
         with patch.multiple(bench, CCS=['a', 'b', 'incomplete'], REPEATS=1,
                             WORKLOADS=['bulk', 'websearch']):
             tables = '\n'.join(bench.ranking_tables([{'name': 'scene'}], rows))
-        self.assertEqual(tables.split('## 各负载所有场景排名')[0].count('**基准**'), 7)
+        # 5 tables before 各负载所有场景排名: bulk_p95(2) + bulk(2) + web_p95(3) + web(3) + combined(2) = 12
+        self.assertEqual(tables.split('## 各负载所有场景排名')[0].count('**基准**'), 12)
         self.assertIn('| **scene** | **1** | **a** | **1/1** | **0.500** | **基准** | **完整** |', tables)
         self.assertIn('| scene | - | incomplete | 0/1 |', tables)
+
+    def test_combined_ranking_uses_p95_metrics_not_means(self):
+        rows = [
+            # spiky has better mean norm_power & mean fct_slowdown, but worse P95 on both
+            {'scenario': 'a', 'cc': 'spiky', 'workload': 'bulk', 'repeat': 1, 'status': 'success',
+             'norm_power': 0.9, 'norm_power_p95': 0.2},
+            {'scenario': 'a', 'cc': 'spiky', 'workload': 'app', 'repeat': 1, 'status': 'success',
+             'fct_slowdown': 1.1, 'fct_slowdown_p95': 8.0},
+            # steady has slightly lower mean, but much better P95 on both
+            {'scenario': 'a', 'cc': 'steady', 'workload': 'bulk', 'repeat': 1, 'status': 'success',
+             'norm_power': 0.7, 'norm_power_p95': 0.6},
+            {'scenario': 'a', 'cc': 'steady', 'workload': 'app', 'repeat': 1, 'status': 'success',
+             'fct_slowdown': 1.3, 'fct_slowdown_p95': 1.5},
+        ]
+        with patch.multiple(bench, CCS=['spiky', 'steady'], REPEATS=1, WORKLOADS=['bulk', 'app']):
+            combined = bench.ranking_entries(rows, 'a', '', 'combined')
+            self.assertEqual(combined[0]['cc'], 'steady')
+            self.assertAlmostEqual(combined[0]['value'], (0.6 / 1.5) ** 0.5)
+            overall, warnings = bench.overall_ranking([{'name': 'a'}], rows)
+            self.assertFalse(warnings)
+            self.assertEqual(overall[0]['cc'], 'steady')
 
     def test_workload_ranking_uses_correct_direction_and_timeout(self):
         rows = []
         for scene, norms, slows in [('a', (.8, .4), (1, 2)), ('b', (.4, .8), (4, 2))]:
             for cc, norm, slow in zip(('x', 'y'), norms, slows):
-                rows.extend([{'scenario': scene, 'cc': cc, 'workload': 'bulk', 'repeat': 1, 'status': 'success', 'norm_power': norm},
-                             {'scenario': scene, 'cc': cc, 'workload': 'app', 'repeat': 1, 'status': 'success', 'fct_slowdown': slow}])
+                rows.extend([{'scenario': scene, 'cc': cc, 'workload': 'bulk', 'repeat': 1, 'status': 'success',
+                              'norm_power': norm, 'norm_power_p95': norm},
+                             {'scenario': scene, 'cc': cc, 'workload': 'app', 'repeat': 1, 'status': 'success',
+                              'fct_slowdown': slow, 'fct_slowdown_p95': slow}])
         scenes = [{'name': 'a'}, {'name': 'b'}]
         with patch.multiple(bench, CCS=['x', 'y'], REPEATS=1, WORKLOADS=['bulk', 'app']):
             for wk in ('bulk', 'app'):
@@ -202,9 +227,10 @@ class TraceBenchTests(unittest.TestCase):
         for scene, a, b in [('one', .8, .4), ('two', .3, .4)]:
             for cc, norm in [('a', a), ('b', b), ('partial', .6)]:
                 rows.append({'scenario': scene, 'cc': cc, 'workload': 'bulk', 'repeat': 1,
-                             'status': 'failed' if cc == 'partial' and scene == 'two' else 'success', 'norm_power': norm})
+                             'status': 'failed' if cc == 'partial' and scene == 'two' else 'success',
+                             'norm_power': norm, 'norm_power_p95': norm})
                 rows.append({'scenario': scene, 'cc': cc, 'workload': 'websearch', 'repeat': 1,
-                             'status': 'success', 'fct_slowdown': 1.0})
+                             'status': 'success', 'fct_slowdown': 1.0, 'fct_slowdown_p95': 1.0})
         scenes = [{'name': 'one'}, {'name': 'two'}]
         with patch.multiple(bench, CCS=['a', 'b', 'partial'], REPEATS=1, WORKLOADS=['bulk', 'websearch']):
             entries, warnings = bench.overall_ranking(scenes, rows)
@@ -222,7 +248,7 @@ class TraceBenchTests(unittest.TestCase):
     def test_overall_ranking_bulk_ties_zeros_and_missing_bulk(self):
         scenes = [{'name': 'a'}, {'name': 'b'}]
         rows = [{'scenario': scene, 'cc': cc, 'workload': 'bulk', 'repeat': 1,
-                 'status': 'success', 'norm_power': value}
+                 'status': 'success', 'norm_power': value, 'norm_power_p95': value}
                 for scene, vals in [('a', (1, .5, 0)), ('b', (.5, 1, 0))]
                 for cc, value in zip(('x', 'y', 'zero'), vals)]
         with patch.multiple(bench, CCS=['x', 'y', 'zero'], REPEATS=1, WORKLOADS=['bulk']):
@@ -241,9 +267,10 @@ class TraceBenchTests(unittest.TestCase):
         rows = []
         for cc, status in [('good', 'success'), ('slow', 'timeout')]:
             rows.append({'scenario': 'a', 'cc': cc, 'workload': 'bulk', 'repeat': 1,
-                         'status': 'success', 'norm_power': .5})
+                         'status': 'success', 'norm_power': .5, 'norm_power_p95': .5})
             rows.append({'scenario': 'a', 'cc': cc, 'workload': 'app', 'repeat': 1,
-                         'status': status, 'fct_slowdown': 2 if status == 'success' else ''})
+                         'status': status, 'fct_slowdown': 2 if status == 'success' else '',
+                         'fct_slowdown_p95': 2 if status == 'success' else ''})
         with patch.multiple(bench, CCS=['good', 'slow'], REPEATS=1, WORKLOADS=['bulk', 'app']):
             scenario = bench.ranking_entries(rows, 'a', '', 'combined')
             slow = next(e for e in scenario if e['cc'] == 'slow')

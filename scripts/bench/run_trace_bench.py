@@ -325,7 +325,7 @@ def main() -> int:
                 if job['expected'] is not None and int(data.get('requests', 0)) != job['expected']:
                     row['status'] = 'timeout'
                     row['error'] = f"达到最大仿真时长 {WORKLOAD_MAX_SIMULATION_S:g} s，数据块完成 {data.get('requests', 0)}/{job['expected']}，计 0 分"
-                    for field in ('rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'fct_slowdown', 'mortise_qoe'):
+                    for field in ('rct_mean_ms', 'rct_p50_ms', 'rct_p95_ms', 'fct_slowdown', 'fct_slowdown_p95', 'mortise_qoe'):
                         row[field] = ''
                 else:
                     row['status'] = 'success'

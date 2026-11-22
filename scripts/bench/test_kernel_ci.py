@@ -238,10 +238,20 @@ class KernelCiTests(unittest.TestCase):
             by_key = {(r['cc'], r['workload']): r for r in rows}
             self.assertEqual(by_key[('fast_cc', 'bulk')]['status'], 'success')
             self.assertGreater(by_key[('fast_cc', 'bulk')]['norm_power'], 0)
+            self.assertGreater(by_key[('fast_cc', 'bulk')]['norm_power_p95'], 0)
+            self.assertLessEqual(
+                by_key[('fast_cc', 'bulk')]['norm_power_p95'],
+                by_key[('fast_cc', 'bulk')]['norm_power'] + 1e-9,
+            )
             self.assertEqual(by_key[('fast_cc', 'tiny')]['status'], 'success')
             self.assertGreater(by_key[('fast_cc', 'tiny')]['fct_slowdown'], 0)
+            self.assertGreaterEqual(
+                by_key[('fast_cc', 'tiny')]['fct_slowdown_p95'],
+                by_key[('fast_cc', 'tiny')]['fct_slowdown'],
+            )
             self.assertEqual(by_key[('slow_cc', 'tiny')]['status'], 'timeout')
             self.assertEqual(by_key[('slow_cc', 'tiny')]['fct_slowdown'], '')
+            self.assertEqual(by_key[('slow_cc', 'tiny')]['fct_slowdown_p95'], '')
             self.assertEqual(list(out_dir.glob('*.downlink.log')), [])
 
             # Write shard_runs.csv and summarize
@@ -266,6 +276,9 @@ class KernelCiTests(unittest.TestCase):
             self.assertTrue(csv_path.is_file())
             self.assertTrue(md_path.is_file())
             self.assertIn('Mahimahi Linux Kernel Bench 实验报告', report_md)
+            self.assertIn('P95 Norm Power ↑', report_md)
+            self.assertIn('P95 FCT Slowdown ↓', report_md)
+            self.assertIn('### 综合排名（基于 P95）', report_md)
             self.assertIn('所有场景总排名', report_md)
             self.assertIn('超时（0分）', report_md)
             self.assertIn('500KB', report_md)

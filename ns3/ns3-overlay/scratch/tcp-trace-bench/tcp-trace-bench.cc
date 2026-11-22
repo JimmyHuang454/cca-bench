@@ -986,8 +986,10 @@ main(int argc, char* argv[])
                               : 0.0;
         double util = (avgCap > 1e-6) ? (sum / avgCap) : 0.0;
         double estRttMs = effBaseRttMs + qdAvg;
+        double estRttP95Ms = effBaseRttMs + qdP95;
         double utilPower = (estRttMs > 1e-6) ? (util / (estRttMs / 1000.0)) : 0.0;
         double normPower = utilPower * (effBaseRttMs / 1000.0);
+        double normPowerP95 = (estRttP95Ms > 1e-6) ? (util * effBaseRttMs / estRttP95Ms) : 0.0;
         double tputPower = (estRttMs > 1e-6) ? (sum / (estRttMs / 1000.0)) : 0.0;
 
         std::ostringstream js;
@@ -1002,15 +1004,18 @@ main(int argc, char* argv[])
            << ",\"est_rtt_ms\":" << estRttMs
            << ",\"util_power\":" << utilPower
            << ",\"norm_power\":" << normPower
+           << ",\"norm_power_p95\":" << normPowerP95
            << ",\"tput_power\":" << tputPower
            << ",\"drop_rate\":" << dropRate;
         if (appMode && appRx)
         {
             std::vector<double> rcts = appRx->rctsMs;
-            double meanRct = 0.0, p50Rct = 0.0, p95Rct = 0.0, fctSlowdown = 0.0, mortiseQoe = 0.0;
+            double meanRct = 0.0, p50Rct = 0.0, p95Rct = 0.0, fctSlowdown = 0.0, fctSlowdownP95 = 0.0, mortiseQoe = 0.0;
             if (!rcts.empty())
             {
                 double qoeSum = 0.0, logSdSum = 0.0;
+                std::vector<double> sds;
+                sds.reserve(rcts.size());
                 for (size_t i = 0; i < rcts.size(); i++)
                 {
                     meanRct += rcts[i];
@@ -1036,11 +1041,13 @@ main(int argc, char* argv[])
                     double idealMs = std::max(requestBase, 1.0) +
                                      ((avgCap > 1e-6) ? (static_cast<double>(sz) * 8.0 / (avgCap * 1000.0)) : 0.0);
                     double sd = std::max(rcts[i] / std::max(idealMs, 1e-3), 1.0);
+                    sds.push_back(sd);
                     logSdSum += std::log(sd);
                 }
                 meanRct /= static_cast<double>(rcts.size());
                 mortiseQoe = qoeSum / static_cast<double>(rcts.size());
                 fctSlowdown = std::exp(logSdSum / static_cast<double>(rcts.size()));
+                fctSlowdownP95 = Percentile(sds, 95);
                 std::vector<double> sortedRcts = rcts;
                 p50Rct = Percentile(sortedRcts, 50);
                 p95Rct = Percentile(sortedRcts, 95);
@@ -1057,6 +1064,7 @@ main(int argc, char* argv[])
                << ",\"retrans_pkts\":" << retx
                << ",\"retrans_ratio\":" << retxRatio
                << ",\"fct_slowdown\":" << fctSlowdown
+               << ",\"fct_slowdown_p95\":" << fctSlowdownP95
                << ",\"mortise_qoe\":" << mortiseQoe;
         }
         js << "}\n";
