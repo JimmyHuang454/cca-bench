@@ -404,6 +404,7 @@ main(int argc, char* argv[])
     double flowStagger = 0.0;
     uint32_t segmentSize = 0;
     uint32_t sndBufBytes = 0;
+    uint32_t rcvBufBytes = 0;
     uint32_t seed = 1;
     uint32_t run = 1;
     std::string freshLoss;
@@ -468,6 +469,7 @@ main(int argc, char* argv[])
     cmd.AddValue("flowStagger", "Start offset between consecutive flows [s]", flowStagger);
     cmd.AddValue("segmentSize", "TCP segment size [bytes]", segmentSize);
     cmd.AddValue("sndBuf", "TCP send buffer [bytes]", sndBufBytes);
+    cmd.AddValue("rcvBuf", "TCP receive buffer [bytes]", rcvBufBytes);
     cmd.AddValue("seed", "RNG seed", seed);
     cmd.AddValue("run", "RNG run number", run);
     cmd.AddValue("rttSampleLog", "Write every valid ACK RTT sample to CSV", rttSampleLog);
@@ -656,6 +658,7 @@ main(int argc, char* argv[])
     // Leave TCP defaults untouched unless the caller explicitly overrides them.
     if (segmentSize) Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue(segmentSize));
     if (sndBufBytes) Config::SetDefault("ns3::TcpSocket::SndBufSize", UintegerValue(sndBufBytes));
+    if (rcvBufBytes) Config::SetDefault("ns3::TcpSocket::RcvBufSize", UintegerValue(rcvBufBytes));
     if (clockGranularityMs > 0) Config::SetDefault("ns3::TcpSocketBase::ClockGranularity", TimeValue(MilliSeconds(clockGranularityMs)));
     if (minRtoMs > 0) Config::SetDefault("ns3::TcpSocketBase::MinRto", TimeValue(MilliSeconds(minRtoMs)));
     if (!freshLoss.empty())
@@ -687,7 +690,9 @@ main(int argc, char* argv[])
     }
 
     PointToPointHelper access;
-    access.SetDeviceAttribute("DataRate", StringValue("1Gbps"));
+    access.SetDeviceAttribute(
+        "DataRate",
+        StringValue((profile == "lines" || profile == "mahimahi") ? "10Gbps" : "1Gbps"));
     access.SetChannelAttribute("Delay", TimeValue(MilliSeconds(accessDelayMs)));
 
     PointToPointHelper bottleneck;

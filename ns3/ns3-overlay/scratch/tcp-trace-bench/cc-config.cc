@@ -30,11 +30,18 @@ IsCopaKernelName(const std::string& name)
            cc.rfind("copa_auto_nc_theta", 0) == 0;
 }
 
+static bool
+IsCopaV3Name(const std::string& cc)
+{
+    return cc.rfind("copa_auto_v3", 0) == 0 || cc.rfind("copa-auto-v3", 0) == 0;
+}
+
 bool
 IsAdaptiveCopaName(const std::string& name)
 {
     const std::string cc = BaseCc(name);
-    return cc == "copa-auto-v2" || cc == "copa_auto_v2" || cc == "copa-auto" || cc == "copa_auto" || cc == "copa_auto_nc" ||
+    return IsCopaV3Name(cc) ||
+           cc == "copa-auto-v2" || cc == "copa_auto_v2" || cc == "copa-auto" || cc == "copa_auto" || cc == "copa_auto_nc" ||
            cc == "copa_auto_j0" || cc == "copa_auto_nc_j0" || cc == "copa_auto_nc_j3" ||
            cc.rfind("copa_auto_theta", 0) == 0 || cc.rfind("copa_auto_nc_theta", 0) == 0;
 }
@@ -77,6 +84,66 @@ ConfigureCcFlow(uint32_t nodeId,
         Config::Set(path + "DebugMs", UintegerValue(debugMs));
         if (flow == 0 && g_copaEst.is_open())
             Config::ConnectWithoutContext(path + "Estimates", MakeCallback(&CopaEstimateTracer));
+        return;
+    }
+    if (IsCopaV3Name(cc))
+    {
+        const std::string path = "/NodeList/" + std::to_string(nodeId) +
+            "/$ns3::TcpL4Protocol/SocketList/0/CongestionOps/$ns3::TcpCopaAutoV3/";
+        const bool nosw = (name.find("+nosw") != std::string::npos);
+        uint32_t variant = 2U; /* COPA_V3_HYBRID (default for copa_auto_v3*) */
+        std::string rest = cc.substr(12); /* suffix after "copa_auto_v3" / "copa-auto-v3" */
+        if (!rest.empty() && rest[0] == 'a')
+        {
+            variant = 0U; /* COPA_V3_PROBE_BW */
+            rest = rest.substr(1);
+        }
+        else if (!rest.empty() && rest[0] == 'b')
+        {
+            variant = 1U; /* COPA_V3_DIFFUSION */
+            rest = rest.substr(1);
+        }
+
+        bool modeSwitching = !nosw;
+        int32_t effJitterUs = jitterUs;
+        uint32_t thetaMilli = 500U;
+
+        if (rest.rfind("_nc", 0) == 0)
+        {
+            modeSwitching = false;
+            const std::string sub = rest.substr(3);
+            if (sub == "_j0")
+            {
+                effJitterUs = 0;
+            }
+            else if (sub.rfind("_theta", 0) == 0)
+            {
+                double th = std::stod(sub.substr(6));
+                thetaMilli = static_cast<uint32_t>(
+                    std::clamp<int>(static_cast<int>(std::round(th * 1000.0)), 10, 995));
+            }
+        }
+        else if (rest == "_j0")
+        {
+            effJitterUs = 0;
+        }
+        else if (rest.rfind("_theta", 0) == 0)
+        {
+            double th = std::stod(rest.substr(6));
+            thetaMilli = static_cast<uint32_t>(
+                std::clamp<int>(static_cast<int>(std::round(th * 1000.0)), 10, 995));
+        }
+
+        Config::Set(path + "Variant", UintegerValue(variant));
+        Config::Set(path + "ModeSwitching", BooleanValue(modeSwitching));
+        Config::Set(path + "JitterUs", IntegerValue(effJitterUs));
+        Config::Set(path + "ThetaMilli", UintegerValue(thetaMilli));
+        Config::Set(path + "CopaClockUs", UintegerValue(std::max<uint32_t>(copaClockUs, 1U)));
+        Config::Set(path + "DebugMs", UintegerValue(debugMs));
+        if (flow == 0 && g_copaEst.is_open())
+        {
+            Config::ConnectWithoutContext(path + "Estimates", MakeCallback(&CopaEstimateTracer));
+        }
         return;
     }
     if (!IsCopaKernelName(name))
@@ -228,6 +295,10 @@ CcTypeName(const std::string& name)
     if (cc == "copa-auto-v2" || cc == "copa_auto_v2")
     {
         return "ns3::TcpCopaAutoV2";
+    }
+    if (IsCopaV3Name(cc))
+    {
+        return "ns3::TcpCopaAutoV3";
     }
     if (IsCopaKernelName(name))
     {

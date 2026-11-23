@@ -101,6 +101,7 @@ test-core:
 	$(MAKE) -C $(KERNEL_DIR)/tcp_copa_auto test
 
 sync-bench:
+	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_v3.h" "$(CURDIR)/ns3-overlay/src/internet/model/copa_auto_v3.h"
 	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_v2.h" "$(CURDIR)/ns3-overlay/src/internet/model/copa_auto_v2.h"
 	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_core.h" "$(CURDIR)/ns3-overlay/src/internet/model/copa_auto_core.h"
 	cp "$(KERNEL_DIR)/tcp_copa_auto/copa_auto_math.h" "$(CURDIR)/ns3-overlay/src/internet/model/copa_auto_math.h"

@@ -20,18 +20,18 @@ if _BENCH_DIR not in sys.path:
 
 import lines_common
 import trace_report
-from lines_common import atomic_write, digest, discover, parse_line, workload
+from lines_common import atomic_write, digest, discover, integrate_piecewise, parse_line, workload
 from trace_report import mean
 
 ROOT = Path(__file__).resolve().parents[2]
 
 # Select a dataset directory or one of its scenario directories.
 # Edit these settings, then run this script or `make bench`.
-# LINES_DIR = ROOT / 'datasets/lines/lumos'
-LINES_DIR = ROOT / 'datasets/lines/basic'
+LINES_DIR = ROOT / 'datasets/lines/lumos'
+# LINES_DIR = ROOT / 'datasets/lines/leocc'
 WORKLOADS = ['bulk', 'websearch', 'pageload', 'app', 'http2_mux_rr', 'http2_mux_srpt']
-CCS = ['copa_nc', 'copa_auto', 'copa', 'copa_auto_nc', 'bbr', 'cubic', 'westwood', 'illinois', 'veno', 'yeah', 'hybla']
-CCS = ['copa_nc', 'copa_auto', 'copa', 'copa_auto_nc', 'copa_auto_nc_theta0.8','copa_auto_j0', 'copa_auto_nc_j0', 'bbr', 'cubic']
+CCS = ['westwood', 'illinois', 'veno', 'yeah', 'hybla']
+CCS = ['copa_nc', 'copa', 'bbr', 'cubic','copa_auto_v3','copa_auto_v3_nc']
 REPEATS = 1
 TAIL_PERCENTILE = 98  # Tail percentile for qdelay, Norm Power, RCT, FCT Slowdown & rankings (e.g. 50, 90, 95, 99).
 RESUME = True  # False: rerun all combinations and replace their results.
@@ -39,6 +39,13 @@ MAX_WORKERS = os.cpu_count() or 1  # Maximum concurrent ns-3 processes; 1 runs s
 WORKLOAD_MAX_SIMULATION_S = 1800.0  # Maximum simulated time from the start, not wall time.
 DEFAULT_ONE_WAY_DELAY_MS = lines_common.DEFAULT_ONE_WAY_DELAY_MS
 TCP_SEGMENT_SIZE_BYTES = 1448  # IPv4 + TCP timestamps with a 1500-byte MTU.
+TCP_SND_BUF_BYTES = 16 * 1024 * 1024  # 16 MiB: modern Linux/Android/iOS TCP auto-tuning ceiling.
+TCP_RCV_BUF_BYTES = 16 * 1024 * 1024  # 16 MiB: avoids 128 KiB RWND cap on high-BDP 5G links.
+QUEUE_BYTES: int | str = 'auto'  # 'auto' scales per scenario as clamp(max(1.5*BDP, 80ms), 500 KB, 16 MiB); or int bytes.
+QUEUE_AUTO_BDP_MULT = 1.5
+QUEUE_AUTO_DEPTH_MS = 80.0
+QUEUE_AUTO_MIN_BYTES = 500_000
+QUEUE_AUTO_MAX_BYTES = 16 * 1024 * 1024
 BINARY = ROOT / 'ns3/ns-3/build/scratch/tcp-trace-bench/ns3-dev-tcp-trace-bench-optimized'
 RESULTS_DIR = ROOT / 'results/trace-bench'
 
@@ -212,7 +219,65 @@ class ProcessController:
                     pass
 
 
-def write_report(output: Path, scenarios: list[dict], rows: list[dict], work: dict) -> None:
+def _format_bytes(size: int) -> str:
+    if size >= 1024 * 1024 and size % (1024 * 1024) == 0:
+        return f'{size // (1024 * 1024)} MiB'
+    if size >= 1_000_000:
+        return f'{size / 1_000_000:.2f} MB'
+    return f'{size / 1_000:.0f} KB'
+
+
+def scenario_queue_bytes(scenario: dict) -> int:
+    if QUEUE_BYTES != 'auto':
+        if isinstance(QUEUE_BYTES, bool) or not isinstance(QUEUE_BYTES, int) or QUEUE_BYTES <= 0:
+            raise ValueError(f'invalid QUEUE_BYTES: {QUEUE_BYTES!r}')
+        return QUEUE_BYTES
+    files = scenario.get('files') or {}
+    up_path = files.get('up')
+    if not up_path:
+        return QUEUE_AUTO_MIN_BYTES
+    end_ms, up_pts = parse_line(Path(up_path), delay=False)
+    avg_cap_mbps = integrate_piecewise(up_pts, end_ms) * 12.0 / end_ms if end_ms > 0 else 0.0
+    delays_ms = []
+    for key in ('up_delay', 'down_delay'):
+        dpath = files.get(key)
+        if dpath:
+            d_end, d_pts = parse_line(Path(dpath), delay=True)
+            delays_ms.append(integrate_piecewise(d_pts, d_end) / d_end if d_end > 0 else DEFAULT_ONE_WAY_DELAY_MS)
+        else:
+            delays_ms.append(DEFAULT_ONE_WAY_DELAY_MS)
+    avg_rtt_ms = sum(delays_ms)
+    bytes_per_sec = avg_cap_mbps * 1_000_000.0 / 8.0
+    bdp_bytes = bytes_per_sec * (avg_rtt_ms / 1000.0)
+    depth_bytes = bytes_per_sec * (QUEUE_AUTO_DEPTH_MS / 1000.0)
+    raw = max(int(round(QUEUE_AUTO_BDP_MULT * bdp_bytes)), int(round(depth_bytes)))
+    return max(QUEUE_AUTO_MIN_BYTES, min(QUEUE_AUTO_MAX_BYTES, raw))
+
+
+def write_report(
+    output: Path,
+    scenarios: list[dict],
+    rows: list[dict],
+    work: dict,
+    queue_by_scenario: dict[str, int] | None = None,
+) -> None:
+    extra_header = [
+        f'- TCP 端侧收发缓冲：SndBuf {_format_bytes(TCP_SND_BUF_BYTES)} / RcvBuf {_format_bytes(TCP_RCV_BUF_BYTES)}',
+    ]
+    extra_config: list[str] = []
+    if queue_by_scenario:
+        uniq = sorted(set(queue_by_scenario.values()))
+        if len(uniq) == 1:
+            extra_header.append(f'- 瓶颈单向队列缓冲：{_format_bytes(uniq[0])}（{uniq[0]} 字节）')
+        else:
+            extra_header.append(
+                f'- 瓶颈单向队列缓冲（auto）：{_format_bytes(uniq[0])}–{_format_bytes(uniq[-1])}'
+            )
+            extra_config.append(
+                '- 各场景瓶颈单向队列缓冲：'
+                + '；'.join(f"{s['name']} {_format_bytes(queue_by_scenario[s['name']])}" for s in scenarios if s['name'] in queue_by_scenario)
+                + '。'
+            )
     content = trace_report.render_report(
         scenarios,
         rows,
@@ -227,13 +292,21 @@ def write_report(output: Path, scenarios: list[dict], rows: list[dict], work: di
         default_one_way_delay_ms=DEFAULT_ONE_WAY_DELAY_MS,
         workload_max_s=WORKLOAD_MAX_SIMULATION_S,
         workload_timeout_label='仿真时间',
+        extra_header_lines=extra_header,
+        extra_config_lines=extra_config,
     )
     atomic_write(output / 'report.md', content)
 
 
-def write_results(output: Path, scenarios: list[dict], rows: list[dict], work: dict) -> None:
+def write_results(
+    output: Path,
+    scenarios: list[dict],
+    rows: list[dict],
+    work: dict,
+    queue_by_scenario: dict[str, int] | None = None,
+) -> None:
     trace_report.write_runs_csv(output / 'runs.csv', rows)
-    write_report(output, scenarios, rows, work)
+    write_report(output, scenarios, rows, work, queue_by_scenario=queue_by_scenario)
 
 
 def main() -> int:
@@ -269,14 +342,18 @@ def main() -> int:
             raise ValueError(f'benchmark already running for {output}') from None
         raw_dir = output / 'runs'
         raw_dir.mkdir(exist_ok=True)
+        queue_by_scenario = {s['name']: scenario_queue_bytes(s) for s in scenarios}
         metadata = {'lines_dir': str(LINES_DIR), 'ccs': CCS, 'workloads': {k: {**v, 'path': str(v['path'])} for k, v in work.items()},
                     'repeats': REPEATS, 'tail_percentile': tail_p, 'max_workers': MAX_WORKERS, 'default_one_way_delay_ms': DEFAULT_ONE_WAY_DELAY_MS,
                     'workload_max_simulation_s': WORKLOAD_MAX_SIMULATION_S,
                     'scenarios': [{'name': s['name'], 'duration_s': s['duration_s'],
+                                   'queue_bytes': queue_by_scenario[s['name']],
                                    'files': {k: {'path': str(v), 'sha256': digest(v)} for k, v in s['files'].items()}} for s in scenarios],
-                    'binary_sha256': digest(BINARY), 'queue_bytes_per_direction': 500000,
+                    'binary_sha256': digest(BINARY), 'queue_bytes_mode': QUEUE_BYTES,
                     'tcp_segment_size_bytes': TCP_SEGMENT_SIZE_BYTES,
-                    'tcp_configuration': 'ns-3 defaults except segment size; congestion-control implementations may enable pacing'}
+                    'tcp_snd_buf_bytes': TCP_SND_BUF_BYTES,
+                    'tcp_rcv_buf_bytes': TCP_RCV_BUF_BYTES,
+                    'tcp_configuration': 'ns-3 defaults with explicit segment size and 16 MiB SndBuf/RcvBuf; congestion-control implementations may enable pacing'}
         atomic_write(output / 'metadata.json', json.dumps(metadata, indent=2) + '\n')
         scenario_hashes = {s['name']: {k: v['sha256'] for k, v in s['files'].items()}
                            for s in metadata['scenarios']}
@@ -284,6 +361,7 @@ def main() -> int:
         pending = []
         index = 0
         for scenario in scenarios:
+            q_bytes = queue_by_scenario[scenario['name']]
             for wk in WORKLOADS:
                 for cc in CCS:
                     for repeat in range(1, REPEATS + 1):
@@ -295,6 +373,9 @@ def main() -> int:
                                f'--stopTime={stop_s}', f'--ccs={cc}', f'--run={repeat}',
                                f'--defaultDelayMs={DEFAULT_ONE_WAY_DELAY_MS}',
                                f'--segmentSize={TCP_SEGMENT_SIZE_BYTES}',
+                               f'--sndBuf={TCP_SND_BUF_BYTES}',
+                               f'--rcvBuf={TCP_RCV_BUF_BYTES}',
+                               f'--queueBytes={q_bytes}',
                                f'--tailPercentile={tail_p:g}', '--evalJson=1']
                         for direction in ('up', 'down'):
                             if direction + '_delay' in files:
@@ -325,7 +406,8 @@ def main() -> int:
                         index += 1
 
         def snapshot() -> None:
-            write_results(output, scenarios, [rows_by_index[i] for i in sorted(rows_by_index)], work)
+            write_results(output, scenarios, [rows_by_index[i] for i in sorted(rows_by_index)], work,
+                          queue_by_scenario=queue_by_scenario)
 
         def save_result(job: dict, result: tuple[int | None, str, str, str]) -> None:
             returncode, stdout, stderr, error = result

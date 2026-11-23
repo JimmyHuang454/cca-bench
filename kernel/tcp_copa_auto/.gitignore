@@ -7,3 +7,5 @@
 .*.cmd
 .tmp_versions/
 test_core
+test_v2
+test_v3

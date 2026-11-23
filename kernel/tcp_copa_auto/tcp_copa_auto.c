@@ -19,6 +19,7 @@
 #include <net/tcp.h>
 
 #include "copa_auto_v2.h"
+#include "copa_auto_v3.h"
 
 static unsigned int theta_milli = 980;
 module_param(theta_milli, uint, 0644);
@@ -41,9 +42,11 @@ struct tcp_copa_priv {
 	u64 next_sample_us;
 	struct copa_auto_state *ca;
 	struct copa_v2_state *v2;
+	struct copa_v3_state *v3;
 };
 
 static struct copa_probe_board g_copa_board;
+static struct copa_v3_board g_copa_v3_board;
 
 static inline u64 tcp_copa_now_us(const struct tcp_sock *tp)
 {
@@ -82,6 +85,7 @@ static void tcp_copa_init_common(struct sock *sk, struct copa_auto_cfg cfg)
 	ca = kzalloc(sizeof(*ca), GFP_ATOMIC);
 	priv->ca = ca;
 	priv->v2 = NULL;
+	priv->v3 = NULL;
 	priv->next_sample_us = 0;
 	if (!ca)
 		return;
@@ -104,6 +108,103 @@ static void tcp_copa_init_v2(struct sock *sk)
     priv->v2 = kzalloc(sizeof(*priv->v2), GFP_ATOMIC);
     if (!priv->v2) { kfree(priv->ca); priv->ca = NULL; return; }
     copa_v2_init(priv->v2, READ_ONCE(measurement_rtts));
+}
+
+static void tcp_copa_init_v3_common(struct sock *sk, struct copa_v3_cfg cfg)
+{
+	struct tcp_copa_priv *priv = inet_csk_ca(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct copa_v3_state *v3;
+	u32 init_cwnd;
+
+	BUILD_BUG_ON(sizeof(struct tcp_copa_priv) > ICSK_CA_PRIV_SIZE);
+
+	v3 = kzalloc(sizeof(*v3), GFP_ATOMIC);
+	priv->ca = NULL;
+	priv->v2 = NULL;
+	priv->v3 = v3;
+	priv->next_sample_us = 0;
+	if (!v3)
+		return;
+
+	init_cwnd = max_t(u32, tcp_copa_get_cwnd(tp), 10U);
+	copa_v3_init(v3, cfg, &g_copa_v3_board, tcp_copa_now_us(tp), init_cwnd);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
+	cmpxchg(&sk->sk_pacing_status, SK_PACING_NONE, SK_PACING_NEEDED);
+#endif
+}
+
+static void tcp_copa_init_v3(struct sock *sk)
+{
+	struct copa_v3_cfg cfg = {
+		.variant = COPA_V3_HYBRID,
+		.mode_switching = true,
+		.jitter_us = -1,
+		.theta_milli = 500,
+		.init_delta_q20 = COPA_V3_DELTA_INIT_Q20,
+	};
+	tcp_copa_init_v3_common(sk, cfg);
+}
+
+static void tcp_copa_init_v3_nc(struct sock *sk)
+{
+	struct copa_v3_cfg cfg = {
+		.variant = COPA_V3_HYBRID,
+		.mode_switching = false,
+		.jitter_us = READ_ONCE(jitter_us),
+		.theta_milli = 500,
+		.init_delta_q20 = COPA_V3_DELTA_INIT_Q20,
+	};
+	tcp_copa_init_v3_common(sk, cfg);
+}
+
+static void tcp_copa_init_v3a(struct sock *sk)
+{
+	struct copa_v3_cfg cfg = {
+		.variant = COPA_V3_PROBE_BW,
+		.mode_switching = true,
+		.jitter_us = -1,
+		.theta_milli = 500,
+		.init_delta_q20 = COPA_V3_DELTA_INIT_Q20,
+	};
+	tcp_copa_init_v3_common(sk, cfg);
+}
+
+static void tcp_copa_init_v3a_nc(struct sock *sk)
+{
+	struct copa_v3_cfg cfg = {
+		.variant = COPA_V3_PROBE_BW,
+		.mode_switching = false,
+		.jitter_us = READ_ONCE(jitter_us),
+		.theta_milli = 500,
+		.init_delta_q20 = COPA_V3_DELTA_INIT_Q20,
+	};
+	tcp_copa_init_v3_common(sk, cfg);
+}
+
+static void tcp_copa_init_v3b(struct sock *sk)
+{
+	struct copa_v3_cfg cfg = {
+		.variant = COPA_V3_DIFFUSION,
+		.mode_switching = true,
+		.jitter_us = -1,
+		.theta_milli = 500,
+		.init_delta_q20 = COPA_V3_DELTA_INIT_Q20,
+	};
+	tcp_copa_init_v3_common(sk, cfg);
+}
+
+static void tcp_copa_init_v3b_nc(struct sock *sk)
+{
+	struct copa_v3_cfg cfg = {
+		.variant = COPA_V3_DIFFUSION,
+		.mode_switching = false,
+		.jitter_us = READ_ONCE(jitter_us),
+		.theta_milli = 500,
+		.init_delta_q20 = COPA_V3_DELTA_INIT_Q20,
+	};
+	tcp_copa_init_v3_common(sk, cfg);
 }
 
 static void tcp_copa_init_auto(struct sock *sk)
@@ -219,6 +320,8 @@ static void tcp_copa_release(struct sock *sk)
 {
 	struct tcp_copa_priv *priv = inet_csk_ca(sk);
 
+	kfree(priv->v3);
+	priv->v3 = NULL;
 	kfree(priv->v2);
 	priv->v2 = NULL;
 	if (priv->ca) {
@@ -243,6 +346,19 @@ static void tcp_copa_set_state(struct sock *sk, u8 new_state)
 {
 	struct tcp_copa_priv *priv = inet_csk_ca(sk);
 	struct tcp_sock *tp = tcp_sk(sk);
+
+	if (priv->v3) {
+		if (new_state == TCP_CA_Loss || new_state == TCP_CA_Recovery) {
+			bool persistent = (new_state == TCP_CA_Loss);
+			copa_v3_on_loss(priv->v3, tcp_copa_now_us(tp), persistent);
+			if (persistent) {
+				u32 cwnd = max_t(u32, (u32)(priv->v3->cwnd_q10 >> 10),
+						 COPA_V3_MIN_CWND_PKTS);
+				tcp_copa_set_cwnd(tp, min_t(u32, cwnd, tp->snd_cwnd_clamp));
+			}
+		}
+		return;
+	}
 
 	if (!priv->ca)
 		return;
@@ -280,6 +396,36 @@ static void tcp_copa_cong_control(struct sock *sk,
 	u64 now_us, srtt_us, rtt_sample_us, rate_bps = 0, pacing_rate;
 	u32 mss, acked_pkts, new_cwnd;
 	bool app_limited;
+
+	if (priv->v3) {
+		now_us = tcp_copa_now_us(tp);
+		srtt_us = tp->srtt_us >> 3;
+		rtt_sample_us = (rs && rs->rtt_us > 0) ? (u64)rs->rtt_us : 0ULL;
+		if (!rtt_sample_us)
+			return;
+		if (srtt_us == 0)
+			srtt_us = rtt_sample_us;
+		mss = max_t(u32, tp->mss_cache, 536U);
+		acked_pkts = (rs && rs->acked_sacked > 0) ? (u32)rs->acked_sacked : 1U;
+		if (rs && rs->delivered > 0 && rs->interval_us > 0) {
+			rate_bps = div64_u64((u64)rs->delivered * (u64)mss * 1000000ULL,
+					     (u64)rs->interval_us);
+		}
+		app_limited = (rs && rs->is_app_limited) || (tp->app_limited != 0);
+		new_cwnd = copa_v3_on_ack(priv->v3, now_us, rtt_sample_us, srtt_us,
+					  acked_pkts, mss, rate_bps, app_limited,
+					  rs && rs->is_app_limited && rs->prior_in_flight <= 4);
+		new_cwnd = clamp_t(u32, new_cwnd, COPA_V3_MIN_CWND_PKTS, tp->snd_cwnd_clamp);
+		tcp_copa_set_cwnd(tp, new_cwnd);
+		pacing_rate = copa_v3_pacing_rate_bps(priv->v3, mss);
+		if (pacing_rate > 0) {
+			unsigned long max_rate = READ_ONCE(sk->sk_max_pacing_rate);
+			if (pacing_rate > max_rate)
+				pacing_rate = max_rate;
+			WRITE_ONCE(sk->sk_pacing_rate, (unsigned long)pacing_rate);
+		}
+		return;
+	}
 
 	if (!ca)
 		return;
@@ -342,6 +488,12 @@ static struct tcp_congestion_ops sym __read_mostly = {		\
 	.set_state	= tcp_copa_set_state,			\
 }
 
+DEFINE_COPA_OPS(tcp_copa_v3_ops,         "copa_auto_v3",     tcp_copa_init_v3);
+DEFINE_COPA_OPS(tcp_copa_v3_nc_ops,      "copa_auto_v3_nc",  tcp_copa_init_v3_nc);
+DEFINE_COPA_OPS(tcp_copa_v3a_ops,        "copa_auto_v3a",    tcp_copa_init_v3a);
+DEFINE_COPA_OPS(tcp_copa_v3a_nc_ops,     "copa_auto_v3a_nc", tcp_copa_init_v3a_nc);
+DEFINE_COPA_OPS(tcp_copa_v3b_ops,        "copa_auto_v3b",    tcp_copa_init_v3b);
+DEFINE_COPA_OPS(tcp_copa_v3b_nc_ops,     "copa_auto_v3b_nc", tcp_copa_init_v3b_nc);
 DEFINE_COPA_OPS(tcp_copa_v2_ops,         "copa_auto_v2",    tcp_copa_init_v2);
 DEFINE_COPA_OPS(tcp_copa_auto_ops,       "copa_auto",       tcp_copa_init_auto);
 DEFINE_COPA_OPS(tcp_copa_auto_j0_ops,    "copa_auto_j0",    tcp_copa_init_auto_j0);
@@ -354,6 +506,12 @@ DEFINE_COPA_OPS(tcp_copa_orig_ops,       "copa_orig",       tcp_copa_init_orig);
 DEFINE_COPA_OPS(tcp_copa_nc_ops,         "copa_nc",         tcp_copa_init_orig_nc);
 
 static struct tcp_congestion_ops * const copa_ops_list[] = {
+	&tcp_copa_v3_ops,
+	&tcp_copa_v3_nc_ops,
+	&tcp_copa_v3a_ops,
+	&tcp_copa_v3a_nc_ops,
+	&tcp_copa_v3b_ops,
+	&tcp_copa_v3b_nc_ops,
 	&tcp_copa_v2_ops,
 	&tcp_copa_auto_ops,
 	&tcp_copa_auto_j0_ops,
@@ -378,7 +536,7 @@ static int __init tcp_copa_auto_register(void)
 			return ret;
 		}
 	}
-	pr_info("tcp_copa_auto: registered copa_auto_v2, copa_auto, copa_auto_j0, copa_auto_nc, copa_auto_nc_j0, copa_auto_t90, copa_auto_t98, copa_auto_t, copa_orig, copa_nc\n");
+	pr_info("tcp_copa_auto: registered copa_auto_v3, copa_auto_v3_nc, copa_auto_v3a, copa_auto_v3a_nc, copa_auto_v3b, copa_auto_v3b_nc, copa_auto_v2, copa_auto, copa_auto_j0, copa_auto_nc, copa_auto_nc_j0, copa_auto_t90, copa_auto_t98, copa_auto_t, copa_orig, copa_nc\n");
 	return 0;
 }
 
