@@ -55,9 +55,9 @@ datasets/lines/<数据集>/<场景名>/
 | 列名 | 必填/可选 | 默认单位 | 含义说明 |
 |---|---|---|---|
 | `time` | **必填** | `ms`（整数毫秒） | 严格单调递增的非负时间点（`t_0 = 0`，`t_i > t_{i-1}`），末行标定场景结束时刻 `end_ms` |
-| `cap` | 容量列（见下方规则） | `1500 B` 发包数/ms | 上下行**通用**每 1 ms 发送能力（当同行的 `up_cap` 或 `down_cap` 未填写时作为回落值） |
-| `up_cap` | 容量列（见下方规则） | `1500 B` 发包数/ms | **上行**（TCP 数据方向）每 1 ms 发送能力；非空时优先覆盖同行 `cap` |
-| `down_cap` | 容量列（见下方规则） | `1500 B` 发包数/ms | **下行**（TCP ACK 方向）每 1 ms 发送能力；非空时优先覆盖同行 `cap` |
+| `cap` | 容量列（见下方规则） | 须带速率单位（`0` 除外） | 上下行**通用**链路最大速率（当同行的 `up_cap` 或 `down_cap` 未填写时作为回落值） |
+| `up_cap` | 容量列（见下方规则） | 须带速率单位（`0` 除外） | **上行**（TCP 数据方向）链路最大速率；非空时优先覆盖同行 `cap` |
+| `down_cap` | 容量列（见下方规则） | 须带速率单位（`0` 除外） | **下行**（TCP ACK 方向）链路最大速率；非空时优先覆盖同行 `cap` |
 | `delay` | 可选 | `ms`（毫秒） | 上下行**通用**单向基础传播延迟（当同行的 `up_delay` 或 `down_delay` 未填写时作为回落值） |
 | `up_delay` | 可选 | `ms`（毫秒） | **上行**单向基础传播延迟；非空时优先覆盖同行 `delay` |
 | `down_delay` | 可选 | `ms`（毫秒） | **下行**单向基础传播延迟；非空时优先覆盖同行 `delay` |
@@ -78,7 +78,7 @@ datasets/lines/<数据集>/<场景名>/
 
 ## 三、单元格数值与单位语法
 
-**通用规则**：数值与单位后缀之间**不能有空格**（如 `10ms`、`1.5s`、`10.33kb` 合法；`10 ms`、`10 kb` 非法）。
+**通用规则**：数值与单位后缀之间**不能有空格**（如 `10ms`、`1.5s`、`2.135mbps`、`307kbps` 合法；`10 ms`、`10 mbps` 非法）。
 
 ### 1. 时间列（`time`）
 
@@ -92,13 +92,17 @@ datasets/lines/<数据集>/<场景名>/
 
 ### 2. 容量列（`cap` / `up_cap` / `down_cap`）
 
+统一使用标准十进制（1000 进制）**网络带宽速率单位**（不区分大小写），内部按 1500 B 报文折算为每毫秒发包机会数（`12 Mbps = 1500 B/ms = 1` 机会/ms）：
+
 | 写法 | 含义与换算 | 允许范围 | 示例 |
 |---|---|---|---|
-| 无后缀（默认） | 每 1 ms 可发送的 **1500 字节**发包机会数（`1 = 1500 B/ms = 12 Mbps`） | 非负**整数**（仅 `0–9`），`0 <= v <= 1,000,000` | `20`（240 Mbps） |
-| `b`、`kb`、`mb`（不区分大小写） | 每 1 ms 可发送字节数（二进制 1024：`1kb = 1024 B`，`1mb = 1024² B`），换算为 `bytes_per_ms / 1500.0` 机会/ms | 非负有限**小数或整数**，换算后机会数 `<= 1,000,000` | `1500b`、`10.33kb`、`0.25mb` |
-| 小写 `m` | 链路速率（Mbps），换算为 `Mbps / 12.0` 机会/ms | 非负有限**小数或整数**，`0 <= v <= 12,000,000` | `40m`、`50.11m` |
+| `0` | 零容量（断流或末行结束标记） | 仅允许字面量 `0` | `0` |
+| `bps` | 比特/秒（`val / 12,000,000` 机会/ms） | 无符号非负小数或整数 | `500bps` |
+| `kbps` | 千比特/秒（`val / 12,000` 机会/ms） | 无符号非负小数或整数 | `272kbps`、`307kbps` |
+| `mbps` | 兆比特/秒（`val / 12` 机会/ms） | 无符号非负小数或整数 | `2.135mbps`、`12mbps`、`130.36mbps` |
+| `gbps` | 吉比特/秒（`val × 1000 / 12` 机会/ms） | 无符号非负小数或整数，上限 `12,000gbps` | `1gbps`、`1.2gbps` |
 
-> 为避免歧义，拒绝无后缀小数（如 `2.5`、`2.0`）、`mbps`、单独 `k` 或大写 `M`。
+> 为彻底避免歧义，**不再兼容**无后缀正整数包数（如 `5`）、单字母 `m`（如 `40m`）以及每毫秒字节后缀 `b`/`kb`/`mb`（如 `266.88b`、`10.33kb`）。
 
 ### 3. 延迟列（`delay` / `up_delay` / `down_delay`）
 
@@ -129,9 +133,9 @@ Python 解析器（`lines_common.py::parse_line_csv`）与 ns-3 加载器（`lin
 
 ```csv
 time,cap,up_cap,down_cap,delay,up_delay,down_delay,comment
-0,100m,,,10ms,,,对称 100 Mbps / 单向 10 ms（RTT 20 ms）
-20s,,20m,,,40ms,,仅上行骤降至 20 Mbps 且上行延迟升至 40 ms（下行沿用 100m / 10ms）
-40s,100m,,,10ms,,,"双方向同步恢复, RTT 回到 20 ms"
+0,100mbps,,,10ms,,,对称 100 Mbps / 单向 10 ms（RTT 20 ms）
+20s,,20mbps,,,40ms,,仅上行骤降至 20 Mbps 且上行延迟升至 40 ms（下行沿用 100mbps / 10ms）
+40s,100mbps,,,10ms,,,"双方向同步恢复, RTT 回到 20 ms"
 60s,0,,,,,,end
 ```
 
@@ -139,8 +143,8 @@ time,cap,up_cap,down_cap,delay,up_delay,down_delay,comment
 
 ```csv
 time,cap,delay,up_delay,comment
-0,50m,10,30,上行 30 ms、下行回落用 10 ms（RTT 40 ms）
-1s,50m,15,40,上行 40 ms、下行回落用 15 ms（RTT 55 ms）
+0,50mbps,10,30,上行 30 ms、下行回落用 10 ms（RTT 40 ms）
+1s,50mbps,15,40,上行 40 ms、下行回落用 15 ms（RTT 55 ms）
 2s,0,,,end
 ```
 
@@ -148,9 +152,9 @@ time,cap,delay,up_delay,comment
 
 ```csv
 time,cap
-0,30.76kb
-12,32.23kb
-13,30.76kb
+0,252mbps
+12,264mbps
+13,252mbps
 800000,0
 ```
 
@@ -158,10 +162,10 @@ time,cap
 
 ```csv
 time,up_cap,down_cap
-0,8.79kb,1.46kb
+0,72mbps,12mbps
 1,0,
-6,,2.93kb
-12,14.65kb,1.46kb
+6,,24mbps
+12,120mbps,12mbps
 60000,0,0
 ```
 
@@ -172,9 +176,9 @@ time,up_cap,down_cap
 在 ns-3 `tcp-trace-bench`（`link-gates.h::MahimahiGate`、`line-model.cc`）中，CSV 轨迹按以下规则回放：
 
 1. **场景周期与循环**：
-   - `bulk` 模式运行到 `end_ms / 1000` 秒停止，不循环；`.wk` workload 模式通过 `--linePeriodMs=<end_ms>` 按 `t % end_ms` 循环回放，所有请求收完即提前结束。
+   - `bulk` 模式运行到 `end_ms / 1000` 秒停止，不循环；应用层 `.csv` workload 模式通过 `--linePeriodMs=<end_ms>` 按 `t % end_ms` 循环回放，所有请求收完即提前结束。
 2. **每毫秒字节额度与小数累积**：
-   - 第 `k` 毫秒发放字节额度 `bytes = 1500.0 * value + fractionalBytes`（对 `b`/`kb`/`mb` 写法即为精确的每毫秒字节数），向下取整为本毫秒可用整数额度 `left = floor(bytes + 1e-9)`，小数余量 `bytes - left` 累积到下一毫秒以保证 `Xm` 及小数单位写法长期无漂移。
+   - 第 `k` 毫秒按当前速率发放精确字节额度 `bytes = (rate_bps / 8000.0) + fractionalBytes`（等价于 `1500.0 * opps_per_ms + fractionalBytes`），向下取整为本毫秒可用整数额度 `left = floor(bytes + 1e-9)`，小数余量 `bytes - left` 累积到下一毫秒以保证任意 `kbps`/`mbps`/`gbps` 长期无漂移。
    - **未使用的整数额度不会留到下一毫秒**（避免静默后产生虚假突发）。
    - 队头数据包按实际字节大小（扣除 2 字节 PPP 头）消费额度，可跨多个毫秒逐步发送；最后一字节发完时递交接收端并记录该包排队延迟。
 3. **单向保序延迟**：
@@ -190,20 +194,20 @@ time,up_cap,down_cap
 
 - 顶部配置 `DATASET_DIR` 后直接运行（默认将 `datasets/traces/lumos/` 转为 `datasets/lines/lumos/*.csv`）：
   ```sh
-  python3 scripts/data/trace_to_lines.py
+  make trace_to_lines
   ```
 - 命令行转换整个目录（输出到 `datasets/lines/<目录名>/<场景名>.csv`）：
   ```sh
-  python3 scripts/data/trace_to_lines.py datasets/traces/cellular-traces-2018
+  python3 scripts/data/trace_to_lines.py datasets/traces/opennetlab-mmwave-5g
   ```
 - 命令行转换单组文件（输出到 `datasets/lines/converted/<场景名>.csv`）：
   ```sh
   python3 scripts/data/trace_to_lines.py input.up input.down [delay.txt]
   ```
 - **输出规范**：
-  - 容量默认优先以小数 `kb` / `mb` 输出（`CAPACITY_DECIMALS = 2`，可通过 `--decimals <N>` 调整，如 `1.46kb`、`10.25kb`、`30.76kb`、`1.43mb`，零值写 `0`）。
-  - 对称容量（Lumos、LeoCC）自动输出精简表头 `time,cap`（带延迟时为 `time,cap,delay`）；非对称上下行（Mahimahi `.up`/`.down`）输出 `time,up_cap,down_cap`。
-  - **仅当存在真实 `.delay` / `delay_*.txt` 源文件时才输出 `delay` 列**；无延迟源的数据集（如 Lumos、cellular-traces-2018）不构造多余延迟列，直接由评测脚本的 `DEFAULT_ONE_WAY_DELAY_MS` 生效。
+  - 容量统一输出标准速率单位 `bps` / `kbps` / `mbps` / `gbps`（`CAPACITY_DECIMALS = 3`，去尾零，可通过 `--decimals <N>` 调整，如 `307kbps`、`2.135mbps`、`12mbps`、`1.2gbps`，零值写 `0`）。
+  - 对称容量（Lumos、LeoCC、Pantheon、OpenNetLab、单文件 `*.trace`）自动输出精简表头 `time,cap`（带延迟时为 `time,cap,delay`）；非对称上下行（Mahimahi `.up`/`.down` 或非对称 OpenNetLab JSON）输出 `time,up_cap,down_cap`。
+  - **仅当存在真实延迟源（`.delay`、`delay_*.txt`、Pantheon 校准 `mm-delay` 或 OpenNetLab `rtt`）时才输出 `delay` 列**；无延迟源的数据集（如 Lumos、cellular-traces-nyc）不构造多余延迟列，直接由评测脚本的 `DEFAULT_ONE_WAY_DELAY_MS` 生效。
 
 ### 2. 校验自定义 CSV 场景
 

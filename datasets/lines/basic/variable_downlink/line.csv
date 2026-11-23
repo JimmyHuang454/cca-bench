@@ -1,5 +1,5 @@
 time,up_cap,down_cap,delay,comment
-0,50m,100m,10,下行在 40～80 秒从 100 Mbps 降至 1 Mbps，观察 ACK 路径容量变化。
-40000,,1m,,
-80000,,100m,,
+0,50mbps,100mbps,10,下行在 40～80 秒从 100 Mbps 降至 1 Mbps，观察 ACK 路径容量变化。
+40000,,1mbps,,
+80000,,100mbps,,
 120000,0,0,,end

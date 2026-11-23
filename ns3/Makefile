@@ -41,7 +41,7 @@ BENCH_BIN     ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp-capacity-trace-optimized
 LTE_BIN       ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp-lte-highspeed-handover-optimized
 WIFI_BIN      ?= $(NS3_ROOT)/build/scratch/ns3-dev-tcp-wifi-bench-optimized
 
-WORKLOAD_MAP  := app=$(WORKLOAD_DIR)/app.wk,websearch=$(WORKLOAD_DIR)/websearch.wk,vl2=$(WORKLOAD_DIR)/vl2.wk,pageload=$(WORKLOAD_DIR)/pageload.wk,http2_mux_rr=$(WORKLOAD_DIR)/http2_mux_rr.wk,http2_mux_srpt=$(WORKLOAD_DIR)/http2_mux_srpt.wk
+WORKLOAD_MAP  := app=$(WORKLOAD_DIR)/app.csv,websearch=$(WORKLOAD_DIR)/websearch.csv,vl2=$(WORKLOAD_DIR)/vl2.csv,pageload=$(WORKLOAD_DIR)/pageload.csv,http2_mux_rr=$(WORKLOAD_DIR)/http2_mux_rr.csv,http2_mux_srpt=$(WORKLOAD_DIR)/http2_mux_srpt.csv
 QUEUES_FLAG   := $(if $(QUEUES),--queues $(QUEUES),)
 RESUME_FLAG   := $(if $(filter 1 true yes,$(RESUME)),--resume,)
 
@@ -50,6 +50,7 @@ LTE_TRACES := traces/mahimahi/Verizon-LTE-driving.down
 LEO_TRACES := traces/leocc/4.8K.zip
 
 .PHONY: help setup-bench test-core sync-bench build-bench workloads convert-mahimahi \
+        trace_to_lines cache_to_workload \
         bench bench-wired bench-wifi bench-synth bench-4g bench-lte bench-5g bench-leo \
         bench-lines-quick bench-lines bench-datasets bench-full bench-basic \
         summary report clean-bench clean-all \
@@ -60,7 +61,9 @@ help:
 	@echo "  make setup-bench       Clone ns-3 + overlay, build all 3 engines (capacity-trace, 4G PHY, Wi-Fi 802.11ax)"
 	@echo "  make test-core         Run C unit tests for kernel/tcp_copa_auto/copa_auto_core.h"
 	@echo "  make build-bench       Sync copa_auto_core.h + ns3-overlay and rebuild all 3 ns-3 binaries"
-	@echo "  make workloads         Ensure datasets/workloads/{app,websearch,vl2,pageload}.wk exist"
+	@echo "  make workloads         Ensure datasets/workloads/*.csv exist"
+	@echo "  make trace_to_lines    Run configured scripts/data/trace_to_lines.py"
+	@echo "  make cache_to_workload Run configured scripts/data/cache_to_workload.py"
 	@echo "  make convert-mahimahi  Convert Mahimahi traces to unified lines JSON (datasets/lines/mahimahi/)"
 	@echo ""
 	@echo "=== 2. Unified Benchmark Suite (results -> results/ns3/<shard>/) ==="
@@ -131,13 +134,8 @@ build-bench: sync-bench
 
 workloads:
 	@mkdir -p "$(WORKLOAD_DIR)"
-	@if [ ! -f "$(WORKLOAD_DIR)/websearch.wk" ] || [ ! -f "$(WORKLOAD_DIR)/vl2.wk" ] || [ ! -f "$(WORKLOAD_DIR)/pageload.wk" ] || [ ! -f "$(WORKLOAD_DIR)/http2_mux_rr.wk" ] || [ ! -f "$(WORKLOAD_DIR)/http2_mux_srpt.wk" ]; then \
+	@if [ ! -f "$(WORKLOAD_DIR)/websearch.csv" ] || [ ! -f "$(WORKLOAD_DIR)/vl2.csv" ] || [ ! -f "$(WORKLOAD_DIR)/pageload.csv" ] || [ ! -f "$(WORKLOAD_DIR)/http2_mux_rr.csv" ] || [ ! -f "$(WORKLOAD_DIR)/http2_mux_srpt.csv" ]; then \
 		python3 "$(SCRIPTS_DIR)/data/gen_workloads.py" --out-dir "$(WORKLOAD_DIR)"; \
-	fi
-	@if [ ! -f "$(WORKLOAD_DIR)/app.wk" ]; then \
-		echo "Downloading Mortise app.wk..."; \
-		curl -fsSL https://raw.githubusercontent.com/BobAnkh/Mortise/main/mortise/workload/app.wk -o "$(WORKLOAD_DIR)/app.wk" \
-			|| echo "Warning: could not download app.wk (offline?); websearch/vl2/pageload are ready."; \
 	fi
 
 convert-mahimahi:
@@ -155,6 +153,9 @@ bench:
 
 trace_to_lines:
 	python3 "$(SCRIPTS_DIR)/../scripts/data/trace_to_lines.py"
+
+cache_to_workload:
+	python3 "$(SCRIPTS_DIR)/data/cache_to_workload.py"
 
 legacy-bench: workloads
 	@if [ ! -x "$(BENCH_BIN)" ]; then $(MAKE) build-bench; fi

@@ -25,11 +25,11 @@ class TraceBenchCapacityMetricsTests(TraceBenchCase):
     """Verify exact piecewise and cross-period truncated LineIntegral capacity calculations."""
 
     def test_01_capacity_integral_piecewise_and_cross_period_truncation(self):
-        up_text = '0,10m\n500,30m\n1000,0\n'
+        up_text = '0,10mbps\n500,30mbps\n1000,0\n'
         up_pts = parse_line_points(up_text, is_capacity=True)
         scene = self.make_lines(
             up=up_text,
-            down='0,100m\n1000,0\n',
+            down='0,100mbps\n1000,0\n',
             up_delay='0,10\n# end_ms=1000\n',
             down_delay='0,10\n# end_ms=1000\n',
         )
@@ -42,7 +42,7 @@ class TraceBenchCapacityMetricsTests(TraceBenchCase):
         self.assertAlmostEqual(fixed['capacity_mbps'], line_integral_mbps(up_pts, 2250.0, 1000), places=5)
 
         # Case B: Workload finishing mid-cycle (around ~1.76s -> 1 full cycle + 500ms@10m + ~260ms@30m)
-        wk = self.make_workload('0 1000\n1750 1000\n', name='mid_cycle.wk')
+        wk = self.make_workload('time,size\n0,1000\n1750,1000\n', name='mid_cycle.csv')
         wk_data = self.run_json(scene, stop_time=5.0, cc='cubic', workload_file=wk, line_period_ms=1000)
         expected_wk_cap = line_integral_mbps(up_pts, wk_data['duration_s'] * 1000.0, 1000)
         self.assertGreater(wk_data['duration_s'], 1.75)
@@ -57,8 +57,8 @@ class TraceBenchPowerAndRttMetricsTests(TraceBenchCase):
         up_delay_text = '0,10\n# end_ms=3000\n'
         down_delay_text = '0,20\n# end_ms=3000\n'
         scene = self.make_lines(
-            up='0,5m\n3000,0\n',
-            down='0,50m\n3000,0\n',
+            up='0,5mbps\n3000,0\n',
+            down='0,50mbps\n3000,0\n',
             up_delay=up_delay_text,
             down_delay=down_delay_text,
         )
@@ -111,8 +111,8 @@ class TraceBenchPowerAndRttMetricsTests(TraceBenchCase):
         up_delay_text = '0,10\n1000,90\n2000,10\n# end_ms=3000\n'
         down_delay_text = '0,10\n# end_ms=3000\n'
         scene = self.make_lines(
-            up='0,20m\n3000,0\n',
-            down='0,50m\n3000,0\n',
+            up='0,20mbps\n3000,0\n',
+            down='0,50mbps\n3000,0\n',
             up_delay=up_delay_text,
             down_delay=down_delay_text,
         )
@@ -142,7 +142,7 @@ class TraceBenchPowerAndRttMetricsTests(TraceBenchCase):
         # Part B: Uncongested 2-MSS probes every 40ms across +80ms/-80ms delay jump & drop:
         # TCP Delayed ACK inflates ACK RTT by +40ms AND transition ACKs lag behind the -80ms drop,
         # yet per-packet receiver queuing delay (t_recv - t_enq) stays strictly near zero!
-        wk = self.make_workload('\n'.join(f'{0 if i == 0 else 40} 2000' for i in range(65)) + '\n')
+        wk = self.make_workload('time,size\n' + '\n'.join(f'{i * 40},2000' for i in range(65)) + '\n')
         probe_js = self.run_json(scene, stop_time=3.0, cc='cubic', workload_file=wk, line_period_ms=3000)
         self.assertLess(probe_js['qdelay_avg_ms'], 1.5)
         self.assertLess(probe_js['qdelay_p95_ms'], 2.0)
@@ -153,13 +153,13 @@ class TraceBenchFctMetricsTests(TraceBenchCase):
 
     def test_04_single_request_fct_slowdown_qoe_and_throughput_exact(self):
         scene = self.make_lines(
-            up='0,10m\n5000,0\n',
-            down='0,100m\n5000,0\n',
+            up='0,10mbps\n5000,0\n',
+            down='0,100mbps\n5000,0\n',
             up_delay='0,15\n# end_ms=5000\n',
             down_delay='0,25\n# end_ms=5000\n',
         )
         size = 200000
-        wk = self.make_workload(f'0 {size}\n', name='single.wk')
+        wk = self.make_workload(f'time,size\n0,{size}\n', name='single.csv')
         js = self.run_json(scene, stop_time=5.0, cc='cubic', workload_file=wk, line_period_ms=5000)
 
         # Single chunk arrives at arrSec[0] = 0.001s and stops simulation immediately on completion
@@ -190,13 +190,13 @@ class TraceBenchFctMetricsTests(TraceBenchCase):
         # open connection and complete in ~6ms (one-way up delay) << 100ms -> clamped to sd = 1.0.
         # With N=21 chunks, ceil(0.95*21)=20 -> 20th sorted sd is 1.0, while geometric mean > 1.0!
         asym = self.make_lines(
-            up='0,100m\n10000,0\n',
-            down='0,100m\n10000,0\n',
+            up='0,100mbps\n10000,0\n',
+            down='0,100mbps\n10000,0\n',
             up_delay='0,5\n# end_ms=10000\n',
             down_delay='0,95\n# end_ms=10000\n',
             name='clamp',
         )
-        wk_clamp = self.make_workload('\n'.join(f'{0 if i == 0 else 200} 1000' for i in range(21)) + '\n')
+        wk_clamp = self.make_workload('time,size\n' + '\n'.join(f'{i * 200},1000' for i in range(21)) + '\n')
         d_clamp = self.run_json(asym, stop_time=10.0, cc='cubic', workload_file=wk_clamp, line_period_ms=10000)
         self.assertEqual(d_clamp['requests'], 21)
         self.assertLess(d_clamp['rct_p50_ms'], 15.0)
@@ -210,15 +210,19 @@ class TraceBenchFctMetricsTests(TraceBenchCase):
         #   N=19 -> ceil(0.95*19) = 19 (rank 19/19 = MAX = outlier > 10x)
         #   N=20 -> ceil(0.95*20) = 19 (rank 19/20 = 2nd largest = Chunk 0 < 2x!)
         scene = self.make_lines(
-            up='0,10m\n10000,0\n',
-            down='0,100m\n10000,0\n',
+            up='0,10mbps\n10000,0\n',
+            down='0,100mbps\n10000,0\n',
             up_delay='0,10\n# end_ms=10000\n',
             down_delay='0,10\n# end_ms=10000\n',
             name='p95_step',
         )
-        base_lines = ['0 400000', '10 1000', '1200 1000']
-        wk19 = self.make_workload('\n'.join(base_lines + ['80 1000'] * 16) + '\n', name='n19.wk')
-        wk20 = self.make_workload('\n'.join(base_lines + ['80 1000'] * 17) + '\n', name='n20.wk')
+        base_lines = ['time,size', '0,400000', '10,1000', '1210,1000']
+        wk19 = self.make_workload(
+            '\n'.join(base_lines + [f'{1210 + 80 * (i + 1)},1000' for i in range(16)]) + '\n', name='n19.csv'
+        )
+        wk20 = self.make_workload(
+            '\n'.join(base_lines + [f'{1210 + 80 * (i + 1)},1000' for i in range(17)]) + '\n', name='n20.csv'
+        )
 
         d19 = self.run_json(scene, stop_time=10.0, cc='cubic', workload_file=wk19, line_period_ms=10000)
         d20 = self.run_json(scene, stop_time=10.0, cc='cubic', workload_file=wk20, line_period_ms=10000)
@@ -239,8 +243,8 @@ class TraceBenchFctMetricsTests(TraceBenchCase):
     def test_06_fct_ideal_ms_uses_periodic_dynamic_delay_at_request_arrival(self):
         # Period = 2000ms: [0, 1000) -> 20ms RTT, [1000, 2000) -> 110ms RTT
         scene = self.make_lines(
-            up='0,50m\n2000,0\n',
-            down='0,50m\n2000,0\n',
+            up='0,50mbps\n2000,0\n',
+            down='0,50mbps\n2000,0\n',
             up_delay='0,10\n1000,100\n# end_ms=2000\n',
             down_delay='0,10\n# end_ms=2000\n',
         )
@@ -248,7 +252,7 @@ class TraceBenchFctMetricsTests(TraceBenchCase):
         # Handshake already completed at t ~= 0.02s during the 20ms phase, so cwnd = IW10 and
         # transferring 100 KB takes multiple 110ms RTTs (> ideal = 110 + 16 = 126ms -> not clamped).
         size = 100000
-        wk = self.make_workload(f'3200 {size}\n', name='wrapped_delay.wk')
+        wk = self.make_workload(f'time,size\n3200,{size}\n', name='wrapped_delay.csv')
         js = self.run_json(scene, stop_time=6.0, cc='cubic', workload_file=wk, line_period_ms=2000)
 
         ref_dynamic = compute_single_request_fct(
@@ -278,13 +282,13 @@ class TraceBenchConsistencyAndParityTests(TraceBenchCase):
 
     def test_07_throughput_drop_rate_and_retrans_ratio_consistency(self):
         scene = self.make_lines(
-            up='0,5m\n6000,0\n',
-            down='0,50m\n6000,0\n',
+            up='0,5mbps\n6000,0\n',
+            down='0,50mbps\n6000,0\n',
             up_delay='0,10\n# end_ms=6000\n',
             down_delay='0,10\n# end_ms=6000\n',
         )
         # Uncongested workload: zero drops and zero retransmissions, exact throughput identity
-        wk_clean = self.make_workload('0 10000\n200 15000\n200 25000\n', name='clean.wk')
+        wk_clean = self.make_workload('time,size\n0,10000\n200,15000\n400,25000\n', name='clean.csv')
         d_clean = self.run_json(
             scene, stop_time=6.0, cc='cubic', queue_bytes=500000, workload_file=wk_clean, line_period_ms=6000
         )
@@ -297,7 +301,7 @@ class TraceBenchConsistencyAndParityTests(TraceBenchCase):
         self.assertEqual(d_clean['retrans_ratio'], 0.0)
 
         # Tight-buffer large workload: genuine drops and retransmissions, still exact throughput identity
-        wk_heavy = self.make_workload('0 600000\n', name='heavy.wk')
+        wk_heavy = self.make_workload('time,size\n0,600000\n', name='heavy.csv')
         d_heavy = self.run_json(
             scene, stop_time=6.0, cc='cubic', queue_bytes=10000, workload_file=wk_heavy, line_period_ms=6000
         )
@@ -388,8 +392,8 @@ class TraceBenchConsistencyAndParityTests(TraceBenchCase):
         up_delay_text = '0,10\n# end_ms=3000\n'
         down_delay_text = '0,10\n# end_ms=3000\n'
         bulk_scene = self.make_lines(
-            up='0,5m\n3000,0\n',
-            down='0,50m\n3000,0\n',
+            up='0,5mbps\n3000,0\n',
+            down='0,50mbps\n3000,0\n',
             up_delay=up_delay_text,
             down_delay=down_delay_text,
             name='bulk_pct',
@@ -428,13 +432,17 @@ class TraceBenchConsistencyAndParityTests(TraceBenchCase):
         # Part B: 20-request workload with 1 huge HoL outlier ->
         #   P50 (rank 10/20) == 1.0, P95 (rank 19/20) < 2.0, P99 (rank 20/20 = max) > 10.0!
         wk_scene = self.make_lines(
-            up='0,10m\n10000,0\n',
-            down='0,100m\n10000,0\n',
+            up='0,10mbps\n10000,0\n',
+            down='0,100mbps\n10000,0\n',
             up_delay='0,10\n# end_ms=10000\n',
             down_delay='0,10\n# end_ms=10000\n',
             name='wk_pct',
         )
-        wk20 = self.make_workload('\n'.join(['0 400000', '10 1000', '1200 1000'] + ['80 1000'] * 17) + '\n', name='wk20.wk')
+        wk20 = self.make_workload(
+            '\n'.join(['time,size', '0,400000', '10,1000', '1210,1000']
+                      + [f'{1210 + 80 * (i + 1)},1000' for i in range(17)]) + '\n',
+            name='wk20.csv',
+        )
         w50 = self.run_json(wk_scene, stop_time=10.0, cc='cubic', workload_file=wk20, line_period_ms=10000, tail_percentile=50.0)
         w95 = self.run_json(wk_scene, stop_time=10.0, cc='cubic', workload_file=wk20, line_period_ms=10000, tail_percentile=95.0)
         w99 = self.run_json(wk_scene, stop_time=10.0, cc='cubic', workload_file=wk20, line_period_ms=10000, tail_percentile=99.0)
@@ -453,7 +461,7 @@ class TraceBenchConsistencyAndParityTests(TraceBenchCase):
             ('bandwidth_drop_severe', 20.0, 120.0),
             ('long_outage', 20.0, 120.0),
         ]
-        pageload_wk = ROOT / 'datasets/workloads/pageload.wk'
+        pageload_wk = ROOT / 'datasets/workloads/pageload.csv'
         for name, expected_base_rtt, dur_s in cases:
             scene_dir = ROOT / 'datasets/lines/basic' / name
             scene = LineScenario(line=scene_dir / 'line.csv')
@@ -485,13 +493,13 @@ class TraceBenchConsistencyAndParityTests(TraceBenchCase):
             self.assertGreaterEqual(wk['fct_slowdown_p95'], wk['fct_slowdown'] - 1e-6, name)
             self.assertLessEqual(wk['rct_p50_ms'], wk['rct_p95_ms'], name)
 
-    def test_10_http2_mux_pure_wk_workloads(self):
-        """Pure .wk HTTP/2 mux workloads (RR & SRPT) share identical bytes and run cleanly."""
+    def test_10_http2_mux_csv_workloads(self):
+        """CSV HTTP/2 mux workloads (RR & SRPT) share identical bytes and run cleanly."""
         sys.path.insert(0, str(ROOT / 'scripts/bench'))
         import lines_common
 
-        rr_wk = ROOT / 'datasets/workloads/http2_mux_rr.wk'
-        srpt_wk = ROOT / 'datasets/workloads/http2_mux_srpt.wk'
+        rr_wk = ROOT / 'datasets/workloads/http2_mux_rr.csv'
+        srpt_wk = ROOT / 'datasets/workloads/http2_mux_srpt.csv'
         rr_count, rr_span = lines_common.workload(rr_wk)
         srpt_count, srpt_span = lines_common.workload(srpt_wk)
         self.assertEqual(rr_count, srpt_count)

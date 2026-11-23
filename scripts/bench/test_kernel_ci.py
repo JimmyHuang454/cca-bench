@@ -181,9 +181,9 @@ class KernelCiTests(unittest.TestCase):
             root = Path(tmp)
             scene = root / 'scene'
             scene.mkdir()
-            (scene / 'line.csv').write_text('time,cap,delay\n0,12m,10\n2s,0,\n', encoding='utf-8')
-            wk_file = root / 'tiny.wk'
-            wk_file.write_text('0,15000\n10,15000\n', encoding='utf-8')
+            (scene / 'line.csv').write_text('time,cap,delay\n0,12mbps,10\n2s,0,\n', encoding='utf-8')
+            wk_file = root / 'tiny.csv'
+            wk_file.write_text('time,size\n0,15000\n10,15000\n', encoding='utf-8')
 
             conv = lines_to_mahimahi.convert_scenario(lines_common.discover(scene)[0], root / 'conv')
             out_dir = root / 'shard1'
@@ -291,9 +291,9 @@ class KernelCiTests(unittest.TestCase):
             root = Path(tmp)
             scene = root / 'scene'
             scene.mkdir()
-            (scene / 'line.csv').write_text('time,cap,delay\n0,12m,10\n2s,0,\n', encoding='utf-8')
-            wk_file = root / 'tiny.wk'
-            wk_file.write_text('0,15000\n10,15000\n', encoding='utf-8')
+            (scene / 'line.csv').write_text('time,cap,delay\n0,12mbps,10\n2s,0,\n', encoding='utf-8')
+            wk_file = root / 'tiny.csv'
+            wk_file.write_text('time,size\n0,15000\n10,15000\n', encoding='utf-8')
 
             _, plan_meta_99 = run_kernel_lines.build_lines_plan(
                 dataset='basic',

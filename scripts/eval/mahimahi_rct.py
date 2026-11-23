@@ -79,7 +79,7 @@ def load_timings(plan: list[Timing], run: Path, stem: str, stack: str) -> tuple[
                 observed.append(req)
                 continue
             if int(row["size"]) != req.size:
-                raise ValueError(f"{path}: request {req.id} differs from app.wk")
+                raise ValueError(f"{path}: request {req.id} differs from workload CSV")
             observed.append(replace(
                 req, status="completed",
                 started_us=(int(row["client_send"]) - origin_ns) // 1000,
@@ -94,7 +94,7 @@ def load_timings(plan: list[Timing], run: Path, stem: str, stack: str) -> tuple[
     for req in plan:
         row = rows[req.id]
         if int(row["size"]) != req.size or int(row["scheduled_us"]) != req.scheduled_us:
-            raise ValueError(f"{path}: request {req.id} differs from app.wk")
+            raise ValueError(f"{path}: request {req.id} differs from workload CSV")
         observed.append(replace(
             req, status=row["status"], started_us=timestamp(row, "started_us"),
             first_byte_us=timestamp(row, "first_byte_us"), completed_us=timestamp(row, "completed_us"),
@@ -143,10 +143,10 @@ def summarize(records: list[Timing], cutoff_us: int, source: str) -> dict:
 
 
 def resolve_schedule_path(folder: Path, workload: str) -> Path:
-    candidate = folder / f"{workload}.wk"
+    candidate = folder / f"{workload}.csv"
     if candidate.exists():
         return candidate
-    return folder / "app.wk"
+    return folder / "app.csv"
 
 
 def median_or_none(vals: list[float | None]) -> float | None:

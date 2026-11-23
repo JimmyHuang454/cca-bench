@@ -18,12 +18,12 @@ class TraceBenchWorkloadTests(TraceBenchCase):
 
     def test_01_workload_interarrival_timing_and_early_stop(self):
         scene = self.make_lines(
-            up='0,50m\n10000,0\n',
-            down='0,50m\n10000,0\n',
+            up='0,50mbps\n10000,0\n',
+            down='0,50mbps\n10000,0\n',
             up_delay='0,10\n# end_ms=10000\n',
             down_delay='0,10\n# end_ms=10000\n',
         )
-        wk = self.make_workload('0 1000\n500 1000\n500 1000\n', name='three.wk')
+        wk = self.make_workload('time,size\n0,1000\n500,1000\n1000,1000\n', name='three.csv')
         data = self.run_json(scene, stop_time=10.0, cc='cubic', workload_file=wk, line_period_ms=10000)
         self.assertEqual(data['requests'], 3)
         self.assertEqual(data['requests_expected'], 3)
@@ -33,14 +33,14 @@ class TraceBenchWorkloadTests(TraceBenchCase):
 
     def test_02_chunk_transfer_duration_respects_serialization_bounds(self):
         scene = self.make_lines(
-            up='0,10m\n5000,0\n',
-            down='0,100m\n5000,0\n',
+            up='0,10mbps\n5000,0\n',
+            down='0,100mbps\n5000,0\n',
             up_delay='0,10\n# end_ms=5000\n',
             down_delay='0,10\n# end_ms=5000\n',
         )
-        wk_small = self.make_workload('0 1000\n', name='small.wk')
+        wk_small = self.make_workload('time,size\n0,1000\n', name='small.csv')
         # 250 KB at 10 Mbps -> 200 ms pure serialization + handshake/slow-start
-        wk_large = self.make_workload('0 250000\n', name='large.wk')
+        wk_large = self.make_workload('time,size\n0,250000\n', name='large.csv')
         d_small = self.run_json(scene, stop_time=5.0, cc='cubic', workload_file=wk_small, line_period_ms=5000)
         d_large = self.run_json(scene, stop_time=5.0, cc='cubic', workload_file=wk_large, line_period_ms=5000)
 
@@ -51,13 +51,13 @@ class TraceBenchWorkloadTests(TraceBenchCase):
 
     def test_03_head_of_line_blocking_on_single_tcp_connection(self):
         scene = self.make_lines(
-            up='0,10m\n5000,0\n',
-            down='0,100m\n5000,0\n',
+            up='0,10mbps\n5000,0\n',
+            down='0,100mbps\n5000,0\n',
             up_delay='0,10\n# end_ms=5000\n',
             down_delay='0,10\n# end_ms=5000\n',
         )
-        wk_hol = self.make_workload('0 500000\n10 1000\n', name='hol.wk')
-        wk_sep = self.make_workload('0 500000\n1200 1000\n', name='sep.wk')
+        wk_hol = self.make_workload('time,size\n0,500000\n10,1000\n', name='hol.csv')
+        wk_sep = self.make_workload('time,size\n0,500000\n1200,1000\n', name='sep.csv')
 
         d_hol = self.run_json(scene, stop_time=5.0, cc='cubic', workload_file=wk_hol, line_period_ms=5000)
         d_sep = self.run_json(scene, stop_time=5.0, cc='cubic', workload_file=wk_sep, line_period_ms=5000)
@@ -71,13 +71,13 @@ class TraceBenchWorkloadTests(TraceBenchCase):
     def test_04_workload_periodic_looping_of_both_delay_and_capacity(self):
         # Part A: Delay looping (period=1000ms: [0,500)->20ms RTT, [500,1000)->70ms RTT)
         d_scene = self.make_lines(
-            up='0,50m\n1000,0\n',
-            down='0,50m\n1000,0\n',
+            up='0,50mbps\n1000,0\n',
+            down='0,50mbps\n1000,0\n',
             up_delay='0,10\n500,60\n# end_ms=1000\n',
             down_delay='0,10\n# end_ms=1000\n',
             name='delay_loop',
         )
-        wk = self.make_workload('\n'.join(f'{0 if i == 0 else 40} 6000' for i in range(70)) + '\n')
+        wk = self.make_workload('time,size\n' + '\n'.join(f'{i * 40},6000' for i in range(70)) + '\n')
         full = self.run_full(
             d_scene, stop_time=3.0, cc='cubic',
             workload_file=wk, line_period_ms=1000, rtt_sample_log=True, name='delay_loop_run',
@@ -89,10 +89,10 @@ class TraceBenchWorkloadTests(TraceBenchCase):
             self.assertAlmostEqual(statistics.median(low), 22.0, delta=3.0, msg=f'cycle {cycle} low RTT')
             self.assertAlmostEqual(statistics.median(high), 72.0, delta=4.0, msg=f'cycle {cycle} high RTT')
 
-        # Part B: Capacity looping (period=1000ms: [0,500)->0m outage, [500,1000)->20m)
+        # Part B: Capacity looping (period=1000ms: [0,500)->0 outage, [500,1000)->20mbps)
         c_scene = self.make_lines(
-            up='0,0\n500,20m\n1000,0\n',
-            down='0,20m\n1000,0\n',
+            up='0,0\n500,20mbps\n1000,0\n',
+            down='0,20mbps\n1000,0\n',
             up_delay='0,10\n# end_ms=1000\n',
             down_delay='0,10\n# end_ms=1000\n',
             name='cap_loop',
@@ -107,67 +107,106 @@ class TraceBenchWorkloadTests(TraceBenchCase):
             self.assertTrue(all(c == 0.0 for c in off_bins), f'cycle {cycle} expected 0 cap')
             self.assertAlmostEqual(statistics.mean(on_bins), 20.0, delta=1.0)
 
-    def test_05_csv_format_units_and_mortise_conversion(self):
+    def test_05_csv_format_units_column_order_comments_and_mortise_export(self):
         csv_text = (
-            '# absolute non-decreasing ms with byte/kb/mb units\n'
-            '0,2048\n'
-            '20,1.5kb\n'
-            '20,16KB\n'
-            '500,512b\n'
-            '1000,0.25mb\n'
-            '1500,0.5M\n'
+            '\ufefftime,size,comment\n'
+            '0,2048,"initial, ""boot"" chunk"\n'
+            '20ms,1.5kb,small metadata\n'
+            '20000us,16KB,same-ms burst\n'
+            '0.5s,512b,\n'
+            '1s,0.25mb,quarter MiB\n'
+            '1500ms,0.5M,half MiB\n'
         )
-        csv_wk = self.make_workload(csv_text, name='csv_units.wk')
-        parsed = lines_common.parse_workload(csv_wk)
-        self.assertEqual(parsed, [
+        reordered_text = (
+            'COMMENT,SIZE,TIME\n'
+            '"initial, ""boot"" chunk",2048,0ms\n'
+            'small metadata,1.5k,20\n'
+            'same-ms burst,16kb,20\n'
+            ',512b,500ms\n'
+            'quarter MiB,256kb,1000\n'
+            'half MiB,0.5mb,1.5s\n'
+        )
+        expected = [
             (0.0, 2048),
             (20.0, 1536),
             (20.0, 16384),
             (500.0, 512),
             (1000.0, 262144),
             (1500.0, 524288),
-        ])
+        ]
+        csv_wk = self.make_workload(csv_text, name='csv_units.csv')
+        reordered_wk = self.make_workload(reordered_text, name='reordered.csv')
+        self.assertEqual(lines_common.parse_workload(csv_wk), expected)
+        self.assertEqual(lines_common.parse_workload(reordered_wk), expected)
         self.assertEqual(lines_common.workload(csv_wk), (6, 1.5))
 
+        # Round-trip write_workload_csv
+        rt_wk = csv_wk.parent / 'roundtrip.csv'
+        lines_common.write_workload_csv(rt_wk, expected)
+        self.assertEqual(lines_common.parse_workload(rt_wk), expected)
+
+        # Temporary Mortise export for upstream Rust client produces gap_ms<TAB>size_bytes
+        # and is rejected by parse_workload (legacy .wk format removed).
         mortise_wk = csv_wk.parent / 'converted.mortise.wk'
         lines_common.write_mortise_workload(csv_wk, mortise_wk)
-        self.assertEqual(lines_common.parse_workload(mortise_wk), parsed)
-
-        for bad in (
-            '100,1kb\n50,1kb\n',       # timestamp goes backwards
-            '0,1kb\n100 1024\n',       # mixed CSV and legacy
-            '0,0kb\n',                 # zero size
-            '0,-10\n',                 # negative size
-            '0,100mb\n',               # exceeds 100,000,000 bytes
-            '0,10 kb\n',               # space before unit
-            '0,1.5\n',                 # unsuffixed float
-        ):
-            bad_wk = self.make_workload(bad, name='bad.wk')
-            with self.assertRaises(ValueError, msg=f'expected ValueError for {bad!r}'):
-                lines_common.parse_workload(bad_wk)
+        self.assertEqual(
+            mortise_wk.read_text(encoding='utf-8').splitlines(),
+            ['0\t2048', '20\t1536', '0\t16384', '480\t512', '500\t262144', '500\t524288'],
+        )
+        with self.assertRaises(ValueError):
+            lines_common.parse_workload(mortise_wk)
 
         scene = self.make_lines(
-            up='0,50m\n5000,0\n',
-            down='0,50m\n5000,0\n',
+            up='0,50mbps\n5000,0\n',
+            down='0,50mbps\n5000,0\n',
             up_delay='0,10\n# end_ms=5000\n',
             down_delay='0,10\n# end_ms=5000\n',
-            name='csv_vs_legacy',
+            name='csv_order_parity',
         )
         d_csv = self.run_json(scene, stop_time=5.0, cc='cubic', workload_file=csv_wk, line_period_ms=5000)
-        d_leg = self.run_json(scene, stop_time=5.0, cc='cubic', workload_file=mortise_wk, line_period_ms=5000)
+        d_reord = self.run_json(scene, stop_time=5.0, cc='cubic', workload_file=reordered_wk, line_period_ms=5000)
         self.assertEqual(d_csv['requests'], 6)
         self.assertEqual(d_csv['requests_expected'], 6)
         for key in ('requests', 'duration_s', 'rct_mean_ms', 'rct_p95_ms', 'fct_slowdown', 'fct_slowdown_p95'):
-            self.assertAlmostEqual(d_csv[key], d_leg[key], places=6, msg=f'mismatch in {key}')
+            self.assertAlmostEqual(d_csv[key], d_reord[key], places=6, msg=f'mismatch in {key}')
 
-        # Verify ns-3 binary also rejects out-of-order CSV workload
-        bad_order = self.make_workload('100,1kb\n50,1kb\n', name='bad_order.wk')
-        proc = subprocess.run([
-            str(BINARY), '--profile=lines',
-            f'--lineFile={scene.line}',
-            f'--workloadFile={bad_order}', '--stopTime=2', '--ccs=cubic', '--evalJson=1',
-        ], text=True, capture_output=True)
-        self.assertNotEqual(proc.returncode, 0)
+    def test_06_csv_workload_validation_rejects_legacy_and_malformed_in_python_and_ns3(self):
+        scene = self.make_lines(
+            up='0,50mbps\n2000,0\n',
+            down='0,50mbps\n2000,0\n',
+            up_delay='0,10\n# end_ms=2000\n',
+            down_delay='0,10\n# end_ms=2000\n',
+            name='bad_workloads',
+        )
+        bad_cases = {
+            'legacy_ws': '0 1000\n500 1000\n',
+            'headerless_csv': '0,1000\n500,1000\n',
+            'missing_size': 'time,comment\n0,note\n',
+            'missing_time': 'size,comment\n1000,note\n',
+            'unknown_col': 'time,size,extra\n0,1000,1\n',
+            'duplicate_col': 'time,size,time\n0,1000,0\n',
+            'backwards_time': 'time,size\n100,1kb\n50,1kb\n',
+            'negative_time': 'time,size\n-1,1kb\n',
+            'zero_size': 'time,size\n0,0kb\n',
+            'negative_size': 'time,size\n0,-10\n',
+            'oversize': 'time,size\n0,100mb\n',
+            'space_before_size_unit': 'time,size\n0,10 kb\n',
+            'space_before_time_unit': 'time,size\n10 ms,1kb\n',
+            'unsuffixed_float_size': 'time,size\n0,1.5\n',
+            'header_only': 'time,size\n',
+            'unclosed_quote': 'time,size,comment\n0,1kb,"unclosed\n',
+            'col_count_mismatch': 'time,size\n0,1kb,extra\n',
+        }
+        for label, bad in bad_cases.items():
+            bad_wk = self.make_workload(bad, name=f'{label}.csv')
+            with self.assertRaises(ValueError, msg=f'Python should reject {label}: {bad!r}'):
+                lines_common.parse_workload(bad_wk)
+            proc = subprocess.run([
+                str(BINARY), '--profile=lines',
+                f'--lineFile={scene.line}',
+                f'--workloadFile={bad_wk}', '--stopTime=2', '--ccs=cubic', '--evalJson=1',
+            ], text=True, capture_output=True)
+            self.assertNotEqual(proc.returncode, 0, f'ns-3 should reject {label}: {bad!r}')
 
 
 if __name__ == '__main__':

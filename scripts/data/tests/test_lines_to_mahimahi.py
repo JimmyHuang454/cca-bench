@@ -25,7 +25,7 @@ class LinesToMahimahiTests(unittest.TestCase):
             # lines down_cap/down_delay = TCP ACK (100 Mbps, 80 ms delay)
             (scene_dir / 'line.csv').write_text(
                 'time,up_cap,down_cap,up_delay,down_delay,comment\n'
-                '0,50m,100m,5ms,80ms,asymmetric link\n'
+                '0,50mbps,100mbps,5ms,80ms,asymmetric link\n'
                 '1s,0,0,,,end\n',
                 encoding='utf-8',
             )
@@ -54,12 +54,12 @@ class LinesToMahimahiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             scene_csv = root / 'dyn.csv'
-            # 0..100ms: 2 pkts/ms (=200 pkts); 100..200ms: outage (0 pkts); 200..300ms: 12m (=1 pkt/ms = 100 pkts)
+            # 0..100ms: 24mbps (=200 pkts); 100..200ms: outage (0 pkts); 200..300ms: 12mbps (=100 pkts)
             scene_csv.write_text(
                 'time,up_cap,down_cap,delay,up_delay\n'
-                '0,2,1,10,10\n'
+                '0,24mbps,12mbps,10,10\n'
                 '100,0,,,50\n'
-                '200,12m,,,10\n'
+                '200,12mbps,,,10\n'
                 '300,0,0,,\n',
                 encoding='utf-8',
             )
@@ -85,7 +85,7 @@ class LinesToMahimahiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             scene_csv = root / 'zero.csv'
-            scene_csv.write_text('time,up_cap,down_cap\n0,0,1\n500,0,0\n', encoding='utf-8')
+            scene_csv.write_text('time,up_cap,down_cap\n0,0,12mbps\n500,0,0\n', encoding='utf-8')
 
             scenario = lines_common.discover(scene_csv)[0]
             conv = lines_to_mahimahi.convert_scenario(scenario, root / 'out', default_one_way_delay_ms=10.0)
@@ -102,7 +102,7 @@ class LinesToMahimahiTests(unittest.TestCase):
             scene_csv = root / 'trunc.csv'
             scene_csv.write_text(
                 'time,cap,delay,up_delay\n'
-                '0,24m,10,\n'
+                '0,24mbps,10,\n'
                 '1s,,,50\n'
                 '2s,0,,\n',
                 encoding='utf-8',

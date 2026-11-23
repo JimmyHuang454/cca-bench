@@ -735,7 +735,7 @@ main(int argc, char* argv[])
     cmd.AddValue("clockGranularityMs", "TCP ClockGranularity in ms (default 1.0)", clockGranularityMs);
     cmd.AddValue("copaClockUs", "Copa timestamp/RTT quantization in us (1=us, 1000=1ms slow clock)", copaClockUs);
     cmd.AddValue("jitterUs", "Override Copa-Auto jitter_us (-1=auto, >=0=manual)", jitterUs);
-    cmd.AddValue("workloadFile", "Optional Mortise <gap_ms> <size_bytes> .wk workload", workloadFile);
+    cmd.AddValue("workloadFile", "Optional CSV workload file (time,size[,comment])", workloadFile);
     cmd.AddValue("evalJson", "Print single-line JSON compatible with eval_report.py", evalJson);
     cmd.AddValue("capacityMbps", "Reference UDP capacity probe Mbps (for utilization)", capacityMbps);
     cmd.AddValue("baseRttMs", "Reference unloaded base RTT ms (0=auto from min ACK RTT)", baseRttMs);

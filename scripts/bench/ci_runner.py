@@ -51,10 +51,10 @@ EXTRA_CONGESTION_VARIANTS: list[tuple[str, str]] = [
 ]
 
 WORKLOAD_MAP_ARG = (
-    "app=/tmp/workloads/app.wk,"
-    "websearch=/tmp/workloads/websearch.wk,"
-    "vl2=/tmp/workloads/vl2.wk,"
-    "pageload=/tmp/workloads/pageload.wk"
+    "app=/tmp/workloads/app.csv,"
+    "websearch=/tmp/workloads/websearch.csv,"
+    "vl2=/tmp/workloads/vl2.csv,"
+    "pageload=/tmp/workloads/pageload.csv"
 )
 
 
@@ -269,19 +269,36 @@ def cmd_patch_mortise(args: argparse.Namespace) -> int:
 
 def prepare_workloads(workloads_dir: pathlib.Path, bulk_lines: int, mortise_app_wk: pathlib.Path | None = None) -> None:
     workloads_dir.mkdir(parents=True, exist_ok=True)
-    app_dst = workloads_dir / "app.wk"
-    if mortise_app_wk and mortise_app_wk.is_file():
-        shutil.copyfile(mortise_app_wk, app_dst)
+    app_dst = workloads_dir / "app.csv"
+    repo_app_csv = REPO_ROOT / "datasets" / "workloads" / "app.csv"
+    if repo_app_csv.is_file():
+        shutil.copyfile(repo_app_csv, app_dst)
     elif not app_dst.exists():
-        url = "https://raw.githubusercontent.com/BobAnkh/Mortise/main/mortise/workload/app.wk"
-        for attempt in range(3):
-            try:
-                urllib.request.urlretrieve(url, app_dst)
-                break
-            except Exception:
-                if attempt == 2:
-                    raise
-                time.sleep(2)
+        raw_text: str | None = None
+        if mortise_app_wk and mortise_app_wk.is_file():
+            raw_text = mortise_app_wk.read_text(encoding="utf-8")
+        else:
+            url = "https://raw.githubusercontent.com/BobAnkh/Mortise/main/mortise/workload/app.wk"
+            for attempt in range(3):
+                try:
+                    with urllib.request.urlopen(url) as resp:
+                        raw_text = resp.read().decode("utf-8")
+                    break
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    time.sleep(2)
+        if str(SCRIPTS_DIR) not in sys.path:
+            sys.path.insert(0, str(SCRIPTS_DIR))
+        from lines_common import write_workload_csv
+        rows: list[tuple[float, int]] = []
+        t_ms = 0.0
+        for line in (raw_text or "").splitlines():
+            parts = line.strip().split()
+            if len(parts) == 2:
+                t_ms += float(parts[0])
+                rows.append((t_ms, int(parts[1])))
+        write_workload_csv(app_dst, rows)
     subprocess.run(
         [sys.executable, str(DATA_SCRIPTS_DIR / "gen_workloads.py"), "--out-dir", str(workloads_dir)],
         check=True,
@@ -475,7 +492,7 @@ def cmd_run_kernel(args: argparse.Namespace) -> int:
             "--parallel", str(parallel),
             "--bin", str(mortise_root / "target" / "release" / "client"),
             "--trace-dir", "/tmp/traces",
-            "--app-workload", "/tmp/workloads/app.wk",
+            "--app-workload", "/tmp/workloads/app.csv",
             "--app-workloads", WORKLOAD_MAP_ARG,
             "--bulk-workload", "/tmp/workloads/bulk.wk",
             "--out-dir", str(out_dir),

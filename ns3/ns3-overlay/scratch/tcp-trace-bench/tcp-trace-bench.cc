@@ -483,7 +483,7 @@ main(int argc, char* argv[])
                  copaClockUs);
     cmd.AddValue("jitterUs", "Override Copa-Auto jitter_us (-1=auto, >=0=manual)", jitterUs);
     cmd.AddValue("debugMs", "Emit Copa-Auto internal telemetry every N ms (0=off)", debugMs);
-    cmd.AddValue("workloadFile", "Optional Mortise <gap_ms> <size_bytes> .wk workload", workloadFile);
+    cmd.AddValue("workloadFile", "Optional CSV workload file (time,size[,comment])", workloadFile);
     cmd.AddValue("baseRttMs", "Optional override total base RTT in ms (0=use bottleneckDelay/accessDelay)", baseRttMs);
     cmd.AddValue("tailPercentile", "Configurable tail percentile in (0, 100] for qdelay/norm_power/RCT/FCT slowdown", tailPercentile);
     cmd.AddValue("evalJson", "Print single-line JSON compatible with mahimahi_eval.py", evalJson);

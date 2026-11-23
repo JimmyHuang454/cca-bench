@@ -621,7 +621,7 @@ def main() -> None:
 
     lines.extend([
         "",
-        "## 2. File Download Workload (`app.wk`: FCT Slowdown & Mortise QoE)",
+        "## 2. File Download Workload (`app.csv`: FCT Slowdown & Mortise QoE)",
         "",
         "| Trace Group | Queue | Stack | CC | N | Thr (Mbps) | QDelay Avg (ms) | Drop | Mean RCT (ms) | P95 RCT (ms) | FCT Slowdown | Mortise QoE |",
         "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",

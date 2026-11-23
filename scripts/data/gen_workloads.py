@@ -117,7 +117,7 @@ def _http2_mux_pages() -> list[tuple[int, int, list[int]]]:
 
 
 def _interleave_http2_frames(sched: str, frame_bytes: int = 16384) -> list[tuple[int, int]]:
-    """Pre-interleave multi-stream HTTP/2 page objects into <= 16 KB DATA frames (pure .wk)."""
+    """Pre-interleave multi-stream HTTP/2 page objects into <= 16 KB DATA frames (CSV workload)."""
     out: list[tuple[int, int]] = []
     for think_ms, html_bytes, burst_streams in _http2_mux_pages():
         # Wave 1: HTML document split into HTTP/2 DATA frames
@@ -182,7 +182,7 @@ def format_size(size_bytes: int) -> str:
 def write_workload(path: Path, items: list[tuple[int, int]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     t_ms = 0
-    lines: list[str] = []
+    lines = ["time,size"]
     for gap_ms, size in items:
         t_ms += gap_ms
         lines.append(f"{t_ms},{format_size(size)}")
@@ -203,7 +203,7 @@ def main() -> None:
         if name not in GENERATORS:
             raise SystemExit(f"Unknown workload {name!r}; expected one of {sorted(GENERATORS)}")
         items = GENERATORS[name]()
-        dst = args.out_dir / f"{name}.wk"
+        dst = args.out_dir / f"{name}.csv"
         write_workload(dst, items)
         span_s = sum(g for g, _ in items) / 1000.0
         total_mb = sum(s for _, s in items) / 1e6

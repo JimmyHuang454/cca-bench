@@ -80,6 +80,8 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -843,10 +845,69 @@ LoadWorkloadFile(const std::string& path,
                  double startOffsetS)
 {
     std::ifstream f(path);
-    if (!f)
-    {
-        return false;
-    }
+    if (!f) return false;
+    auto parseCsvRow = [](const std::string& rawLine, std::vector<std::string>& fields) -> bool {
+        fields.clear();
+        std::string line = rawLine;
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        size_t i = 0;
+        const size_t n = line.size();
+        while (true)
+        {
+            std::string field;
+            if (i < n && line[i] == '"')
+            {
+                ++i;
+                bool closed = false;
+                while (i < n)
+                {
+                    if (line[i] == '"')
+                    {
+                        if (i + 1 < n && line[i + 1] == '"') { field.push_back('"'); i += 2; }
+                        else { ++i; closed = true; break; }
+                    }
+                    else field.push_back(line[i++]);
+                }
+                if (!closed) return false;
+                while (i < n && (line[i] == ' ' || line[i] == '\t')) ++i;
+                if (i < n && line[i] != ',') return false;
+            }
+            else
+            {
+                while (i < n && line[i] != ',')
+                {
+                    if (line[i] == '"') return false;
+                    field.push_back(line[i++]);
+                }
+            }
+            fields.push_back(std::move(field));
+            if (i == n) break;
+            ++i;
+        }
+        return true;
+    };
+    auto parseTimeMs = [](const std::string& raw, double& outMs) -> bool {
+        const auto first = raw.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) return false;
+        const auto last = raw.find_last_not_of(" \t\r\n");
+        const std::string s = raw.substr(first, last - first + 1);
+        std::string lower = s;
+        std::transform(lower.begin(), lower.end(), lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        std::string numStr = s;
+        double mult = 1.0;
+        if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "ms") == 0) { numStr = s.substr(0, s.size() - 2); mult = 1.0; }
+        else if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "us") == 0) { numStr = s.substr(0, s.size() - 2); mult = 1e-3; }
+        else if (lower.size() > 1 && lower.back() == 's') { numStr = s.substr(0, s.size() - 1); mult = 1000.0; }
+        if (numStr.empty() || std::isspace(static_cast<unsigned char>(numStr.back()))) return false;
+        std::istringstream iss(numStr);
+        double val = 0.0;
+        if (!(iss >> val) || !iss.eof() || !std::isfinite(val) || val < 0.0) return false;
+        const double ms = val * mult;
+        if (!std::isfinite(ms)) return false;
+        outMs = ms;
+        return true;
+    };
     auto parseSize = [](const std::string& raw, uint64_t& outBytes) -> bool {
         const auto first = raw.find_first_not_of(" \t\r\n");
         if (first == std::string::npos) return false;
@@ -858,36 +919,11 @@ LoadWorkloadFile(const std::string& path,
         std::string numStr = s;
         double mult = 1.0;
         bool hasUnit = false;
-        if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "mb") == 0)
-        {
-            numStr = s.substr(0, s.size() - 2);
-            mult = 1024.0 * 1024.0;
-            hasUnit = true;
-        }
-        else if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "kb") == 0)
-        {
-            numStr = s.substr(0, s.size() - 2);
-            mult = 1024.0;
-            hasUnit = true;
-        }
-        else if (lower.size() > 1 && lower.back() == 'm')
-        {
-            numStr = s.substr(0, s.size() - 1);
-            mult = 1024.0 * 1024.0;
-            hasUnit = true;
-        }
-        else if (lower.size() > 1 && lower.back() == 'k')
-        {
-            numStr = s.substr(0, s.size() - 1);
-            mult = 1024.0;
-            hasUnit = true;
-        }
-        else if (lower.size() > 1 && lower.back() == 'b')
-        {
-            numStr = s.substr(0, s.size() - 1);
-            mult = 1.0;
-            hasUnit = true;
-        }
+        if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "mb") == 0) { numStr = s.substr(0, s.size() - 2); mult = 1024.0 * 1024.0; hasUnit = true; }
+        else if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "kb") == 0) { numStr = s.substr(0, s.size() - 2); mult = 1024.0; hasUnit = true; }
+        else if (lower.size() > 1 && lower.back() == 'm') { numStr = s.substr(0, s.size() - 1); mult = 1024.0 * 1024.0; hasUnit = true; }
+        else if (lower.size() > 1 && lower.back() == 'k') { numStr = s.substr(0, s.size() - 1); mult = 1024.0; hasUnit = true; }
+        else if (lower.size() > 1 && lower.back() == 'b') { numStr = s.substr(0, s.size() - 1); mult = 1.0; hasUnit = true; }
         if (numStr.empty() || std::isspace(static_cast<unsigned char>(numStr.back()))) return false;
         if (!hasUnit)
         {
@@ -906,62 +942,60 @@ LoadWorkloadFile(const std::string& path,
         outBytes = static_cast<uint64_t>(scaled);
         return true;
     };
-    double tSec = startOffsetS;
-    double prevAbsMs = -1.0;
-    int mode = 0;
-    std::string line;
-    while (std::getline(f, line))
+    static const std::set<std::string> kAllowed = {"time", "size", "comment"};
+    std::map<std::string, size_t> cols;
+    size_t ncols = 0, tIdx = 0, sIdx = 0;
+    double prevMs = -1.0;
+    std::string raw;
+    std::vector<std::string> fields;
+    unsigned lineNo = 0;
+    while (std::getline(f, raw))
     {
-        const auto first = line.find_first_not_of(" \t\r\n");
-        if (first == std::string::npos || line[first] == '#')
+        ++lineNo;
+        if (lineNo == 1 && raw.size() >= 3 &&
+            static_cast<unsigned char>(raw[0]) == 0xEF &&
+            static_cast<unsigned char>(raw[1]) == 0xBB &&
+            static_cast<unsigned char>(raw[2]) == 0xBF)
         {
+            raw.erase(0, 3);
+        }
+        const auto first = raw.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos || raw[first] == '#') continue;
+        if (!parseCsvRow(raw, fields)) return false;
+        if (cols.empty())
+        {
+            ncols = fields.size();
+            for (size_t i = 0; i < ncols; ++i)
+            {
+                const auto f0 = fields[i].find_first_not_of(" \t\r\n");
+                if (f0 == std::string::npos) return false;
+                const auto f1 = fields[i].find_last_not_of(" \t\r\n");
+                std::string name = fields[i].substr(f0, f1 - f0 + 1);
+                std::transform(name.begin(), name.end(), name.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (!kAllowed.count(name) || cols.count(name)) return false;
+                cols[name] = i;
+            }
+            if (!cols.count("time") || !cols.count("size")) return false;
+            tIdx = cols["time"];
+            sIdx = cols["size"];
             continue;
         }
-        const auto last = line.find_last_not_of(" \t\r\n");
-        const std::string trimmed = line.substr(first, last - first + 1);
-        const auto commaPos = trimmed.find(',');
-        const int lineMode = (commaPos != std::string::npos) ? 1 : 2;
-        if (mode == 0) mode = lineMode;
-        else if (mode != lineMode) return false;
-        if (mode == 1)
+        if (fields.size() > ncols) return false;
+        if (fields.size() < ncols) fields.resize(ncols);
+        double absMs = 0.0;
+        uint64_t sz = 0;
+        if (!parseTimeMs(fields[tIdx], absMs) ||
+            (prevMs >= 0.0 && absMs < prevMs) ||
+            !parseSize(fields[sIdx], sz) || sz == 0)
         {
-            if (trimmed.find(',', commaPos + 1) != std::string::npos) return false;
-            const std::string tRaw = trimmed.substr(0, commaPos);
-            const auto tFirst = tRaw.find_first_not_of(" \t\r\n");
-            if (tFirst == std::string::npos) return false;
-            const auto tLast = tRaw.find_last_not_of(" \t\r\n");
-            std::istringstream ts(tRaw.substr(tFirst, tLast - tFirst + 1));
-            double absMs = 0.0;
-            uint64_t sz = 0;
-            ts >> absMs;
-            if (ts.fail() || !ts.eof() || !std::isfinite(absMs) || absMs < 0.0 ||
-                (prevAbsMs >= 0.0 && absMs < prevAbsMs) ||
-                !parseSize(trimmed.substr(commaPos + 1), sz) || sz == 0)
-            {
-                return false;
-            }
-            prevAbsMs = absMs;
-            arrSec.push_back(startOffsetS + absMs / 1000.0);
-            sizes.push_back(static_cast<uint32_t>(std::min<uint64_t>(sz, 100000000ULL)));
+            return false;
         }
-        else
-        {
-            std::istringstream iss(trimmed);
-            double gapMs = 0.0;
-            std::string szStr;
-            std::string extra;
-            uint64_t sz = 0;
-            if (!(iss >> gapMs >> szStr) || (iss >> extra) ||
-                !std::isfinite(gapMs) || gapMs < 0.0 || !parseSize(szStr, sz) || sz == 0)
-            {
-                continue;
-            }
-            tSec += gapMs / 1000.0;
-            arrSec.push_back(tSec);
-            sizes.push_back(static_cast<uint32_t>(std::min<uint64_t>(sz, 100000000ULL)));
-        }
+        prevMs = absMs;
+        arrSec.push_back(startOffsetS + absMs / 1000.0);
+        sizes.push_back(static_cast<uint32_t>(sz));
     }
-    return !arrSec.empty();
+    return !cols.empty() && !arrSec.empty();
 }
 
 /**
@@ -1355,7 +1389,7 @@ main(int argc, char* argv[])
                  copaClockUs);
     cmd.AddValue("jitterUs", "Override Copa-Auto jitter_us (-1=auto, >=0=manual)", jitterUs);
     cmd.AddValue("debugMs", "Emit Copa-Auto internal telemetry every N ms (0=off)", debugMs);
-    cmd.AddValue("workloadFile", "Optional Mortise <gap_ms> <size_bytes> .wk workload", workloadFile);
+    cmd.AddValue("workloadFile", "Optional CSV workload file (time,size[,comment])", workloadFile);
     cmd.AddValue("baseRttMs", "Optional override total base RTT in ms (0=use bottleneckDelay/accessDelay)", baseRttMs);
     cmd.AddValue("evalJson", "Print single-line JSON compatible with mahimahi_eval.py", evalJson);
     cmd.Parse(argc, argv);

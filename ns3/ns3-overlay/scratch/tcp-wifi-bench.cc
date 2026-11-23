@@ -242,7 +242,7 @@ main(int argc, char* argv[])
     cmd.AddValue("capacityProbe", "Run UDP capacity probe instead of TCP", capacityProbe);
     cmd.AddValue("capacityMbps", "Reference channel capacity Mbps from UDP probe", capacityMbps);
     cmd.AddValue("baseRttMs", "Reference unloaded base RTT ms", baseRttMs);
-    cmd.AddValue("workloadFile", "Optional Mortise .wk workload", workloadFile);
+    cmd.AddValue("workloadFile", "Optional CSV workload file (time,size[,comment])", workloadFile);
     cmd.Parse(argc, argv);
 
     RngSeedManager::SetSeed(seed);

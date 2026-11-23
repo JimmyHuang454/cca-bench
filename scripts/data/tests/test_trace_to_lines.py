@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,7 +28,7 @@ class ConversionTest(unittest.TestCase):
             dest = root / 'datasets/lines/lumos/5g_trace_100_walking.csv'
             self.assertEqual(
                 dest.read_text(),
-                'time,cap\n0,1.46kb\n1,0\n2,1.46kb\n3,0\n4,1.46kb\n5,0\n',
+                'time,cap\n0,12mbps\n1,0\n2,12mbps\n3,0\n4,12mbps\n5,0\n',
             )
 
     def test_script_configuration_directory_and_single_pair(self):
@@ -46,7 +47,7 @@ class ConversionTest(unittest.TestCase):
             self.assertTrue(out_dir.is_file())
             self.assertEqual(
                 out_dir.read_text(),
-                'time,up_cap,down_cap,delay\n0,1.46kb,1.46kb,20\n1,,0,\n2,0,0,\n',
+                'time,up_cap,down_cap,delay\n0,12mbps,12mbps,20\n1,,0,\n2,0,0,\n',
             )
             with patch.multiple(module, ROOT=root, DATASET_DIR=None, UPLINK_TRACE=up,
                                 DOWNLINK_TRACE=down, DELAY_TRACE=delay), \
@@ -60,22 +61,21 @@ class ConversionTest(unittest.TestCase):
             trace.write_text('0\n5\n5\n5\n5\n5\n6\n6\n6\n6\n6\n')
             output = io.StringIO()
             module.write_scene_csv(trace, trace, None, output)
-            self.assertEqual(output.getvalue(), 'time,cap\n0,1.46kb\n1,0\n5,7.32kb\n7,0\n')
-            output3 = io.StringIO()
-            module.write_scene_csv(trace, trace, None, output3, decimals=3)
-            self.assertEqual(output3.getvalue(), 'time,cap\n0,1.465kb\n1,0\n5,7.324kb\n7,0\n')
+            self.assertEqual(output.getvalue(), 'time,cap\n0,12mbps\n1,0\n5,60mbps\n7,0\n')
             trace.write_text('1\n1\n2\n3\n')
             output = io.StringIO()
             module.write_scene_csv(trace, trace, None, output)
-            self.assertEqual(output.getvalue(), 'time,cap\n0,0\n1,2.93kb\n2,1.46kb\n4,0\n')
+            self.assertEqual(output.getvalue(), 'time,cap\n0,0\n1,24mbps\n2,12mbps\n4,0\n')
 
     def test_format_capacity_units_and_precision(self):
-        self.assertEqual(module.format_capacity_bytes(0), '0')
-        self.assertEqual(module.format_capacity_bytes(512), '512b')
-        self.assertEqual(module.format_capacity_bytes(10.33 * 1024), '10.33kb')
-        self.assertEqual(module.format_capacity_bytes(1024 * 1024), '1mb')
-        self.assertEqual(module.format_capacity(7), '10.25kb')
-        self.assertEqual(module.format_capacity(1000), '1.43mb')
+        self.assertEqual(module.format_capacity_bps(0), '0')
+        self.assertEqual(module.format_capacity_bps(500), '500bps')
+        self.assertEqual(module.format_capacity_bps(307_000), '307kbps')
+        self.assertEqual(module.format_capacity_bps(2_135_000), '2.135mbps')
+        self.assertEqual(module.format_capacity_bps(2_135_000, decimals=2), '2.13mbps')
+        self.assertEqual(module.format_capacity_bps(1_200_000_000), '1.2gbps')
+        self.assertEqual(module.format_capacity(7), '84mbps')
+        self.assertEqual(module.format_capacity(100), '1.2gbps')
 
     def test_existing_directory_csv_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,9 +120,9 @@ class ConversionTest(unittest.TestCase):
                 self.assertEqual(
                     target.read_text(),
                     'time,up_cap,down_cap,delay\n'
-                    '0,1.46kb,0,20\n'
-                    '1,0,1.46kb,\n'
-                    '2,1.46kb,0,\n'
+                    '0,12mbps,0,20\n'
+                    '1,0,12mbps,\n'
+                    '2,12mbps,0,\n'
                     '3,0,0,\n',
                 )
                 self.assertEqual(module.main(), 1)
@@ -142,7 +142,7 @@ class ConversionTest(unittest.TestCase):
                 (dataset / 'bad.down').unlink()
                 self.assertEqual(module.main(), 0)
                 dest = root / 'datasets/lines/leocc/bw_a.csv'
-                self.assertEqual(dest.read_text(), 'time,cap,delay\n0,0,20\n1,1.46kb,\n3,0,\n')
+                self.assertEqual(dest.read_text(), 'time,cap,delay\n0,0,20\n1,12mbps,\n3,0,\n')
 
     def test_leo_without_delay_omits_delay_column(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -154,7 +154,110 @@ class ConversionTest(unittest.TestCase):
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(module.main(), 0)
             dest = root / 'datasets/lines/leocc/bw_nodelay.csv'
-            self.assertEqual(dest.read_text(), 'time,cap\n0,2.93kb\n1,1.46kb\n2,0\n')
+            self.assertEqual(dest.read_text(), 'time,cap\n0,24mbps\n1,12mbps\n2,0\n')
+
+    def test_single_file_dot_trace_conversion_directory_and_cli(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / 'traces' / 'cellular-traces-nyc'
+            dataset.mkdir(parents=True)
+            trace_a = dataset / 'trace-taxi.trace'
+            trace_a.write_text('0\n0\n2\n')
+            # Directory mode
+            with patch.object(module, 'ROOT', root), patch('sys.argv', ['trace_to_lines.py', str(dataset)]), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(module.main(), 0)
+            dest_dir = root / 'datasets/lines/cellular-traces-nyc/trace-taxi.csv'
+            self.assertEqual(dest_dir.read_text(), 'time,cap\n0,24mbps\n1,0\n2,12mbps\n3,0\n')
+
+            # Single-file CLI mode
+            single = root / 'custom.trace'
+            single.write_text('1\n2\n2\n')
+            with patch.object(module, 'ROOT', root), patch('sys.argv', ['trace_to_lines.py', str(single)]), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(module.main(), 0)
+            dest_single = root / 'datasets/lines/converted/custom.csv'
+            self.assertEqual(dest_single.read_text(), 'time,cap\n0,0\n1,12mbps\n2,24mbps\n3,0\n')
+
+    def test_pantheon_calibrated_directory_conversion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / 'traces' / 'pantheon'
+            dataset.mkdir(parents=True)
+            (dataset / '0.57mbps-poisson.trace').write_text('100\n200\n')
+            (dataset / '77.72mbps.trace').write_text('0\n0\n59999\n')
+            (dataset / '12mbps.trace').write_text('1\n')  # stub skipped in calibrated Pantheon dir
+            with patch.object(module, 'ROOT', root), patch('sys.argv', ['trace_to_lines.py', str(dataset)]), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(module.main(), 0)
+            out_dir = root / 'datasets/lines/pantheon'
+            self.assertEqual(
+                sorted(p.name for p in out_dir.glob('*.csv')),
+                ['aws_korea_to_china.csv', 'nepal_to_aws_india.csv'],
+            )
+            self.assertEqual(
+                (out_dir / 'aws_korea_to_china.csv').read_text(),
+                'time,cap,delay,comment\n'
+                '0,77.72mbps,51,"Pantheon calibrated: AWS Korea to China wired (77.72mbps, mm-delay 51ms)"\n'
+                '60000,0,,\n',
+            )
+            self.assertEqual(
+                (out_dir / 'nepal_to_aws_india.csv').read_text(),
+                'time,cap,delay,comment\n'
+                '0,0,28,"Pantheon calibrated: Nepal cellular to AWS India (0.57mbps-poisson, mm-delay 28ms)"\n'
+                '100,12mbps,,\n'
+                '101,0,,\n'
+                '200,12mbps,,\n'
+                '201,0,,\n',
+            )
+
+    def test_opennetlab_json_symmetric_and_asymmetric_conversion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            dataset = root / 'traces' / 'opennetlab-sample'
+            dataset.mkdir(parents=True)
+            sym_json = {
+                'from': 'sigcomm-5g',
+                'delay_from': 'sigcomm-ping',
+                'downlink': {},
+                'uplink': {
+                    'trace_pattern': [
+                        {'duration': 100.0, 'capacity': 307, 'rtt': 40.5},
+                        {'duration': 100.0, 'capacity': 2135, 'rtt': 60.0},
+                        {'duration': 100.0, 'capacity': 2135, 'rtt': 60.0},
+                    ]
+                },
+            }
+            (dataset / 'mm5g.json').write_text(json.dumps(sym_json), encoding='utf-8')
+            with patch.object(module, 'ROOT', root), patch('sys.argv', ['trace_to_lines.py', str(dataset)]), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(module.main(), 0)
+            out_csv = root / 'datasets/lines/opennetlab-sample/mm5g.csv'
+            self.assertEqual(
+                out_csv.read_text(encoding='utf-8'),
+                'time,cap,delay,comment\n'
+                '0,307kbps,20.25,OpenNetLab (from=sigcomm-5g; delay_from=sigcomm-ping)\n'
+                '100,2.135mbps,30,\n'
+                '300,0,,\n',
+            )
+
+            # Single-file asymmetric JSON CLI mode
+            asym_path = root / 'asym.json'
+            asym_json = {
+                'uplink': {'trace_pattern': [{'duration': 500.0, 'capacity': 500, 'rtt': 20.0}]},
+                'downlink': {'trace_pattern': [{'duration': 500.0, 'capacity': 12000, 'rtt': 40.0}]},
+            }
+            asym_path.write_text(json.dumps(asym_json), encoding='utf-8')
+            with patch.object(module, 'ROOT', root), patch('sys.argv', ['trace_to_lines.py', str(asym_path)]), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(module.main(), 0)
+            out_asym = root / 'datasets/lines/converted/asym.csv'
+            self.assertEqual(
+                out_asym.read_text(encoding='utf-8'),
+                'time,up_cap,down_cap,up_delay,down_delay\n'
+                '0,500kbps,12mbps,10,20\n'
+                '500,0,0,,\n',
+            )
 
 
 if __name__ == '__main__':

@@ -1,5 +1,5 @@
 time,up_cap,down_cap,up_delay,down_delay,comment
-0,34m,60m,16.5,10,低轨卫星稳态抖动场景（34 Mbps 带宽 + 显著非排队延迟抖动 $j \approx 6\text{--}8\text{ ms}$）。
+0,34mbps,60mbps,16.5,10,低轨卫星稳态抖动场景（34 Mbps 带宽 + 显著非排队延迟抖动 $j \approx 6\text{--}8\text{ ms}$）。
 15,,,16.7,,
 35,,,19.3,,
 55,,,22.2,,

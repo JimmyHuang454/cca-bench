@@ -7,7 +7,10 @@
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <map>
+#include <set>
 #include <sstream>
+#include <string>
 #include <vector>
 using namespace ns3;
 namespace tracebench {
@@ -125,11 +128,10 @@ class MortiseAppReceiver : public Application
                 double rctMs = std::max((nowS - m_arrSec[m_idx]) * 1000.0, 0.1);
                 rctsMs.push_back(rctMs);
                 m_idx++;
-                if (m_idx == m_sizes.size())
-                {
-                    Simulator::Stop();
-                    return;
-                }
+            }
+            if (m_idx == m_sizes.size())
+            {
+                Simulator::Stop();
             }
         }
     }
@@ -144,19 +146,107 @@ class MortiseAppReceiver : public Application
 };
 
 inline bool
-ParseWorkloadSizeBytes(const std::string& raw, uint64_t& outBytes)
+ParseWorkloadCsvRow(const std::string& rawLine, std::vector<std::string>& fields)
+{
+    fields.clear();
+    std::string line = rawLine;
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    size_t i = 0;
+    const size_t n = line.size();
+    while (true)
+    {
+        std::string field;
+        if (i < n && line[i] == '"')
+        {
+            ++i;
+            bool closed = false;
+            while (i < n)
+            {
+                if (line[i] == '"')
+                {
+                    if (i + 1 < n && line[i + 1] == '"')
+                    {
+                        field.push_back('"');
+                        i += 2;
+                    }
+                    else
+                    {
+                        ++i;
+                        closed = true;
+                        break;
+                    }
+                }
+                else
+                {
+                    field.push_back(line[i++]);
+                }
+            }
+            if (!closed) return false;
+            while (i < n && (line[i] == ' ' || line[i] == '\t')) ++i;
+            if (i < n && line[i] != ',') return false;
+        }
+        else
+        {
+            while (i < n && line[i] != ',')
+            {
+                if (line[i] == '"') return false;
+                field.push_back(line[i++]);
+            }
+        }
+        fields.push_back(std::move(field));
+        if (i == n) break;
+        ++i;
+    }
+    return true;
+}
+
+inline bool
+ParseWorkloadTimeMs(const std::string& raw, double& outMs)
 {
     const auto first = raw.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos)
-    {
-        return false;
-    }
+    if (first == std::string::npos) return false;
     const auto last = raw.find_last_not_of(" \t\r\n");
     const std::string s = raw.substr(first, last - first + 1);
     std::string lower = s;
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::string numStr = s;
+    double mult = 1.0;
+    if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "ms") == 0)
+    {
+        numStr = s.substr(0, s.size() - 2);
+        mult = 1.0;
+    }
+    else if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "us") == 0)
+    {
+        numStr = s.substr(0, s.size() - 2);
+        mult = 1e-3;
+    }
+    else if (lower.size() > 1 && lower.back() == 's')
+    {
+        numStr = s.substr(0, s.size() - 1);
+        mult = 1000.0;
+    }
+    if (numStr.empty() || std::isspace(static_cast<unsigned char>(numStr.back()))) return false;
+    std::istringstream iss(numStr);
+    double val = 0.0;
+    if (!(iss >> val) || !iss.eof() || !std::isfinite(val) || val < 0.0) return false;
+    const double ms = val * mult;
+    if (!std::isfinite(ms)) return false;
+    outMs = ms;
+    return true;
+}
 
+inline bool
+ParseWorkloadSizeBytes(const std::string& raw, uint64_t& outBytes)
+{
+    const auto first = raw.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return false;
+    const auto last = raw.find_last_not_of(" \t\r\n");
+    const std::string s = raw.substr(first, last - first + 1);
+    std::string lower = s;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     std::string numStr = s;
     double mult = 1.0;
     bool hasUnit = false;
@@ -190,121 +280,87 @@ ParseWorkloadSizeBytes(const std::string& raw, uint64_t& outBytes)
         mult = 1.0;
         hasUnit = true;
     }
-
-    if (numStr.empty() || std::isspace(static_cast<unsigned char>(numStr.back())))
-    {
-        return false;
-    }
+    if (numStr.empty() || std::isspace(static_cast<unsigned char>(numStr.back()))) return false;
     if (!hasUnit)
     {
-        if (numStr.find_first_not_of("0123456789") != std::string::npos)
-        {
-            return false;
-        }
+        if (numStr.find_first_not_of("0123456789") != std::string::npos) return false;
         std::istringstream iss(numStr);
         int64_t val = 0;
-        if (!(iss >> val) || !iss.eof() || val <= 0 || val > 100000000)
-        {
-            return false;
-        }
+        if (!(iss >> val) || !iss.eof() || val <= 0 || val > 100000000) return false;
         outBytes = static_cast<uint64_t>(val);
         return true;
     }
     std::istringstream iss(numStr);
     double val = 0.0;
-    if (!(iss >> val) || !iss.eof() || !std::isfinite(val) || val <= 0.0)
-    {
-        return false;
-    }
+    if (!(iss >> val) || !iss.eof() || !std::isfinite(val) || val <= 0.0) return false;
     const double scaled = std::round(val * mult);
-    if (!std::isfinite(scaled) || scaled < 1.0 || scaled > 100000000.0)
-    {
-        return false;
-    }
+    if (!std::isfinite(scaled) || scaled < 1.0 || scaled > 100000000.0) return false;
     outBytes = static_cast<uint64_t>(scaled);
     return true;
 }
 
-bool
+inline bool
 LoadWorkloadFile(const std::string& path,
                  std::vector<double>& arrSec,
                  std::vector<uint32_t>& sizes,
                  double startOffsetS)
 {
     std::ifstream f(path);
-    if (!f)
+    if (!f) return false;
+    static const std::set<std::string> kAllowed = {"time", "size", "comment"};
+    std::map<std::string, size_t> cols;
+    size_t ncols = 0, tIdx = 0, sIdx = 0;
+    double prevMs = -1.0;
+    std::string raw;
+    std::vector<std::string> fields;
+    unsigned lineNo = 0;
+    while (std::getline(f, raw))
     {
-        return false;
-    }
-    double tSec = startOffsetS;
-    double prevAbsMs = -1.0;
-    int mode = 0; // 0=unset, 1=csv (<t_ms>,<size>), 2=legacy (<gap_ms> <size_bytes>)
-    std::string line;
-    while (std::getline(f, line))
-    {
-        const auto first = line.find_first_not_of(" \t\r\n");
-        if (first == std::string::npos || line[first] == '#')
+        ++lineNo;
+        if (lineNo == 1 && raw.size() >= 3 &&
+            static_cast<unsigned char>(raw[0]) == 0xEF &&
+            static_cast<unsigned char>(raw[1]) == 0xBB &&
+            static_cast<unsigned char>(raw[2]) == 0xBF)
         {
+            raw.erase(0, 3);
+        }
+        const auto first = raw.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos || raw[first] == '#') continue;
+        if (!ParseWorkloadCsvRow(raw, fields)) return false;
+        if (cols.empty())
+        {
+            ncols = fields.size();
+            for (size_t i = 0; i < ncols; ++i)
+            {
+                const auto f0 = fields[i].find_first_not_of(" \t\r\n");
+                if (f0 == std::string::npos) return false;
+                const auto f1 = fields[i].find_last_not_of(" \t\r\n");
+                std::string name = fields[i].substr(f0, f1 - f0 + 1);
+                std::transform(name.begin(), name.end(), name.begin(),
+                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                if (!kAllowed.count(name) || cols.count(name)) return false;
+                cols[name] = i;
+            }
+            if (!cols.count("time") || !cols.count("size")) return false;
+            tIdx = cols["time"];
+            sIdx = cols["size"];
             continue;
         }
-        const auto last = line.find_last_not_of(" \t\r\n");
-        const std::string trimmed = line.substr(first, last - first + 1);
-        const auto commaPos = trimmed.find(',');
-        const int lineMode = (commaPos != std::string::npos) ? 1 : 2;
-        if (mode == 0)
-        {
-            mode = lineMode;
-        }
-        else if (mode != lineMode)
+        if (fields.size() > ncols) return false;
+        if (fields.size() < ncols) fields.resize(ncols);
+        double absMs = 0.0;
+        uint64_t sz = 0;
+        if (!ParseWorkloadTimeMs(fields[tIdx], absMs) ||
+            (prevMs >= 0.0 && absMs < prevMs) ||
+            !ParseWorkloadSizeBytes(fields[sIdx], sz) || sz == 0)
         {
             return false;
         }
-        if (mode == 1)
-        {
-            if (trimmed.find(',', commaPos + 1) != std::string::npos)
-            {
-                return false;
-            }
-            const std::string tRaw = trimmed.substr(0, commaPos);
-            const auto tFirst = tRaw.find_first_not_of(" \t\r\n");
-            if (tFirst == std::string::npos)
-            {
-                return false;
-            }
-            const auto tLast = tRaw.find_last_not_of(" \t\r\n");
-            std::istringstream ts(tRaw.substr(tFirst, tLast - tFirst + 1));
-            double absMs = 0.0;
-            uint64_t sz = 0;
-            ts >> absMs;
-            if (ts.fail() || !ts.eof() || !std::isfinite(absMs) || absMs < 0.0 ||
-                (prevAbsMs >= 0.0 && absMs < prevAbsMs) ||
-                !ParseWorkloadSizeBytes(trimmed.substr(commaPos + 1), sz) || sz == 0)
-            {
-                return false;
-            }
-            prevAbsMs = absMs;
-            arrSec.push_back(startOffsetS + absMs / 1000.0);
-            sizes.push_back(static_cast<uint32_t>(std::min<uint64_t>(sz, 100000000ULL)));
-        }
-        else
-        {
-            std::istringstream iss(trimmed);
-            double gapMs = 0.0;
-            std::string szStr;
-            std::string extra;
-            uint64_t sz = 0;
-            if (!(iss >> gapMs >> szStr) || (iss >> extra) ||
-                !std::isfinite(gapMs) || gapMs < 0.0 ||
-                !ParseWorkloadSizeBytes(szStr, sz) || sz == 0)
-            {
-                continue;
-            }
-            tSec += gapMs / 1000.0;
-            arrSec.push_back(tSec);
-            sizes.push_back(static_cast<uint32_t>(std::min<uint64_t>(sz, 100000000ULL)));
-        }
+        prevMs = absMs;
+        arrSec.push_back(startOffsetS + absMs / 1000.0);
+        sizes.push_back(static_cast<uint32_t>(sz));
     }
-    return !arrSec.empty();
+    return !cols.empty() && !arrSec.empty();
 }
 
 }

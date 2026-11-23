@@ -571,11 +571,11 @@ def main() -> int:
         default=None,
         help="Optional local directory of LeoCC Starlink traces (containing bw_*.txt + delay_*.txt) for --shard local-leo",
     )
-    parser.add_argument("--app-workload", type=Path, default=None, help="Default app.wk path")
+    parser.add_argument("--app-workload", type=Path, default=None, help="Default app.csv path")
     parser.add_argument(
         "--app-workloads",
         default=None,
-        help="Comma-separated name=path mappings for named request workloads (e.g. app=/tmp/app.wk,websearch=/tmp/websearch.wk)",
+        help="Comma-separated name=path mappings for named request workloads (e.g. app=/tmp/app.csv,websearch=/tmp/websearch.csv)",
     )
     parser.add_argument("--bulk-workload", required=True, type=Path)
     parser.add_argument("--out-dir", required=True, type=Path)
@@ -615,7 +615,7 @@ def main() -> int:
         wk_path = app_wk_map.get(wk_label)
         if wk_path is None:
             raise SystemExit(f"No workload file configured for {raw_wk!r} (label {wk_label!r})")
-        manifest = args.out_dir / f"{wk_label}.wk"
+        manifest = args.out_dir / f"{wk_label}.csv"
         if wk_path.resolve() != manifest.resolve():
             shutil.copyfile(wk_path, manifest)
         from lines_common import write_mortise_workload

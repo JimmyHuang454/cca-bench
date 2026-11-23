@@ -62,10 +62,10 @@ LINES_4G_ALL = ["walk", "run"] + LINES_4G_CITY + LINES_4G_RURAL + LINES_4G_FAST
 def default_workload_map() -> dict[str, Path]:
     wk_dir = REPO_ROOT / "datasets" / "workloads"
     return {
-        "app": wk_dir / "app.wk",
-        "websearch": wk_dir / "websearch.wk",
-        "vl2": wk_dir / "vl2.wk",
-        "pageload": wk_dir / "pageload.wk",
+        "app": wk_dir / "app.csv",
+        "websearch": wk_dir / "websearch.csv",
+        "vl2": wk_dir / "vl2.csv",
+        "pageload": wk_dir / "pageload.csv",
     }
 
 

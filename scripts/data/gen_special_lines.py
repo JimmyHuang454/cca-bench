@@ -73,8 +73,8 @@ def write_scene(
 def gen_starlink_jitter_steady() -> None:
     """1. LEO satellite steady jitter (34 Mbps, RTT min 20 ms, j ~ 7 ms)."""
     rng = random.Random(1001)
-    up_pts = [(0, '34m')]
-    down_pts = [(0, '60m')]
+    up_pts = [(0, '34mbps')]
+    down_pts = [(0, '60mbps')]
     up_delay: list[tuple[int, float]] = []
     down_delay = [(0, 10.0)]
     t = 0
@@ -106,7 +106,7 @@ def gen_starlink_reconfig_15s() -> None:
         (45_000, 60_000, 10.0, 20.0, 8.0,  10),
     ]
     up_pts: list[tuple[int, str]] = []
-    down_pts = [(0, '80m')]
+    down_pts = [(0, '80mbps')]
     up_delay: list[tuple[int, float]] = []
     down_delay = [(0, 10.0)]
 
@@ -117,7 +117,7 @@ def gen_starlink_reconfig_15s() -> None:
             up_pts.append((t, '0'))
             burst_t = t + frame - 1
             if burst_t < t1:
-                up_pts.append((burst_t, str(pkts)))
+                up_pts.append((burst_t, f'{pkts * 12}mbps'))
             t += frame
         td = t0
         while td < t1:
@@ -144,7 +144,7 @@ def gen_wifi6_ampdu_burst() -> None:
     """3. Wi-Fi 6 CSMA/CA + A-MPDU TXOP aggregation bursts (36 Mbps avg, flat 16 ms base RTT)."""
     rng = random.Random(1003)
     up_pts: list[tuple[int, str]] = [(0, '0')]
-    down_pts = [(0, '100m')]
+    down_pts = [(0, '100mbps')]
     up_delay = [(0, 8.0)]
     down_delay = [(0, 8.0)]
     t = 0
@@ -158,7 +158,7 @@ def gen_wifi6_ampdu_burst() -> None:
             up_pts.append((t, '0'))
         bt = t + gap
         if bt < DURATION_MS:
-            up_pts.append((bt, str(per_ms)))
+            up_pts.append((bt, f'{per_ms * 12}mbps'))
         t += cycle
     write_scene(
         'wifi6_ampdu_burst',
@@ -175,7 +175,7 @@ def gen_wifi_shared_contention() -> None:
     """4. Shared Wi-Fi contention: 44 Mbps -> heavy contention 10 Mbps (10-28 ms gaps) -> 48 Mbps."""
     rng = random.Random(1004)
     up_pts: list[tuple[int, str]] = [(0, '0')]
-    down_pts = [(0, '80m')]
+    down_pts = [(0, '80mbps')]
     up_delay = [(0, 8.0)]
     down_delay = [(0, 8.0)]
     segs = [
@@ -192,7 +192,7 @@ def gen_wifi_shared_contention() -> None:
             pkts = max(1, round(avg_mbps * cycle / (12.0 * tx) * rng.uniform(0.7, 1.3)))
             up_pts.append((t, '0'))
             if t + gap < t1:
-                up_pts.append((t + gap, str(pkts)))
+                up_pts.append((t + gap, f'{pkts * 12}mbps'))
             t += cycle
     write_scene(
         'wifi_shared_contention',
@@ -212,15 +212,15 @@ def gen_5g_tdd_tdma_high_bw() -> None:
     """5. 5G NR TDD frame structure (7 ms DL/silent + 3 ms UL burst, 36 Mbps avg) + HARQ jitter."""
     rng = random.Random(1005)
     up_pts: list[tuple[int, str]] = [(0, '0')]
-    down_pts = [(0, '80m')]
+    down_pts = [(0, '80mbps')]
     up_delay: list[tuple[int, float]] = []
     down_delay = [(0, 10.0)]
 
-    # 10 ms 5G NR frame: 7 ms silent, 3 ms UL burst at 10 pkts/ms => 30 pkts / 10 ms = 36 Mbps
+    # 10 ms 5G NR frame: 7 ms silent, 3 ms UL burst at 120 Mbps (10 pkts/ms) => 36 Mbps avg
     for t in range(0, DURATION_MS, 10):
         up_pts.append((t, '0'))
         if t + 7 < DURATION_MS:
-            up_pts.append((t + 7, '10'))
+            up_pts.append((t + 7, '120mbps'))
     for t in range(0, DURATION_MS, 20):
         d = 10.0 + (rng.uniform(3.0, 7.0) if rng.random() < 0.35 else rng.uniform(0.0, 1.0))
         up_delay.append((t, round(d, 1)))
@@ -240,7 +240,7 @@ def gen_5g_fast_fading_stochastic() -> None:
     """6. Pure stochastic Kingman diffusion (c > 0, k = c/mu > 0, ZERO static delay jitter j=0)."""
     rng = random.Random(1006)
     up_pts: list[tuple[int, str]] = []
-    down_pts = [(0, '80m')]
+    down_pts = [(0, '80mbps')]
     up_delay = [(0, 10.0)]
     down_delay = [(0, 10.0)]
 
@@ -254,7 +254,7 @@ def gen_5g_fast_fading_stochastic() -> None:
             if rng.random() < 0.28:
                 state = 1
         rate = rng.uniform(40.0, 56.0) if state == 1 else rng.uniform(6.0, 14.0)
-        up_pts.append((t, f'{rate:.1f}m'))
+        up_pts.append((t, f'{rate:.1f}mbps'))
 
     write_scene(
         '5g_fast_fading_stochastic',
@@ -269,7 +269,7 @@ def gen_5g_fast_fading_stochastic() -> None:
 
 def gen_ack_aggregation_docsis() -> None:
     """7. Smooth 36 Mbps data path + 14 ms ACK aggregation bursts on reverse path (DOCSIS/Wi-Fi)."""
-    up_pts = [(0, '36m')]
+    up_pts = [(0, '36mbps')]
     down_pts: list[tuple[int, str]] = [(0, '0')]
     up_delay = [(0, 10.0)]
     down_delay = [(0, 10.0)]
@@ -278,7 +278,7 @@ def gen_ack_aggregation_docsis() -> None:
     for t in range(0, DURATION_MS, 14):
         down_pts.append((t, '0'))
         if t + 13 < DURATION_MS:
-            down_pts.append((t + 13, '60'))
+            down_pts.append((t + 13, '720mbps'))
 
     write_scene(
         'ack_aggregation_docsis',
@@ -300,7 +300,7 @@ def gen_cellular_handover_jitter_burst() -> None:
         (35_000, 60_000, 42.0, 10.0, 6.0,  8),
     ]
     up_pts: list[tuple[int, str]] = [(0, '0')]
-    down_pts = [(0, '80m')]
+    down_pts = [(0, '80mbps')]
     up_delay: list[tuple[int, float]] = []
     down_delay = [(0, 10.0)]
 
@@ -311,7 +311,7 @@ def gen_cellular_handover_jitter_burst() -> None:
             pkts = max(1, round(avg_mbps * frame / 12.0 * rng.uniform(0.8, 1.2)))
             up_pts.append((t, '0'))
             if t + gap < t1:
-                up_pts.append((t + gap, str(pkts)))
+                up_pts.append((t + gap, f'{pkts * 12}mbps'))
             t += frame
         td = t0
         while td < t1:
@@ -336,21 +336,21 @@ def gen_cellular_handover_jitter_burst() -> None:
 def gen_dynamic_jitter_regime_switch() -> None:
     """9. Clean wired D/D/1 -> high-jitter bursty wireless -> clean low-rate wired D/D/1."""
     rng = random.Random(1009)
-    up_pts: list[tuple[int, str]] = [(0, '42m')]
-    down_pts = [(0, '80m')]
+    up_pts: list[tuple[int, str]] = [(0, '42mbps')]
+    down_pts = [(0, '80mbps')]
     up_delay: list[tuple[int, float]] = [(0, 10.0)]
     down_delay = [(0, 10.0)]
 
     # 20..40 s: 42 Mbps avg with 10 ms TDMA bursts + 0..11 ms delay jitter
     for t in range(20_000, 40_000, 10):
         up_pts.append((t, '0'))
-        up_pts.append((t + 9, '35'))
+        up_pts.append((t + 9, '420mbps'))
     for t in range(20_000, 40_000, 20):
         d = 10.0 + (rng.uniform(0.0, 1.0) if rng.random() < 0.25 else rng.uniform(5.0, 11.0))
         up_delay.append((t, round(d, 1)))
 
     # 40..60 s: back to clean deterministic 12 Mbps wired (j=0, k=0)
-    up_pts.append((40_000, '12m'))
+    up_pts.append((40_000, '12mbps'))
     up_delay.append((40_000, 10.0))
 
     write_scene(
@@ -371,7 +371,7 @@ def gen_mmwave_intermittent_burst() -> None:
     """10. 5G mmWave bursty link (44 Mbps) with periodic 500 ms blockage dips to 6 Mbps."""
     rng = random.Random(1010)
     up_pts: list[tuple[int, str]] = [(0, '0')]
-    down_pts = [(0, '80m')]
+    down_pts = [(0, '80mbps')]
     up_delay: list[tuple[int, float]] = []
     down_delay = [(0, 10.0)]
 
@@ -383,13 +383,13 @@ def gen_mmwave_intermittent_burst() -> None:
     t = 0
     while t < DURATION_MS:
         if in_blockage(t):
-            up_pts.append((t, '6m'))
+            up_pts.append((t, '6mbps'))
             t += 20
         else:
             # 7 ms mmWave frame burst: 6 ms silent, 1 ms burst of ~26 pkts => ~44.6 Mbps
             up_pts.append((t, '0'))
             if t + 6 < DURATION_MS and not in_blockage(t + 6):
-                up_pts.append((t + 6, str(rng.randint(23, 29))))
+                up_pts.append((t + 6, f'{rng.randint(23, 29) * 12}mbps'))
             t += 7
     for t in range(0, DURATION_MS, 20):
         if in_blockage(t):

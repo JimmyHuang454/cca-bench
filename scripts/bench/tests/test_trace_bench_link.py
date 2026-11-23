@@ -13,8 +13,8 @@ class TraceBenchLinkCapacityTests(TraceBenchCase):
 
     def test_01_bandwidth_step_down_and_recovery(self):
         scene = self.make_lines(
-            up='0,40m\n1500,4m\n3000,40m\n4500,0\n',
-            down='0,100m\n4500,0\n',
+            up='0,40mbps\n1500,4mbps\n3000,40mbps\n4500,0\n',
+            down='0,100mbps\n4500,0\n',
             up_delay='0,10\n# end_ms=4500\n',
             down_delay='0,10\n# end_ms=4500\n',
         )
@@ -36,10 +36,10 @@ class TraceBenchLinkCapacityTests(TraceBenchCase):
         self.assertGreater(tput3, 20.0)
 
     def test_02_fractional_mbps_accuracy_and_no_unused_credit_bank(self):
-        # Mix fractional Mbps (< 12 Mbps = < 1 pkt/ms) and integer packet count
+        # Mix fractional kbps/mbps (< 12 Mbps = < 1 pkt/ms) and higher mbps
         scene = self.make_lines(
-            up='0,0.5m\n1000,1.23m\n2000,2\n3000,0\n',
-            down='0,50m\n3000,0\n',
+            up='0,500kbps\n1000,1.23mbps\n2000,24mbps\n3000,0\n',
+            down='0,50mbps\n3000,0\n',
             up_delay='0,5\n# end_ms=3000\n',
             down_delay='0,5\n# end_ms=3000\n',
         )
@@ -51,13 +51,13 @@ class TraceBenchLinkCapacityTests(TraceBenchCase):
         # Verify unused integer opportunities during idle periods do NOT accumulate as burst credit:
         # 12 Mbps link idle for 500 ms, then send 150 KB (~100 pkts -> needs >= 100 ms at 12 Mbps)
         idle_scene = self.make_lines(
-            up='0,12m\n2000,0\n',
-            down='0,100m\n2000,0\n',
+            up='0,12mbps\n2000,0\n',
+            down='0,100mbps\n2000,0\n',
             up_delay='0,5\n# end_ms=2000\n',
             down_delay='0,5\n# end_ms=2000\n',
             name='idle',
         )
-        wk = self.make_workload('500 150000\n', name='delayed_chunk.wk')
+        wk = self.make_workload('time,size\n500,150000\n', name='delayed_chunk.csv')
         wk_data = self.run_json(idle_scene, stop_time=2.0, cc='cubic', workload_file=wk, line_period_ms=2000)
         self.assertEqual(wk_data['requests'], 1)
         self.assertGreaterEqual(wk_data['rct_mean_ms'], 95.0)
@@ -65,8 +65,8 @@ class TraceBenchLinkCapacityTests(TraceBenchCase):
 
     def test_03_bidirectional_outage_and_recovery(self):
         scene = self.make_lines(
-            up='0,20m\n1000,0\n2000,20m\n3500,0\n',
-            down='0,20m\n1000,0\n2000,20m\n3500,0\n',
+            up='0,20mbps\n1000,0\n2000,20mbps\n3500,0\n',
+            down='0,20mbps\n1000,0\n2000,20mbps\n3500,0\n',
             up_delay='0,10\n# end_ms=3500\n',
             down_delay='0,10\n# end_ms=3500\n',
         )
@@ -79,10 +79,10 @@ class TraceBenchLinkCapacityTests(TraceBenchCase):
         self.assertGreater(statistics.mean(r['tput0_mbps'] for r in after), 5.0)
 
     def test_04_unidirectional_data_vs_ack_outage_directionality(self):
-        # Case A: Data direction (up) outage only while ACK (down) stays 20m
+        # Case A: Data direction (up) outage only while ACK (down) stays 20mbps
         data_out = self.make_lines(
-            up='0,20m\n800,0\n1800,20m\n3000,0\n',
-            down='0,20m\n3000,0\n',
+            up='0,20mbps\n800,0\n1800,20mbps\n3000,0\n',
+            down='0,20mbps\n3000,0\n',
             up_delay='0,10\n# end_ms=3000\n',
             down_delay='0,10\n# end_ms=3000\n',
             name='data_out',
@@ -92,11 +92,11 @@ class TraceBenchLinkCapacityTests(TraceBenchCase):
         self.assertTrue(all(r['tput0_mbps'] == 0.0 for r in mid_data))
         self.assertGreater(statistics.mean(r['tput0_mbps'] for r in s_data if 2.3 <= r['time_s'] <= 2.9), 5.0)
 
-        # Case B: ACK direction (down) outage only while data (up) stays 20m ->
+        # Case B: ACK direction (down) outage only while data (up) stays 20mbps ->
         # sender stalls once flight fills cwnd, then resumes after ACK path returns
         ack_out = self.make_lines(
-            up='0,20m\n3500,0\n',
-            down='0,20m\n800,0\n2000,20m\n3500,0\n',
+            up='0,20mbps\n3500,0\n',
+            down='0,20mbps\n800,0\n2000,20mbps\n3500,0\n',
             up_delay='0,10\n# end_ms=3500\n',
             down_delay='0,10\n# end_ms=3500\n',
             name='ack_out',
@@ -109,8 +109,8 @@ class TraceBenchLinkCapacityTests(TraceBenchCase):
 
     def test_05_queue_buffer_limit_causes_drops_and_caps_qdelay(self):
         scene = self.make_lines(
-            up='0,5m\n4000,0\n',
-            down='0,50m\n4000,0\n',
+            up='0,5mbps\n4000,0\n',
+            down='0,50mbps\n4000,0\n',
             up_delay='0,10\n# end_ms=4000\n',
             down_delay='0,10\n# end_ms=4000\n',
         )
@@ -125,8 +125,8 @@ class TraceBenchLinkCapacityTests(TraceBenchCase):
 
     def test_06_bulk_does_not_loop_past_end_marker(self):
         scene = self.make_lines(
-            up='0,20m\n1000,0\n',
-            down='0,20m\n1000,0\n',
+            up='0,20mbps\n1000,0\n',
+            down='0,20mbps\n1000,0\n',
             up_delay='0,10\n# end_ms=1000\n',
             down_delay='0,10\n# end_ms=1000\n',
         )
@@ -144,8 +144,8 @@ class TraceBenchLinkDelayTests(TraceBenchCase):
     """Verify propagation delay fallback, asymmetry, dynamic spikes, and FIFO packet ordering."""
 
     def test_07_default_delay_when_delay_files_missing(self):
-        scene = self.make_lines(up='0,50m\n1000,0\n', down='0,50m\n1000,0\n')
-        wk = self.make_workload('0 1448\n100 1448\n100 1448\n', name='probe.wk')
+        scene = self.make_lines(up='0,50mbps\n1000,0\n', down='0,50mbps\n1000,0\n')
+        wk = self.make_workload('time,size\n0,1448\n100,1448\n200,1448\n', name='probe.csv')
         data = self.run_json(
             scene, stop_time=1.0, cc='cubic', default_delay_ms=15.0, workload_file=wk, line_period_ms=1000
         )
@@ -154,12 +154,12 @@ class TraceBenchLinkDelayTests(TraceBenchCase):
 
     def test_08_asymmetric_one_way_delay_sums_both_directions(self):
         scene = self.make_lines(
-            up='0,50m\n2000,0\n',
-            down='0,50m\n2000,0\n',
+            up='0,50mbps\n2000,0\n',
+            down='0,50mbps\n2000,0\n',
             up_delay='0,5\n# end_ms=2000\n',
             down_delay='0,80\n# end_ms=2000\n',
         )
-        wk = self.make_workload('\n'.join(f'{0 if i == 0 else 150} 1448' for i in range(6)) + '\n')
+        wk = self.make_workload('time,size\n' + '\n'.join(f'{i * 150},1448' for i in range(6)) + '\n')
         data, full = self.run_pair(
             scene, stop_time=2.0, cc='cubic', workload_file=wk, line_period_ms=2000, name='asym'
         )
@@ -172,14 +172,14 @@ class TraceBenchLinkDelayTests(TraceBenchCase):
     def test_09_dynamic_delay_spike_and_recovery_timeline(self):
         # Base RTT: 0..1s = 20ms, 1..2s = 90ms (80+10), 2..3s = 20ms
         scene = self.make_lines(
-            up='0,50m\n3000,0\n',
-            down='0,50m\n3000,0\n',
+            up='0,50mbps\n3000,0\n',
+            down='0,50mbps\n3000,0\n',
             up_delay='0,10\n1000,80\n2000,10\n# end_ms=3000\n',
             down_delay='0,10\n# end_ms=3000\n',
         )
         # Multi-segment probes (6000 B = 5 MSS) ensure every probe yields majority
         # immediate intra-probe ACKs under TCP DelAckCount=2 so median RTT tracks link delay.
-        wk = self.make_workload('\n'.join(f'{0 if i == 0 else 40} 6000' for i in range(70)) + '\n')
+        wk = self.make_workload('time,size\n' + '\n'.join(f'{i * 40},6000' for i in range(70)) + '\n')
         full = self.run_full(
             scene, stop_time=3.0, cc='cubic', workload_file=wk,
             line_period_ms=3000, rtt_sample_log=True, name='spike',
@@ -195,12 +195,12 @@ class TraceBenchLinkDelayTests(TraceBenchCase):
     def test_10_sharp_delay_drop_preserves_packet_order_without_spurious_retx(self):
         # Sharp drop from 100ms -> 5ms at t=500ms while sending rapid small packets
         scene = self.make_lines(
-            up='0,50m\n1500,0\n',
-            down='0,50m\n1500,0\n',
+            up='0,50mbps\n1500,0\n',
+            down='0,50mbps\n1500,0\n',
             up_delay='0,100\n500,5\n# end_ms=1500\n',
             down_delay='0,10\n# end_ms=1500\n',
         )
-        wk = self.make_workload('\n'.join(f'{0 if i == 0 else 5} 1448' for i in range(180)) + '\n')
+        wk = self.make_workload('time,size\n' + '\n'.join(f'{i * 5},1448' for i in range(180)) + '\n')
         data = self.run_json(scene, stop_time=1.5, cc='cubic', workload_file=wk, line_period_ms=1500)
         self.assertEqual(data['requests'], 180)
         self.assertEqual(data['retrans_pkts'], 0)

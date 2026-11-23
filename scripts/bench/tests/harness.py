@@ -53,14 +53,19 @@ def parse_line_points(text: str, *, is_capacity: bool) -> list[tuple[int, float]
         ms = int(ms_s.strip())
         val_s = val_s.strip()
         lower = val_s.lower()
-        if is_capacity and lower.endswith('mb'):
-            val = float(val_s[:-2]) * (1024.0 * 1024.0) / 1500.0
-        elif is_capacity and lower.endswith('kb'):
-            val = float(val_s[:-2]) * 1024.0 / 1500.0
-        elif is_capacity and lower.endswith('b'):
-            val = float(val_s[:-1]) / 1500.0
-        elif is_capacity and val_s.endswith('m'):
-            val = float(val_s[:-1]) / 12.0
+        if is_capacity:
+            if val_s == '0':
+                val = 0.0
+            elif lower.endswith('gbps'):
+                val = float(val_s[:-4]) * 1000.0 / 12.0
+            elif lower.endswith('mbps'):
+                val = float(val_s[:-4]) / 12.0
+            elif lower.endswith('kbps'):
+                val = float(val_s[:-4]) / 12000.0
+            elif lower.endswith('bps'):
+                val = float(val_s[:-3]) / 12000000.0
+            else:
+                raise ValueError(f'unsupported capacity unit: {val_s!r}')
         else:
             val = float(val_s)
         points.append((ms, val))
@@ -286,7 +291,7 @@ class TraceBenchCase(unittest.TestCase):
         p.write_text(content, encoding='utf-8')
         return LineScenario(line=p)
 
-    def make_workload(self, content: str, name: str = 'work.wk') -> Path:
+    def make_workload(self, content: str, name: str = 'work.csv') -> Path:
         d = self.subdir('wk')
         p = d / name
         p.write_text(content, encoding='utf-8')

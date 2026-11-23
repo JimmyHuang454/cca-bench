@@ -218,7 +218,7 @@ def build_lines_plan(
             continue
         if not wk.replace('_', '').replace('-', '').isalnum():
             raise ValueError(f'invalid workload name: {wk}')
-        wk_path = root / 'datasets' / 'workloads' / f'{wk}.wk'
+        wk_path = root / 'datasets' / 'workloads' / f'{wk}.csv'
         if not wk_path.is_file():
             raise ValueError(f'workload file not found: {wk_path}')
         items = parse_workload(wk_path)
@@ -783,7 +783,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     work_info: dict[str, dict] = {}
     for wk in sorted({u['workload'] for u in units if u['workload'] != 'bulk'}):
-        wk_path = ROOT / 'datasets' / 'workloads' / f'{wk}.wk'
+        wk_path = ROOT / 'datasets' / 'workloads' / f'{wk}.csv'
         count, span_s = load_workload(wk_path)
         work_info[wk] = {'path': str(wk_path), 'count': count, 'span_s': span_s, 'sha256': digest(wk_path)}
 

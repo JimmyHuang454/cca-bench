@@ -79,45 +79,59 @@ bool ParseCapacityToken(const std::string& raw, double& outOpps)
 {
     const std::string vStr = TrimStr(raw);
     if (vStr.empty()) return false;
-    const std::string lower = ToLowerStr(vStr);
-    std::string numStr = vStr;
-    double mult = 1.0;
-    bool hasUnit = false;
-    if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "mb") == 0)
+    if (vStr == "0")
     {
-        numStr = vStr.substr(0, vStr.size() - 2);
-        mult = (1024.0 * 1024.0) / 1500.0;
-        hasUnit = true;
-    }
-    else if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "kb") == 0)
-    {
-        numStr = vStr.substr(0, vStr.size() - 2);
-        mult = 1024.0 / 1500.0;
-        hasUnit = true;
-    }
-    else if (lower.size() > 1 && lower.back() == 'b')
-    {
-        numStr = vStr.substr(0, vStr.size() - 1);
-        mult = 1.0 / 1500.0;
-        hasUnit = true;
-    }
-    else if (vStr.size() > 1 && vStr.back() == 'm')
-    {
-        numStr = vStr.substr(0, vStr.size() - 1);
-        mult = 1.0 / 12.0;
-        hasUnit = true;
-    }
-    if (numStr.empty() || std::isspace(static_cast<unsigned char>(numStr.back()))) return false;
-    if (!hasUnit)
-    {
-        if (numStr.find_first_not_of("0123456789") != std::string::npos) return false;
-        std::istringstream vs(numStr);
-        int64_t intVal = 0;
-        vs >> intVal;
-        if (vs.fail() || !vs.eof() || intVal < 0 || intVal > 1000000) return false;
-        outOpps = static_cast<double>(intVal);
+        outOpps = 0.0;
         return true;
     }
+    const std::string lower = ToLowerStr(vStr);
+    std::string numStr;
+    double mult = 0.0;
+    if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, "gbps") == 0)
+    {
+        numStr = vStr.substr(0, vStr.size() - 4);
+        mult = 1000.0 / 12.0;
+    }
+    else if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, "mbps") == 0)
+    {
+        numStr = vStr.substr(0, vStr.size() - 4);
+        mult = 1.0 / 12.0;
+    }
+    else if (lower.size() > 4 && lower.compare(lower.size() - 4, 4, "kbps") == 0)
+    {
+        numStr = vStr.substr(0, vStr.size() - 4);
+        mult = 1.0 / 12000.0;
+    }
+    else if (lower.size() > 3 && lower.compare(lower.size() - 3, 3, "bps") == 0)
+    {
+        numStr = vStr.substr(0, vStr.size() - 3);
+        mult = 1.0 / 12000000.0;
+    }
+    else
+    {
+        return false;
+    }
+    if (numStr.empty() || std::isspace(static_cast<unsigned char>(numStr.front())) ||
+        std::isspace(static_cast<unsigned char>(numStr.back())))
+        return false;
+    bool hasDigit = false;
+    int dotCount = 0;
+    for (char ch : numStr)
+    {
+        if (ch >= '0' && ch <= '9')
+        {
+            hasDigit = true;
+        }
+        else if (ch == '.')
+        {
+            if (++dotCount > 1) return false;
+        }
+        else
+        {
+            return false;
+        }
+    }
+    if (!hasDigit) return false;
     std::istringstream vs(numStr);
     double val = 0.0;
     vs >> val;

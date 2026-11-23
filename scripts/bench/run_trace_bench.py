@@ -35,16 +35,15 @@ ROOT = Path(__file__).resolve().parents[2]
 
 # Select a dataset directory or one of its scenario directories.
 # Edit these settings, then run this script or `make bench`.
-LINES_DIR = ROOT / 'datasets/lines/lumos'
-# LINES_DIR = ROOT / 'datasets/lines/leocc'
-WORKLOADS = ['bulk', 'websearch', 'pageload', 'app', 'http2_mux_rr', 'http2_mux_srpt']
+LINES_DIR = ROOT / 'datasets/lines/pantheon'
+WORKLOADS = ['bulk', 'websearch', 'pageload', 'app', 'http2_mux_rr', 'http2_mux_srpt', 'wiki_2019u']
 CCS = ['westwood', 'illinois', 'veno', 'yeah', 'hybla']
-CCS = ['copa_nc', 'copa', 'bbr', 'cubic','copa_auto_v3','copa_auto_v3_nc']
+CCS = ['copa_nc', 'copa', 'bbr', 'cubic','copa_auto_v3','copa_auto_v3_nc','westwood', 'illinois', 'veno', 'yeah', 'hybla']
 REPEATS = 1
 TAIL_PERCENTILE = 98  # Tail percentile for qdelay, Norm Power, RCT, FCT Slowdown & rankings (e.g. 50, 90, 95, 99).
 RESUME = True  # False: rerun all combinations and replace their results.
 MAX_WORKERS = os.cpu_count() or 1  # Maximum concurrent ns-3 processes; 1 runs serially.
-WORKLOAD_MAX_SIMULATION_S = 1800.0  # Maximum simulated time from the start, not wall time.
+WORKLOAD_MAX_SIMULATION_S = 12800.0  # Maximum simulated time from the start, not wall time.
 # 场景未提供 up.delay.txt / down.delay.txt 时使用的默认单向基础延迟 (ms)；总基础 RTT = 2 * 该值。
 # 如跑无延迟文件的 5G/Lumos 场景，可直接在此调整（例如 10.0 ms -> 20 ms RTT，20.0 ms -> 40 ms RTT）。
 DEFAULT_ONE_WAY_DELAY_MS = 10.0
@@ -343,7 +342,7 @@ def main() -> int:
                 continue
             if not wk.replace('_', '').replace('-', '').isalnum():
                 raise ValueError(f'invalid workload name: {wk}')
-            path = ROOT / 'datasets/workloads' / f'{wk}.wk'
+            path = ROOT / 'datasets/workloads' / f'{wk}.csv'
             count, span = workload(path)
             work[wk] = {'path': path, 'count': count, 'span_s': span, 'sha256': digest(path)}
         output = result_directory(LINES_DIR)

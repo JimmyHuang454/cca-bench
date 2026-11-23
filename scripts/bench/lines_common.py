@@ -7,15 +7,21 @@ import hashlib
 import io
 import math
 import os
+import re
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ONE_WAY_DELAY_MS = 10.0
-LINES_DATASETS = ('basic', 'leocc', 'cellular-traces-2018', 'lumos')
+LINES_DATASETS = (
+    'basic', 'leocc', 'cellular-traces-2018', 'cellular-traces-nyc',
+    'mahimahi', 'lumos', 'pantheon',
+    'opennetlab-mmwave-5g', 'opennetlab-fcc-wired', 'opennetlab-norway-3g',
+)
 CSV_ALLOWED_COLUMNS = frozenset({
     'time', 'cap', 'up_cap', 'down_cap', 'delay', 'up_delay', 'down_delay', 'comment',
 })
+WORKLOAD_ALLOWED_COLUMNS = frozenset({'time', 'size', 'comment'})
 
 
 def parse_time_ms(raw_value: str) -> int:
@@ -92,37 +98,34 @@ def parse_delay_ms(raw_value: str) -> float:
 def parse_capacity_value(raw_value: str) -> float:
     """Parse a lines capacity token into 1500-byte opportunities per millisecond.
 
-    Supported formats (no whitespace allowed between number and unit):
-      - unsuffixed integer : 1500-byte packet opportunities / ms (default)
-      - ``<num>m``         : Mbps rate (``num / 12.0`` opportunities / ms, lowercase m only)
-      - ``<num>b``         : bytes / ms (``num / 1500.0`` opportunities / ms, case-insensitive)
-      - ``<num>kb``        : KiB (1024 B) / ms (case-insensitive)
-      - ``<num>mb``        : MiB (1024^2 B) / ms (case-insensitive)
+    Supported formats (case-insensitive, no whitespace allowed between number and unit):
+      - ``0``          : zero capacity (outage / end-of-trace sentinel)
+      - ``<num>bps``   : bits / s (``num / 12_000_000.0`` opportunities / ms)
+      - ``<num>kbps``  : kilobits / s (``num / 12_000.0`` opportunities / ms)
+      - ``<num>mbps``  : megabits / s (``num / 12.0`` opportunities / ms)
+      - ``<num>gbps``  : gigabits / s (``num * 1000.0 / 12.0`` opportunities / ms)
     """
     s = raw_value.strip()
     if not s:
         raise ValueError('empty capacity value')
+    if s == '0':
+        return 0.0
     lower = s.lower()
-    if lower.endswith('mb'):
-        num_s, mult = s[:-2], (1024.0 * 1024.0) / 1500.0
-    elif lower.endswith('kb'):
-        num_s, mult = s[:-2], 1024.0 / 1500.0
-    elif lower.endswith('b'):
-        num_s, mult = s[:-1], 1.0 / 1500.0
-    elif s.endswith('m'):
-        num_s, mult = s[:-1], 1.0 / 12.0
+    if lower.endswith('gbps'):
+        num_s, mult = s[:-4], 1000.0 / 12.0
+    elif lower.endswith('mbps'):
+        num_s, mult = s[:-4], 1.0 / 12.0
+    elif lower.endswith('kbps'):
+        num_s, mult = s[:-4], 1.0 / 12_000.0
+    elif lower.endswith('bps'):
+        num_s, mult = s[:-3], 1.0 / 12_000_000.0
     else:
-        num_s, mult = s, None
+        raise ValueError(
+            f'invalid capacity value {raw_value!r}: expected 0 or <num>(bps|kbps|mbps|gbps)'
+        )
 
-    if not num_s or num_s != num_s.strip():
+    if not num_s or num_s != num_s.strip() or not re.fullmatch(r'(?:\d+(?:\.\d*)?|\.\d+)', num_s):
         raise ValueError(f'invalid capacity value: {raw_value!r}')
-    if mult is None:
-        if not num_s.isdigit():
-            raise ValueError(f'invalid packet-opportunity capacity: {raw_value!r}')
-        val = int(num_s)
-        if val > 1_000_000:
-            raise ValueError(f'invalid packet-opportunity capacity: {raw_value!r}')
-        return float(val)
     val = float(num_s)
     if not math.isfinite(val) or val < 0:
         raise ValueError(f'invalid capacity value: {raw_value!r}')
@@ -198,7 +201,7 @@ def parse_line_csv(path: Path) -> dict:
 
     Supported columns (case-insensitive header, arbitrary column order):
       - ``time`` (required): strictly increasing time (default ms, or ``ms``/``s`` suffix)
-      - ``cap``, ``up_cap``, ``down_cap``: per-ms capacity (default int pkts/ms, ``b``/``kb``/``mb``, or ``m`` Mbps);
+      - ``cap``, ``up_cap``, ``down_cap``: link bitrate capacity (``0`` or ``bps``/``kbps``/``mbps``/``gbps``, case-insensitive);
         direction-specific columns override ``cap`` on each row (``up_cap > cap``, ``down_cap > cap``).
       - ``delay``, ``up_delay``, ``down_delay`` (optional): one-way base delay (default ms, or ``us``/``ms``/``s`` suffix);
         direction-specific columns override ``delay`` on each row (``up_delay > delay``, ``down_delay > delay``).
@@ -708,50 +711,92 @@ def discover_dataset(
 
 
 def parse_workload(path: Path) -> list[tuple[float, int]]:
-    """Parse a workload file into [(t_ms, size_bytes), ...] with non-decreasing t_ms.
+    """Parse a standard RFC 4180 CSV workload file into [(t_ms, size_bytes), ...].
 
-    Supports both:
-      - Standard CSV format: ``<t_ms>,<size>`` (absolute non-decreasing timestamp in ms;
-        size supports bytes or b/k/kb/m/mb suffixes).
-      - Legacy Mortise format: ``<gap_ms> <size_bytes>`` (whitespace-separated relative gap).
+    Supported columns (case-insensitive header, arbitrary column order):
+      - ``time`` (required): non-negative monotonically non-decreasing arrival time
+        (default ms, or ``us``/``ms``/``s`` suffix, no space before unit).
+      - ``size`` (required): positive payload size in ``1 .. 100_000_000`` bytes
+        (default int bytes, or ``b``/``k``/``kb``/``m``/``mb`` suffix, binary 1024).
+      - ``comment`` (optional): free-text row annotation (ignored during simulation).
     """
+    cols: dict[str, int] | None = None
+    ncols = 0
     items: list[tuple[float, int]] = []
-    mode: str | None = None
-    elapsed_ms = 0.0
-    for number, raw in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith('#'):
-            continue
-        is_csv = ',' in line
-        if mode is None:
-            mode = 'csv' if is_csv else 'legacy'
-        elif (mode == 'csv') != is_csv:
-            raise ValueError(f'{path}:{number}: mixed CSV and legacy workload syntax')
-        try:
-            if mode == 'csv':
-                parts = line.split(',')
-                if len(parts) != 2:
-                    raise ValueError
-                t_ms = float(parts[0].strip())
-                size = parse_size_bytes(parts[1])
-                if not math.isfinite(t_ms) or t_ms < 0:
-                    raise ValueError
+    with path.open(encoding='utf-8-sig', newline='') as stream:
+        for line_no, raw in enumerate(stream, 1):
+            stripped = raw.strip()
+            if not stripped or stripped.startswith('#'):
+                continue
+            try:
+                fields = next(csv.reader([raw], strict=True))
+            except csv.Error:
+                raise ValueError(f'{path}:{line_no}: malformed CSV row') from None
+            if cols is None:
+                cols = {}
+                for idx, h in enumerate(fields):
+                    name = h.strip().lower()
+                    if not name or name not in WORKLOAD_ALLOWED_COLUMNS or name in cols:
+                        raise ValueError(f'{path}:{line_no}: invalid or duplicate workload column {h!r}')
+                    cols[name] = idx
+                if 'time' not in cols or 'size' not in cols:
+                    raise ValueError(f'{path}:{line_no}: workload CSV requires time and size columns')
+                ncols = len(cols)
+                t_idx = cols['time']
+                s_idx = cols['size']
+                continue
+            if len(fields) > ncols:
+                raise ValueError(f'{path}:{line_no}: too many CSV columns')
+            if len(fields) < ncols:
+                fields.extend([''] * (ncols - len(fields)))
+            try:
+                t_ms = parse_delay_ms(fields[t_idx])
+                size = parse_size_bytes(fields[s_idx])
                 if items and t_ms < items[-1][0]:
-                    raise ValueError
-                items.append((t_ms, size))
-            else:
-                gap_raw, size_raw = line.split()
-                gap_ms = float(gap_raw)
-                size = parse_size_bytes(size_raw)
-                if not math.isfinite(gap_ms) or gap_ms < 0:
-                    raise ValueError
-                elapsed_ms += gap_ms
-                items.append((elapsed_ms, size))
-        except ValueError:
-            raise ValueError(f'{path}:{number}: invalid workload entry') from None
-    if not items:
+                    raise ValueError('time must be non-decreasing')
+            except ValueError:
+                raise ValueError(f'{path}:{line_no}: invalid workload entry') from None
+            items.append((t_ms, size))
+    if cols is None or not items:
         raise ValueError(f'{path}: empty workload')
     return items
+
+
+def format_size_bytes(size_bytes: int) -> str:
+    """Losslessly format exact byte sizes with binary mb/kb suffixes when divisible."""
+    if size_bytes % (1024 * 1024) == 0:
+        return f'{size_bytes // (1024 * 1024)}mb'
+    if size_bytes % 1024 == 0:
+        return f'{size_bytes // 1024}kb'
+    return str(size_bytes)
+
+
+def write_workload_csv(
+    path: Path,
+    items: list[tuple[float, int]],
+    *,
+    comments: dict[int, str] | None = None,
+    include_comment_col: bool = False,
+) -> None:
+    """Write a canonical RFC 4180 CSV workload file (time,size[,comment])."""
+    if not items:
+        raise ValueError('cannot write empty workload')
+    cmt_map = {idx: c for idx, c in (comments or {}).items() if c}
+    has_comment = include_comment_col or bool(cmt_map)
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator='\n')
+    writer.writerow(['time', 'size', 'comment'] if has_comment else ['time', 'size'])
+    prev_t = -1.0
+    for idx, (t_ms, size) in enumerate(items):
+        if t_ms < 0 or (prev_t >= 0 and t_ms < prev_t):
+            raise ValueError(f'workload timestamps must be non-decreasing at index {idx}')
+        t_s = str(int(round(t_ms))) if abs(t_ms - round(t_ms)) < 1e-9 else f'{t_ms:g}'
+        row = [t_s, format_size_bytes(size)]
+        if has_comment:
+            row.append(cmt_map.get(idx, ''))
+        writer.writerow(row)
+        prev_t = t_ms
+    atomic_write(path, buf.getvalue())
 
 
 def workload(path: Path) -> tuple[int, float]:
@@ -760,7 +805,7 @@ def workload(path: Path) -> tuple[int, float]:
 
 
 def write_mortise_workload(src: Path, dst: Path) -> None:
-    """Materialize any .wk file into legacy Mortise ``<gap_ms>\\t<size_bytes>`` format."""
+    """Materialize a CSV workload into legacy Mortise ``<gap_ms>\\t<size_bytes>`` for upstream client."""
     items = parse_workload(src)
     prev_t = 0.0
     lines: list[str] = []
