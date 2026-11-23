@@ -1,0 +1,3 @@
+time,up_cap,down_cap,delay,comment
+0,80m,120m,5,稳定无线接入条件下的基线。
+120000,0,0,,end

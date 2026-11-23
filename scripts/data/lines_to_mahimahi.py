@@ -29,7 +29,7 @@ from lines_common import (  # noqa: E402
     DEFAULT_ONE_WAY_DELAY_MS,
     discover,
     integrate_piecewise,
-    parse_line,
+    load_scenario_lines,
 )
 
 DELAY_INTERVAL_MS = 10
@@ -160,27 +160,15 @@ def convert_scenario(
     delay_interval_ms: int = DELAY_INTERVAL_MS,
 ) -> MahimahiScenario:
     """Convert a discovered lines scenario dict into Mahimahi replay files under out_dir."""
-    files = scenario['files']
-    up_end, up_pts = parse_line(files['up'], delay=False)
-    down_end, down_pts = parse_line(files['down'], delay=False)
+    loaded = load_scenario_lines(scenario, default_one_way_delay_ms=default_one_way_delay_ms)
+    period_ms = loaded['end_ms']
+    up_pts = loaded['up']
+    down_pts = loaded['down']
+    up_delay_pts = loaded['up_delay']
+    down_delay_pts = loaded['down_delay']
+    has_up_delay = loaded['has_up_delay']
+    has_down_delay = loaded['has_down_delay']
 
-    ends = [up_end, down_end]
-    has_up_delay = 'up_delay' in files
-    has_down_delay = 'down_delay' in files
-
-    if has_up_delay:
-        ud_end, up_delay_pts = parse_line(files['up_delay'], delay=True)
-        ends.append(ud_end)
-    else:
-        up_delay_pts = [(0, float(default_one_way_delay_ms))]
-
-    if has_down_delay:
-        dd_end, down_delay_pts = parse_line(files['down_delay'], delay=True)
-        ends.append(dd_end)
-    else:
-        down_delay_pts = [(0, float(default_one_way_delay_ms))]
-
-    period_ms = min(ends)
     duration_s = period_ms / 1000.0
     bulk_duration_s = min(duration_s, max_bulk_s) if max_bulk_s and max_bulk_s > 0 else duration_s
     bulk_ms = max(1, int(round(bulk_duration_s * 1000.0)))

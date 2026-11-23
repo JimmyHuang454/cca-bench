@@ -1,0 +1,5 @@
+time,up_cap,down_cap,up_delay,down_delay,comment
+0,50m,100m,10,10,上行单向基础延迟升高 5 秒后恢复，观察短时基础 RTT 峰值的影响。
+40000,,,100,,
+45000,,,10,,
+120000,0,0,,,end

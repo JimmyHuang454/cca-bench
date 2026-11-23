@@ -36,26 +36,6 @@ def compress_points(points: list[tuple[int, str]]) -> list[tuple[int, str]]:
     return out
 
 
-def write_cap_file(path: Path, points: list[tuple[int, str]], end_ms: int = DURATION_MS) -> None:
-    pts = [(t, v) for t, v in points if 0 <= t < end_ms]
-    if not pts or pts[0][0] != 0:
-        raise ValueError(f'{path}: must start at t=0')
-    pts = compress_points(pts)
-    lines = [f'{t},{v}' for t, v in pts]
-    lines.append(f'{end_ms},0')
-    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-
-
-def write_delay_file(path: Path, points: list[tuple[int, float]], end_ms: int = DURATION_MS) -> None:
-    pts = [(t, f'{v:.2f}'.rstrip('0').rstrip('.')) for t, v in points if 0 <= t < end_ms]
-    if not pts or pts[0][0] != 0:
-        raise ValueError(f'{path}: must start at t=0')
-    pts = compress_points(pts)
-    lines = [f'{t},{v}' for t, v in pts]
-    lines.append(f'# end_ms={end_ms}')
-    path.write_text('\n'.join(lines) + '\n', encoding='utf-8')
-
-
 def write_scene(
     name: str,
     summary: str,
@@ -68,16 +48,24 @@ def write_scene(
 ) -> None:
     d = OUT_DIR / name
     d.mkdir(parents=True, exist_ok=True)
-    write_cap_file(d / 'up.txt', up_pts, end_ms)
-    write_cap_file(d / 'down.txt', down_pts, end_ms)
-    write_delay_file(d / 'up.delay.txt', up_delay, end_ms)
-    write_delay_file(d / 'down.delay.txt', down_delay, end_ms)
+    ud_tokens = [(t, f'{v:.2f}'.rstrip('0').rstrip('.')) for t, v in up_delay]
+    dd_tokens = [(t, f'{v:.2f}'.rstrip('0').rstrip('.')) for t, v in down_delay]
+    lines_common.write_line_csv(
+        d / 'line.csv',
+        up_tokens=up_pts,
+        down_tokens=down_pts,
+        end_ms=end_ms,
+        up_delay_tokens=ud_tokens,
+        down_delay_tokens=dd_tokens,
+        comments={0: summary, end_ms: 'end'},
+        include_comment_col=True,
+    )
     readme = (
         f'# {name}\n\n'
         f'{summary}\n\n'
         f'{details}\n\n'
-        f'场景持续 {end_ms // 1000} 秒，区间左闭右开。TCP 数据走上行（`up.txt`），ACK 走下行（`down.txt`）；'
-        f'基础 RTT 为上下行单向基础延迟之和。容量和延迟具体时间点以本目录中的 lines 文件为准。\n'
+        f'场景持续 {end_ms // 1000} 秒，区间左闭右开。数据保存在 `line.csv` 中：TCP 数据走上行（`up_cap`），ACK 走下行（`down_cap`）；'
+        f'基础 RTT 为上下行单向基础延迟之和。\n'
     )
     (d / 'README.md').write_text(readme, encoding='utf-8')
 
@@ -441,7 +429,7 @@ def write_top_readme() -> None:
 | `dynamic_jitter_regime_switch` | 平稳有线 42M → 抖动无线 42M → 平稳限速 12M | $\\delta$ 双向自适应（$0.5 \\to 0.03 \\to 0.5$） |
 | `mmwave_intermittent_burst` | 5G 毫米波 44 Mbps 帧突发 + 每 12 秒 600 ms 短遮挡跌至 6M | 高速突发 + 短暂遮挡快速泄洪 |
 
-所有场景均为 60 秒，格式见 [TRACE-FORMAT.md](../TRACE-FORMAT.md)，由 [gen_special_lines.py](../../../scripts/data/gen_special_lines.py) 确定性生成（固定随机种子，可完全复现）。
+所有场景均为 60 秒，格式见 [FORMAT.md](../FORMAT.md)，由 [gen_special_lines.py](../../../scripts/data/gen_special_lines.py) 确定性生成（固定随机种子，可完全复现）。
 """
     (OUT_DIR / 'README.md').write_text(content, encoding='utf-8')
 

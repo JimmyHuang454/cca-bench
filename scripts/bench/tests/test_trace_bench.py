@@ -24,63 +24,144 @@ class TraceBenchTests(unittest.TestCase):
     def test_mixed_packet_and_mbps_capacity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            up, down = root / 'up.txt', root / 'down.txt'
-            up.write_text('0,2\n1000,40m\n2000,50.11m\n3000,0\n')
-            down.write_text('0,10\n3000,0\n')
-            end, points = bench.parse_line(up)
-            self.assertEqual(end, 3000)
-            self.assertEqual(points[0][1], 2)
-            self.assertAlmostEqual(points[2][1] * 12, 50.11)
-            for bad in ('0,2.5\n1000,0\n', '0,NaNm\n1000,0\n', '0,40mbps\n1000,0\n'):
-                up.write_text(bad)
+            scene = root / 'mixed.csv'
+            scene.write_text('time,up_cap,down_cap\n0,2,10\n1s,40m,\n2s,50.11m,\n3s,0,0\n')
+            parsed = bench.parse_line_csv(scene)
+            self.assertEqual(parsed['end_ms'], 3000)
+            self.assertEqual(parsed['up'][0][1], 2)
+            self.assertAlmostEqual(parsed['up'][2][1] * 12, 50.11)
+            for bad in (
+                'time,cap\n0,2.5\n1s,0\n',
+                'time,cap\n0,NaNm\n1s,0\n',
+                'time,cap\n0,40mbps\n1s,0\n',
+            ):
+                scene.write_text(bad)
                 with self.assertRaises(ValueError):
-                    bench.parse_line(up)
-            up.write_text('0,2\n1000,40m\n2000,50.11m\n3000,0\n')
+                    bench.parse_line_csv(scene)
+            scene.write_text('time,up_cap,down_cap\n0,2,10\n1s,40m,\n2s,50.11m,\n3s,0,0\n')
             if not bench.BINARY.is_file():
                 self.skipTest('build tcp-trace-bench first')
-            result = subprocess.run([str(bench.BINARY), '--profile=lines', f'--upTrace={up}',
-                                     f'--downTrace={down}', '--stopTime=3', '--ccs=cubic',
+            result = subprocess.run([str(bench.BINARY), '--profile=lines', f'--lineFile={scene}',
+                                     '--stopTime=3', '--ccs=cubic',
                                      '--segmentSize=1448', '--evalJson=1'],
                                     text=True, capture_output=True, check=True)
             data = json.loads(result.stdout)
             self.assertAlmostEqual(data['capacity_mbps'], (24 + 40 + 50.11) / 3, places=5)
             self.assertGreater(data['throughput_mbps'], 10)
 
-    def test_discover_fixed_names_and_legacy_scenarios(self):
+    def test_byte_unit_capacity_b_kb_mb(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene = root / 'units.csv'
+            csv_text = (
+                'time,up_cap,down_cap\n'
+                '0,2,100kb\n'
+                '1s,3000b,\n'
+                '2s,64kb,\n'
+                '3s,0.1MB,\n'
+                '4s,40m,\n'
+                '5s,0kb,0\n'
+            )
+            scene.write_text(csv_text)
+            parsed = bench.parse_line_csv(scene)
+            self.assertEqual(parsed['end_ms'], 5000)
+            # 0->2 pkts, 1s->3000b (=2 pkts, deduped), 2s->64kb, 3s->0.1MB, 4s->40m, 5s->0
+            self.assertAlmostEqual(parsed['up'][0][1], 2.0, places=9)
+            self.assertAlmostEqual(parsed['up'][1][1], 64 * 1024 / 1500.0, places=9)
+            self.assertAlmostEqual(parsed['up'][2][1], 0.1 * 1024 * 1024 / 1500.0, places=9)
+            self.assertAlmostEqual(parsed['up'][3][1], 40.0 / 12.0, places=9)
+            self.assertEqual(parsed['up'][4][1], 0.0)
+
+            for bad in (
+                'time,cap\n0,2.5\n1s,0\n',
+                'time,cap\n0,2.0\n1s,0\n',
+                'time,cap\n0,NaNm\n1s,0\n',
+                'time,cap\n0,40mbps\n1s,0\n',
+                'time,cap\n0,40k\n1s,0\n',
+                'time,cap\n0,40M\n1s,0\n',
+                'time,cap\n0,10 kb\n1s,0\n',
+                'time,cap\n0,-1kb\n1s,0\n',
+            ):
+                scene.write_text(bad)
+                with self.assertRaises(ValueError, msg=f'expected ValueError for {bad!r}'):
+                    bench.parse_line_csv(scene)
+
+            scene.write_text(csv_text)
+            if not bench.BINARY.is_file():
+                self.skipTest('build tcp-trace-bench first')
+            result = subprocess.run([str(bench.BINARY), '--profile=lines', f'--lineFile={scene}',
+                                     '--stopTime=5', '--ccs=cubic',
+                                     '--segmentSize=1448', '--evalJson=1'],
+                                    text=True, capture_output=True, check=True)
+            data = json.loads(result.stdout)
+            expected_mbps = (
+                24.0
+                + 24.0
+                + (64 * 1024 * 8 / 1000.0)
+                + (0.1 * 1024 * 1024 * 8 / 1000.0)
+                + 40.0
+            ) / 5.0
+            self.assertAlmostEqual(data['capacity_mbps'], expected_mbps, places=4)
+            self.assertGreater(data['throughput_mbps'], 20)
+
+    def test_default_delay_without_delay_columns_uses_python_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scene = root / 'no_delay_5g.csv'
+            # 100 kb/ms = 819.2 Mbps; no delay column -> uses DEFAULT_ONE_WAY_DELAY_MS
+            scene.write_text('time,cap\n0,100kb\n2s,0\n')
+            discovered = bench.discover(scene)[0]
+            self.assertEqual(set(discovered['files']), {'line'})
+            self.assertFalse(discovered['has_up_delay'])
+            self.assertFalse(discovered['has_down_delay'])
+            with patch.multiple(bench, QUEUE_BYTES='auto', DEFAULT_ONE_WAY_DELAY_MS=25.0):
+                q25 = bench.scenario_queue_bytes(discovered)
+            with patch.multiple(bench, QUEUE_BYTES='auto', DEFAULT_ONE_WAY_DELAY_MS=50.0):
+                q50 = bench.scenario_queue_bytes(discovered)
+            self.assertGreater(q50, q25)
+            if not bench.BINARY.is_file():
+                self.skipTest('build tcp-trace-bench first')
+            result = subprocess.run([
+                str(bench.BINARY), '--profile=lines', f'--lineFile={scene}',
+                '--defaultDelayMs=25.0', '--stopTime=1', '--ccs=cubic',
+                '--segmentSize=1448', '--evalJson=1',
+            ], text=True, capture_output=True, check=True)
+            data = json.loads(result.stdout)
+            self.assertAlmostEqual(data['base_rtt_ms'], 50.0, places=3)
+
+    def test_discover_csv_directory_and_flat_scenarios(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             scene = root / 'wired_fixed'
             scene.mkdir()
-            for direction in ('up', 'down'):
-                (scene / f'{direction}.txt').write_text('0,1\n100,0\n')
-                (scene / f'{direction}.delay.txt').write_text('0,5\n# end_ms=100\n')
+            (scene / 'line.csv').write_text('time,cap,delay\n0,1,5\n100,0,\n')
             scenario = bench.discover(scene)[0]
             self.assertEqual(scenario['name'], 'wired_fixed')
-            self.assertEqual(set(scenario['files']), {'up', 'down', 'up_delay', 'down_delay'})
+            self.assertEqual(set(scenario['files']), {'line'})
+            self.assertTrue(scenario['has_up_delay'])
+            self.assertTrue(scenario['has_down_delay'])
             self.assertEqual(bench.discover(root), [scenario])
-            (scene / 'down.txt').unlink()
-            with self.assertRaisesRegex(ValueError, 'missing up/down'):
+            (scene / 'line.csv').unlink()
+            with self.assertRaisesRegex(ValueError, 'no CSV line scenarios'):
                 bench.discover(root)
 
     def test_discover_dataset_and_individual_scenario(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             dataset = root / 'datasets/lines/example'
-            for name in ('a', 'b'):
-                scene = dataset / name
-                scene.mkdir(parents=True)
-                for direction in ('up', 'down'):
-                    (scene / f'{name}.{direction}.txt').write_text('0,1\n10,0\n')
-                (scene / f'{name}.up.delay.txt').write_text('0,20\n# end_ms=10\n')
+            dataset.mkdir(parents=True)
+            (dataset / 'a.csv').write_text('time,cap,up_delay\n0,1,20\n10,0,\n')
+            scene_b = dataset / 'b'
+            scene_b.mkdir()
+            (scene_b / 'line.csv').write_text('time,cap\n0,1\n10,0\n')
             all_scenes = bench.discover(dataset)
             self.assertEqual([s['name'] for s in all_scenes], ['a', 'b'])
-            self.assertEqual(bench.discover(dataset / 'a'), [all_scenes[0]])
+            self.assertEqual(bench.discover(dataset / 'a.csv'), [all_scenes[0]])
+            self.assertEqual(bench.discover(dataset / 'b'), [all_scenes[1]])
             with patch.multiple(bench, ROOT=root, RESULTS_DIR=root / 'results'):
                 self.assertEqual(bench.result_directory(dataset), root / 'results/example')
-                self.assertEqual(bench.result_directory(dataset / 'a'), root / 'results/example/a')
-            (dataset / 'b/b.down.txt').unlink()
-            with self.assertRaisesRegex(ValueError, 'missing up/down'):
-                bench.discover(dataset)
+                self.assertEqual(bench.result_directory(dataset / 'a.csv'), root / 'results/example/a')
+                self.assertEqual(bench.result_directory(dataset / 'b'), root / 'results/example/b')
 
     def test_completed_task_output_includes_metrics_and_failures(self):
         out, err = io.StringIO(), io.StringIO()
@@ -292,11 +373,10 @@ class TraceBenchTests(unittest.TestCase):
             root = Path(tmp)
             lines = root / 'lines/sample'
             lines.mkdir(parents=True)
-            for direction in ('up', 'down'):
-                (lines / f'{direction}.txt').write_text('0,5\n1000,0\n')
+            (lines / 'line.csv').write_text('time,cap\n0,5\n1s,0\n')
             workloads = root / 'datasets/workloads'
             workloads.mkdir(parents=True)
-            (workloads / 'long.wk').write_text('0 1000\n1500 2000\n')
+            (workloads / 'long.wk').write_text('0,1000\n1500,2000\n')
             with patch.multiple(bench, ROOT=root, LINES_DIR=lines, RESULTS_DIR=root / 'results',
                                 WORKLOADS=['bulk', 'long'], CCS=['cubic'], REPEATS=1,
                                 WORKLOAD_MAX_SIMULATION_S=.5, RESUME=True), \
@@ -316,11 +396,10 @@ class TraceBenchTests(unittest.TestCase):
             self.skipTest('build tcp-trace-bench first')
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            up, down = root / 'up', root / 'down'
-            up.write_text('0,5\n1000,0\n')
-            down.write_text('0,5\n1000,0\n')
+            scene = root / 'line.csv'
+            scene.write_text('time,cap\n0,5\n1s,0\n')
             result = subprocess.run(
-                [str(binary), '--profile=lines', f'--upTrace={up}', f'--downTrace={down}',
+                [str(binary), '--profile=lines', f'--lineFile={scene}',
                  '--stopTime=1', '--ccs=cubic', '--evalJson=1'],
                 text=True, capture_output=True, check=True,
             )
@@ -341,26 +420,25 @@ class TraceBenchTests(unittest.TestCase):
             self.skipTest('build tcp-trace-bench first')
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            up, down = root / 'up', root / 'down'
-            up.write_text('0,5\n500,0\n')
-            down.write_text('0,0\n500,0\n')
-            result = subprocess.run([str(binary), '--profile=lines', f'--upTrace={up}',
-                                     f'--downTrace={down}', '--stopTime=0.5', '--ccs=cubic', '--evalJson=1'],
+            scene = root / 'line.csv'
+            scene.write_text('time,up_cap,down_cap\n0,5,0\n500ms,0,0\n')
+            result = subprocess.run([str(binary), '--profile=lines', f'--lineFile={scene}',
+                                     '--stopTime=0.5', '--ccs=cubic', '--evalJson=1'],
                                     text=True, capture_output=True, check=True)
             data = json.loads(next(line for line in result.stdout.splitlines() if line.startswith('{')))
             self.assertEqual(data['throughput_mbps'], 0)
 
-    def test_discovery_and_bad_delay(self):
+    def test_discovery_rejects_legacy_txt_and_bad_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp)
             (p / 'a.up.txt').write_text('0,1\n1000,0\n')
-            with self.assertRaisesRegex(ValueError, 'missing up/down'):
-                bench.discover(p)
             (p / 'a.down.txt').write_text('0,2\n900,0\n')
-            (p / 'a.up.delay.txt').write_text('0,20\n# end_ms=800\n')
+            with self.assertRaisesRegex(ValueError, 'no CSV line scenarios'):
+                bench.discover(p)
+            (p / 'a.csv').write_text('time,cap,up_delay\n0,1,20\n800ms,0,\n')
             self.assertEqual(bench.discover(p)[0]['duration_s'], 0.8)
-            (p / 'a.up.delay.txt').write_text('0,20\n')
-            with self.assertRaisesRegex(ValueError, 'end_ms'):
+            (p / 'a.csv').write_text('time,cap,up_delay\n0,1,\n400ms,1,20\n800ms,0,\n')
+            with self.assertRaises(ValueError):
                 bench.discover(p)
 
     def test_end_to_end(self):
@@ -371,13 +449,10 @@ class TraceBenchTests(unittest.TestCase):
             root = Path(tmp)
             lines = root / 'lines' / 'sample'
             lines.mkdir(parents=True)
-            (lines / 'a.up.txt').write_text('0,5\n1000,0\n')
-            (lines / 'a.down.txt').write_text('0,5\n1000,0\n')
-            (lines / 'a.up.delay.txt').write_text('0,5\n# end_ms=1000\n')
-            (lines / 'a.down.delay.txt').write_text('0,8\n# end_ms=1000\n')
+            (lines / 'a.csv').write_text('time,cap,up_delay,down_delay\n0,5,5,8\n1s,0,,\n')
             work = root / 'datasets/workloads'
             work.mkdir(parents=True)
-            (work / 'tiny.wk').write_text('0 1000\n10 2000\n')
+            (work / 'tiny.wk').write_text('0,1000\n10,2000\n')
             with patch.multiple(bench, ROOT=root, LINES_DIR=lines, RESULTS_DIR=root / 'results',
                                 BINARY=binary, CCS=['cubic'], WORKLOADS=['bulk', 'tiny'], REPEATS=1):
                 self.assertEqual(bench.main(), 0)
@@ -455,13 +530,10 @@ class TraceBenchTests(unittest.TestCase):
             root = Path(tmp)
             lines = root / 'lines' / 'cycle'
             lines.mkdir(parents=True)
-            (lines / 'a.up.txt').write_text('0,5\n1000,0\n')
-            (lines / 'a.down.txt').write_text('0,5\n1000,0\n')
-            (lines / 'a.up.delay.txt').write_text('0,5\n# end_ms=1000\n')
-            (lines / 'a.down.delay.txt').write_text('0,8\n# end_ms=1000\n')
+            (lines / 'a.csv').write_text('time,cap,up_delay,down_delay\n0,5,5,8\n1s,0,,\n')
             work = root / 'datasets/workloads'
             work.mkdir(parents=True)
-            (work / 'long.wk').write_text('0 1000\n1500 2000\n')
+            (work / 'long.wk').write_text('0,1000\n1500,2000\n')
             with patch.multiple(bench, ROOT=root, LINES_DIR=lines, RESULTS_DIR=root / 'results',
                                 BINARY=binary, CCS=['cubic'], WORKLOADS=['long'], REPEATS=1,
                                 WORKLOAD_MAX_SIMULATION_S=3.5):
@@ -480,9 +552,8 @@ class TraceBenchTests(unittest.TestCase):
             root = Path(tmp)
             lines = root / 'lines' / 'sample'
             lines.mkdir(parents=True)
-            up = lines / 'a.up.txt'
-            up.write_text('0,5\n1000,0\n')
-            (lines / 'a.down.txt').write_text('0,5\n1000,0\n')
+            scene = lines / 'a.csv'
+            scene.write_text('time,cap\n0,5\n1s,0\n')
             binary = root / 'binary'
             binary.write_text('binary')
             result = (0, '{"throughput_mbps": 1}\n', '', '')
@@ -498,7 +569,7 @@ class TraceBenchTests(unittest.TestCase):
                 (out / 'runs/a__bulk__cubic__r2.json').unlink()
                 self.assertEqual(bench.main(), 0)
                 self.assertEqual(run.call_count, 3)
-                up.write_text('0,6\n1000,0\n')
+                scene.write_text('time,cap\n0,6\n1s,0\n')
                 self.assertEqual(bench.main(), 0)
                 self.assertEqual(run.call_count, 5)
                 with patch.object(bench, 'RESUME', False):
@@ -511,8 +582,7 @@ class TraceBenchTests(unittest.TestCase):
             root = Path(tmp)
             lines = root / 'lines' / 'sample'
             lines.mkdir(parents=True)
-            (lines / 'a.up.txt').write_text('0,5\n1000,0\n')
-            (lines / 'a.down.txt').write_text('0,5\n1000,0\n')
+            (lines / 'a.csv').write_text('time,cap\n0,5\n1s,0\n')
             binary = root / 'binary'
             binary.write_text('binary')
             lock = threading.Lock()
@@ -549,8 +619,7 @@ class TraceBenchTests(unittest.TestCase):
             root = Path(tmp)
             lines = root / 'lines' / 'sample'
             lines.mkdir(parents=True)
-            (lines / 'a.up.txt').write_text('0,5\n500,0\n')
-            (lines / 'a.down.txt').write_text('0,5\n500,0\n')
+            (lines / 'a.csv').write_text('time,cap\n0,5\n500ms,0\n')
             results = []
             for workers in (1, 2):
                 out = root / f'results-{workers}'
@@ -567,8 +636,7 @@ class TraceBenchTests(unittest.TestCase):
             root = Path(tmp)
             lines = root / 'lines' / 'sample'
             lines.mkdir(parents=True)
-            (lines / 'a.up.txt').write_text('0,5\n1000,0\n')
-            (lines / 'a.down.txt').write_text('0,5\n1000,0\n')
+            (lines / 'a.csv').write_text('time,cap\n0,5\n1s,0\n')
             marker = root / 'resume'
             binary = root / 'fake-bench'
             binary.write_text(
@@ -623,11 +691,10 @@ class TraceBenchTests(unittest.TestCase):
             root = Path(tmp)
             lines = root / 'lines' / 'sample'
             lines.mkdir(parents=True)
-            (lines / 'a.up.txt').write_text('0,5\n1000,0\n')
-            (lines / 'a.down.txt').write_text('0,5\n1000,0\n')
+            (lines / 'a.csv').write_text('time,cap\n0,5\n1s,0\n')
             work = root / 'datasets/workloads'
             work.mkdir(parents=True)
-            (work / 'tiny.wk').write_text('0 1000\n10 2000\n')
+            (work / 'tiny.wk').write_text('0,1000\n10,2000\n')
 
             out99 = io.StringIO()
             with patch.multiple(bench, ROOT=root, LINES_DIR=lines, RESULTS_DIR=root / 'results',

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert Mahimahi and LeoCC traces to compact, piecewise-constant text files."""
+"""Convert Mahimahi, Lumos, and LeoCC traces to unified CSV lines files."""
 from __future__ import annotations
 
 import argparse
@@ -7,7 +7,6 @@ import itertools
 import math
 import os
 import re
-import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -16,14 +15,47 @@ from typing import Iterator, NamedTuple, TextIO
 ROOT = Path(__file__).resolve().parents[2]
 
 # Edit these settings, then run `python3 scripts/data/trace_to_lines.py`.
-# Directory mode: convert all supported trace pairs into a matching lines folder.
+# Directory mode: convert all supported trace pairs into unified CSV files under datasets/lines/<dataset>/.
 DATASET_DIR: Path | None = ROOT / 'datasets/traces/lumos'
 
 # Single-pair mode: set DATASET_DIR = None and specify these files.
 UPLINK_TRACE: Path | None = None
 DOWNLINK_TRACE: Path | None = None
-DELAY_TRACE: Path | None = None  # Optional LeoCC delay file, used for both directions.
-LUMOS_ONE_WAY_DELAY_MS = 20.0  # Assumed delay in each direction when no delay trace exists.
+DELAY_TRACE: Path | None = None  # Optional delay trace (omit when no measured delay exists; benchmark uses its default).
+PACKET_BYTES = 1500
+CAPACITY_DECIMALS = 2  # Decimal precision for kb/mb capacity tokens (e.g. 10.33kb, 1.43mb).
+
+_END = '__END__'
+
+
+def format_capacity_bytes(bytes_per_ms: float, *, decimals: int = CAPACITY_DECIMALS) -> str:
+    """Format per-ms byte capacity preferentially using kb/mb with decimal precision."""
+    if not math.isfinite(bytes_per_ms) or bytes_per_ms < 0:
+        raise ValueError(f'invalid per-ms capacity bytes: {bytes_per_ms!r}')
+    if decimals < 0:
+        raise ValueError(f'decimals must be nonnegative: {decimals}')
+    if bytes_per_ms == 0:
+        return '0'
+
+    def fmt(val: float, unit: str) -> str:
+        rounded = round(val, decimals)
+        text = f'{rounded:.{decimals}f}'
+        if '.' in text:
+            text = text.rstrip('0').rstrip('.')
+        return f'{text}{unit}'
+
+    if bytes_per_ms >= 1024 * 1024 or round(bytes_per_ms / 1024.0, decimals) >= 1024:
+        return fmt(bytes_per_ms / (1024.0 * 1024.0), 'mb')
+    if bytes_per_ms >= 1024:
+        return fmt(bytes_per_ms / 1024.0, 'kb')
+    return fmt(bytes_per_ms, 'b')
+
+
+def format_capacity(packet_count: int, *, decimals: int = CAPACITY_DECIMALS) -> str:
+    """Format a 1500-byte packet-opportunity count per ms into kb/mb notation."""
+    if packet_count < 0:
+        raise ValueError(f'invalid packet count: {packet_count}')
+    return format_capacity_bytes(packet_count * PACKET_BYTES, decimals=decimals)
 
 
 def numbers(path: Path, *, integer: bool) -> Iterator[int | float]:
@@ -51,85 +83,140 @@ def numbers(path: Path, *, integer: bool) -> Iterator[int | float]:
         raise ValueError(f'{path}: no samples')
 
 
-def write_capacity(path: Path, output: TextIO) -> int:
-    """Write each 1 ms bin and finish at last timestamp + 1; do not loop."""
+def iter_capacity_events(path: Path, *, decimals: int = CAPACITY_DECIMALS) -> Iterator[tuple[int, str]]:
+    """Yield (t_ms, token) capacity changes on [0, end_ms), ending with (end_ms, _END)."""
     previous_time = -1
-    previous_count = None
+    previous_token: str | None = None
     for raw_time, group in itertools.groupby(numbers(path, integer=True)):
         at = int(raw_time)
         if at <= previous_time:
             raise ValueError(f'{path}: timestamps must be nondecreasing')
         count = sum(1 for _ in group)
+        token = format_capacity(count, decimals=decimals)
         if previous_time == -1 and at > 0:
-            output.write('0,0\n')
-            previous_count = 0
+            yield 0, '0'
+            previous_token = '0'
         elif previous_time >= 0 and at > previous_time + 1:
-            output.write(f'{previous_time + 1},0\n')
-            previous_count = 0
-        if count != previous_count:
-            output.write(f'{at},{count}\n')
-        previous_count = count
+            if previous_token != '0':
+                yield previous_time + 1, '0'
+                previous_token = '0'
+        if token != previous_token:
+            yield at, token
+            previous_token = token
         previous_time = at
-    output.write(f'{previous_time + 1},0\n')
-    return previous_time + 1
+    yield previous_time + 1, _END
 
 
-def write_delay(path: Path, output: TextIO) -> None:
-    """Compress 10 ms LeoCC samples; the end marker is not a delay value."""
-    previous = None
+def iter_delay_events(path: Path) -> Iterator[tuple[int, str]]:
+    """Yield (t_ms, delay_str) 10 ms delay changes on [0, end_ms), ending with (end_ms, _END)."""
+    previous: float | None = None
     count = 0
     for count, value in enumerate(numbers(path, integer=False), 1):
-        if value != previous:
-            output.write(f'{(count - 1) * 10},{value:g}\n')
-            previous = value
-    output.write(f'# end_ms={count * 10}\n')
+        fval = float(value)
+        if fval != previous:
+            yield (count - 1) * 10, f'{fval:g}'
+            previous = fval
+    yield count * 10, _END
 
 
-class ConversionJob(NamedTuple):
-    source: Path
+def write_scene_csv(
+    up_path: Path,
+    down_path: Path,
+    delay_path: Path | None,
+    output: TextIO,
+    *,
+    decimals: int = CAPACITY_DECIMALS,
+) -> int:
+    """Stream-merge capacity (and optional delay) traces into a unified single-file CSV."""
+    symmetric_cap = (up_path == down_path)
+    has_delay = (delay_path is not None)
+
+    header = ['time']
+    header.extend(['cap'] if symmetric_cap else ['up_cap', 'down_cap'])
+    if has_delay:
+        header.append('delay')
+    output.write(','.join(header) + '\n')
+
+    # Fast streaming path for symmetric capacity with no delay (e.g. Lumos 5G).
+    if symmetric_cap and not has_delay:
+        end_ms = 0
+        for t, tok in iter_capacity_events(up_path, decimals=decimals):
+            if tok == _END:
+                output.write(f'{t},0\n')
+                end_ms = t
+                break
+            output.write(f'{t},{tok}\n')
+        return end_ms
+
+    streams: list[Iterator[tuple[int, str]]] = [iter_capacity_events(up_path, decimals=decimals)]
+    if not symmetric_cap:
+        streams.append(iter_capacity_events(down_path, decimals=decimals))
+    if has_delay and delay_path is not None:
+        streams.append(iter_delay_events(delay_path))
+
+    heads: list[tuple[int, str] | None] = [next(it, None) for it in streams]
+    ncols = len(streams)
+    end_ms = 0
+
+    while True:
+        min_t = min(h[0] for h in heads if h is not None)
+        if any(h is not None and h[0] == min_t and h[1] == _END for h in heads):
+            end_ms = min_t
+            end_row = [str(end_ms)] + (['0'] if symmetric_cap else ['0', '0'])
+            if has_delay:
+                end_row.append('')
+            output.write(','.join(end_row) + '\n')
+            break
+
+        vals = [''] * ncols
+        for idx, h in enumerate(heads):
+            if h is not None and h[0] == min_t:
+                vals[idx] = h[1]
+                heads[idx] = next(streams[idx], None)
+        output.write(f'{min_t},' + ','.join(vals) + '\n')
+
+    # Drain remaining iterators so invalid trailing inputs are still caught.
+    for it in streams:
+        for _ in it:
+            pass
+    return end_ms
+
+
+class SceneJob(NamedTuple):
+    up: Path
+    down: Path
+    delay: Path | None
     target: Path
-    kind: str
 
 
-def directory_jobs(directory: Path, dest: Path) -> list[ConversionJob]:
-    jobs = []
+def directory_jobs(directory: Path, dest: Path) -> list[SceneJob]:
+    jobs: list[SceneJob] = []
     for down in sorted(directory.glob('*.down')):
         up = down.with_suffix('.up')
         name = down.stem
-        scene_dir = dest / name
         lumos = name.startswith(('5g_trace_', '4g_trace_'))
         if lumos:
-            # Lumos has measured downlink only; use that same schedule in both
-            # directions as an explicit symmetric approximation.
-            jobs.extend([ConversionJob(down, scene_dir / 'down.txt', 'capacity'),
-                         ConversionJob(down, scene_dir / 'up.txt', 'copy')])
+            # Lumos has measured downlink only; use symmetric capacity and omit delay column.
+            src_up, src_down = down, down
         elif up.is_file():
-            jobs.extend([ConversionJob(up, scene_dir / 'up.txt', 'capacity'),
-                         ConversionJob(down, scene_dir / 'down.txt', 'capacity')])
+            src_up, src_down = up, down
         else:
             raise ValueError(f'missing uplink file: {up}')
-        delay = down.with_suffix('.delay')
-        if delay.is_file():
-            jobs.extend([ConversionJob(delay, scene_dir / 'up.delay.txt', 'delay'),
-                         ConversionJob(delay, scene_dir / 'down.delay.txt', 'delay')])
-        elif lumos:
-            jobs.extend([ConversionJob(down, scene_dir / 'up.delay.txt', 'constant-delay'),
-                         ConversionJob(down, scene_dir / 'down.delay.txt', 'constant-delay')])
+        delay_cand = down.with_suffix('.delay')
+        delay = delay_cand if delay_cand.is_file() else None
+        jobs.append(SceneJob(src_up, src_down, delay, dest / f'{name}.csv'))
+
     # LeoCC examples use one bandwidth trace in both directions.
     leo_files = sorted(directory.glob('bw_*.txt'))
     if (directory / 'leo-bw.txt').is_file():
         leo_files.append(directory / 'leo-bw.txt')
     for bw in leo_files:
-        delay = (directory / 'leo-delay.txt' if bw.name == 'leo-bw.txt'
-                 else directory / f'delay_{bw.name[len("bw_"):]}')
-        if not delay.is_file():
-            raise ValueError(f'missing LeoCC delay file: {delay}')
+        delay_cand = (directory / 'leo-delay.txt' if bw.name == 'leo-bw.txt'
+                      else directory / f'delay_{bw.name[len("bw_"):]}')
+        delay = delay_cand if delay_cand.is_file() else None
         name = bw.stem
-        scene_dir = dest / name
-        jobs.extend([ConversionJob(bw, scene_dir / 'up.txt', 'capacity'),
-                     ConversionJob(bw, scene_dir / 'down.txt', 'capacity'),
-                     ConversionJob(delay, scene_dir / 'up.delay.txt', 'delay'),
-                     ConversionJob(delay, scene_dir / 'down.delay.txt', 'delay')])
+        jobs.append(SceneJob(bw, bw, delay, dest / f'{name}.csv'))
+
     if not jobs:
         raise ValueError(f'{directory}: no .up/.down pairs or bw_*.txt traces found')
     return jobs
@@ -140,8 +227,13 @@ def main() -> int:
     parser.add_argument('uplink', nargs='?', type=Path, help='uplink trace or dataset directory')
     parser.add_argument('downlink', nargs='?', type=Path)
     parser.add_argument('delay', nargs='?', type=Path)
+    parser.add_argument('--decimals', type=int, default=CAPACITY_DECIMALS,
+                        help=f'decimal places for kb/mb capacity values (default: {CAPACITY_DECIMALS})')
     args = parser.parse_args()
-    created = []
+    if args.decimals < 0:
+        raise SystemExit('error: --decimals must be nonnegative')
+
+    created: list[Path] = []
     try:
         if args.uplink is None:
             if DATASET_DIR is not None:
@@ -161,42 +253,28 @@ def main() -> int:
             if args.downlink is None:
                 raise ValueError('downlink trace is required')
             name = args.downlink.stem
-            dest = ROOT / 'datasets' / 'lines' / 'converted' / name
-            jobs = [ConversionJob(args.uplink, dest / 'up.txt', 'capacity'),
-                    ConversionJob(args.downlink, dest / 'down.txt', 'capacity')]
-            if args.delay is not None:
-                jobs.extend([ConversionJob(args.delay, dest / 'up.delay.txt', 'delay'),
-                             ConversionJob(args.delay, dest / 'down.delay.txt', 'delay')])
+            dest = ROOT / 'datasets' / 'lines' / 'converted'
+            jobs = [SceneJob(args.uplink, args.downlink, args.delay, dest / f'{name}.csv')]
+
         targets = [job.target for job in jobs]
         if len(set(targets)) != len(targets):
             raise ValueError('multiple inputs map to the same output filename')
-        for target in targets:
+        for job in jobs:
+            target = job.target
             if target.exists():
                 raise ValueError(f'output already exists: {target}')
-            legacy = target.parent / f'{target.parent.name}.{target.name}'
-            if legacy.exists():
-                raise ValueError(f'legacy output already exists: {legacy}')
+            scene_dir = target.parent / target.stem
+            if (scene_dir / 'line.csv').exists():
+                raise ValueError(f'output already exists: {scene_dir / "line.csv"}')
+
         dest.mkdir(parents=True, exist_ok=True)
         # Convert and validate the entire batch before publishing any files.
         with tempfile.TemporaryDirectory(prefix='.trace-to-lines-', dir=dest) as temp:
-            staged = []
-            converted = {}
-            durations = {}
+            staged: list[tuple[Path, Path]] = []
             for index, job in enumerate(jobs):
-                tmp = Path(temp) / str(index)
-                if job.kind == 'copy':
-                    shutil.copyfile(converted[job.source], tmp)
-                else:
-                    with tmp.open('w', encoding='utf-8') as output:
-                        if job.kind == 'delay':
-                            write_delay(job.source, output)
-                        elif job.kind == 'constant-delay':
-                            if not math.isfinite(LUMOS_ONE_WAY_DELAY_MS) or LUMOS_ONE_WAY_DELAY_MS < 0:
-                                raise ValueError('LUMOS_ONE_WAY_DELAY_MS must be finite and nonnegative')
-                            output.write(f'0,{LUMOS_ONE_WAY_DELAY_MS:g}\n# end_ms={durations[job.source]}\n')
-                        else:
-                            durations[job.source] = write_capacity(job.source, output)
-                            converted[job.source] = tmp
+                tmp = Path(temp) / f'{index}.csv'
+                with tmp.open('w', encoding='utf-8') as output:
+                    write_scene_csv(job.up, job.down, job.delay, output, decimals=args.decimals)
                 staged.append((tmp, job.target))
             for tmp, target in staged:
                 target.parent.mkdir(parents=True, exist_ok=True)

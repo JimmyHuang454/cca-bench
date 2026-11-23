@@ -7,6 +7,7 @@ import csv
 import json
 import math
 import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -14,16 +15,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 BINARY = ROOT / 'ns3/ns-3/build/scratch/tcp-trace-bench/ns3-dev-tcp-trace-bench-optimized'
+if str(ROOT / 'scripts/bench') not in sys.path:
+    sys.path.insert(0, str(ROOT / 'scripts/bench'))
+import lines_common  # noqa: E402
 
 
 @dataclass(frozen=True)
 class LineScenario:
-    """Paths to a generated lines-format scenario."""
+    """Path to a generated unified CSV lines scenario."""
 
-    up: Path
-    down: Path
-    up_delay: Path | None = None
-    down_delay: Path | None = None
+    line: Path
 
 
 @dataclass(frozen=True)
@@ -51,7 +52,14 @@ def parse_line_points(text: str, *, is_capacity: bool) -> list[tuple[int, float]
         ms_s, val_s = line.split(',', 1)
         ms = int(ms_s.strip())
         val_s = val_s.strip()
-        if is_capacity and val_s.endswith('m'):
+        lower = val_s.lower()
+        if is_capacity and lower.endswith('mb'):
+            val = float(val_s[:-2]) * (1024.0 * 1024.0) / 1500.0
+        elif is_capacity and lower.endswith('kb'):
+            val = float(val_s[:-2]) * 1024.0 / 1500.0
+        elif is_capacity and lower.endswith('b'):
+            val = float(val_s[:-1]) / 1500.0
+        elif is_capacity and val_s.endswith('m'):
             val = float(val_s[:-1]) / 12.0
         else:
             val = float(val_s)
@@ -231,20 +239,52 @@ class TraceBenchCase(unittest.TestCase):
         down_delay: str | None = None,
         name: str = 'scene',
     ) -> LineScenario:
-        d = self.subdir(name)
-        up_p = d / 'up.txt'
-        down_p = d / 'down.txt'
-        up_p.write_text(up, encoding='utf-8')
-        down_p.write_text(down, encoding='utf-8')
-        up_d = None
-        down_d = None
+        def parse_tokens(text: str, *, is_delay: bool) -> tuple[int, list[tuple[int, str]]]:
+            pts: list[tuple[int, str]] = []
+            end_ms: int | None = None
+            for raw in text.splitlines():
+                s = raw.strip()
+                if not s:
+                    continue
+                if s.startswith('#'):
+                    if is_delay and s.startswith('# end_ms='):
+                        end_ms = int(s[len('# end_ms='):])
+                    continue
+                t_s, v_s = s.split(',', 1)
+                pts.append((int(t_s.strip()), v_s.strip()))
+            if not is_delay:
+                end_ms = pts[-1][0]
+                pts = pts[:-1]
+            assert end_ms is not None and end_ms > 0
+            return end_ms, pts
+
+        up_end, up_toks = parse_tokens(up, is_delay=False)
+        dn_end, dn_toks = parse_tokens(down, is_delay=False)
+        ends = [up_end, dn_end]
+        ud_toks = dd_toks = None
         if up_delay is not None:
-            up_d = d / 'up.delay.txt'
-            up_d.write_text(up_delay, encoding='utf-8')
+            ud_end, ud_toks = parse_tokens(up_delay, is_delay=True)
+            ends.append(ud_end)
         if down_delay is not None:
-            down_d = d / 'down.delay.txt'
-            down_d.write_text(down_delay, encoding='utf-8')
-        return LineScenario(up=up_p, down=down_p, up_delay=up_d, down_delay=down_d)
+            dd_end, dd_toks = parse_tokens(down_delay, is_delay=True)
+            ends.append(dd_end)
+        d = self.subdir(name)
+        p = d / 'line.csv'
+        lines_common.write_line_csv(
+            p,
+            up_tokens=up_toks,
+            down_tokens=dn_toks,
+            end_ms=min(ends),
+            up_delay_tokens=ud_toks,
+            down_delay_tokens=dd_toks,
+        )
+        return LineScenario(line=p)
+
+    def make_line_csv(self, content: str, name: str = 'scene') -> LineScenario:
+        d = self.subdir(name)
+        p = d / 'line.csv'
+        p.write_text(content, encoding='utf-8')
+        return LineScenario(line=p)
 
     def make_workload(self, content: str, name: str = 'work.wk') -> Path:
         d = self.subdir('wk')
@@ -272,18 +312,13 @@ class TraceBenchCase(unittest.TestCase):
         cmd = [
             str(BINARY),
             '--profile=lines',
-            f'--upTrace={scenario.up}',
-            f'--downTrace={scenario.down}',
+            f'--lineFile={scenario.line}',
             f'--stopTime={stop_time}',
             f'--ccs={cc}',
             f'--defaultDelayMs={default_delay_ms}',
             f'--segmentSize={segment_size}',
             f'--evalJson={1 if eval_json else 0}',
         ]
-        if scenario.up_delay is not None:
-            cmd.append(f'--upDelayFile={scenario.up_delay}')
-        if scenario.down_delay is not None:
-            cmd.append(f'--downDelayFile={scenario.down_delay}')
         if queue_bytes is not None:
             cmd.append(f'--queueBytes={queue_bytes}')
         if workload_file is not None:

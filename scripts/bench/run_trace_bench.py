@@ -20,7 +20,15 @@ if _BENCH_DIR not in sys.path:
 
 import lines_common
 import trace_report
-from lines_common import atomic_write, digest, discover, integrate_piecewise, parse_line, workload
+from lines_common import (
+    atomic_write,
+    digest,
+    discover,
+    integrate_piecewise,
+    load_scenario_lines,
+    parse_line_csv,
+    workload,
+)
 from trace_report import mean
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,10 +45,14 @@ TAIL_PERCENTILE = 98  # Tail percentile for qdelay, Norm Power, RCT, FCT Slowdow
 RESUME = True  # False: rerun all combinations and replace their results.
 MAX_WORKERS = os.cpu_count() or 1  # Maximum concurrent ns-3 processes; 1 runs serially.
 WORKLOAD_MAX_SIMULATION_S = 1800.0  # Maximum simulated time from the start, not wall time.
-DEFAULT_ONE_WAY_DELAY_MS = lines_common.DEFAULT_ONE_WAY_DELAY_MS
+# 场景未提供 up.delay.txt / down.delay.txt 时使用的默认单向基础延迟 (ms)；总基础 RTT = 2 * 该值。
+# 如跑无延迟文件的 5G/Lumos 场景，可直接在此调整（例如 10.0 ms -> 20 ms RTT，20.0 ms -> 40 ms RTT）。
+DEFAULT_ONE_WAY_DELAY_MS = 10.0
+
 TCP_SEGMENT_SIZE_BYTES = 1448  # IPv4 + TCP timestamps with a 1500-byte MTU.
 TCP_SND_BUF_BYTES = 16 * 1024 * 1024  # 16 MiB: modern Linux/Android/iOS TCP auto-tuning ceiling.
 TCP_RCV_BUF_BYTES = 16 * 1024 * 1024  # 16 MiB: avoids 128 KiB RWND cap on high-BDP 5G links.
+
 QUEUE_BYTES: int | str = 'auto'  # 'auto' scales per scenario as clamp(max(1.5*BDP, 80ms), 500 KB, 16 MiB); or int bytes.
 QUEUE_AUTO_BDP_MULT = 1.5
 QUEUE_AUTO_DEPTH_MS = 80.0
@@ -55,13 +67,17 @@ SIMULATION_SIGNATURE = '182f37063e9dd6a695b65af9d5419d7aaf98dcf7571b4f8f237a4973
 
 
 def result_directory(directory: Path) -> Path:
+    resolved = directory.resolve()
     try:
-        relative = directory.resolve().relative_to((ROOT / 'datasets/lines').resolve())
+        relative = resolved.relative_to((ROOT / 'datasets/lines').resolve())
         if relative.parts:
+            if resolved.is_file() and relative.suffix.lower() == '.csv':
+                return RESULTS_DIR / relative.with_suffix('')
             return RESULTS_DIR / relative
     except ValueError:
         pass
-    return RESULTS_DIR / directory.resolve().name
+    name = resolved.stem if resolved.is_file() and resolved.suffix.lower() == '.csv' else resolved.name
+    return RESULTS_DIR / name
 
 
 def ranking_entries(rows: list[dict], scenario: str, workload_name: str, kind: str) -> list[dict]:
@@ -233,19 +249,15 @@ def scenario_queue_bytes(scenario: dict) -> int:
             raise ValueError(f'invalid QUEUE_BYTES: {QUEUE_BYTES!r}')
         return QUEUE_BYTES
     files = scenario.get('files') or {}
-    up_path = files.get('up')
-    if not up_path:
+    if 'line' not in files:
         return QUEUE_AUTO_MIN_BYTES
-    end_ms, up_pts = parse_line(Path(up_path), delay=False)
-    avg_cap_mbps = integrate_piecewise(up_pts, end_ms) * 12.0 / end_ms if end_ms > 0 else 0.0
-    delays_ms = []
-    for key in ('up_delay', 'down_delay'):
-        dpath = files.get(key)
-        if dpath:
-            d_end, d_pts = parse_line(Path(dpath), delay=True)
-            delays_ms.append(integrate_piecewise(d_pts, d_end) / d_end if d_end > 0 else DEFAULT_ONE_WAY_DELAY_MS)
-        else:
-            delays_ms.append(DEFAULT_ONE_WAY_DELAY_MS)
+    loaded = load_scenario_lines(scenario, default_one_way_delay_ms=DEFAULT_ONE_WAY_DELAY_MS)
+    end_ms = loaded['end_ms']
+    avg_cap_mbps = integrate_piecewise(loaded['up'], end_ms) * 12.0 / end_ms if end_ms > 0 else 0.0
+    delays_ms = [
+        integrate_piecewise(loaded['up_delay'], end_ms) / end_ms if end_ms > 0 else DEFAULT_ONE_WAY_DELAY_MS,
+        integrate_piecewise(loaded['down_delay'], end_ms) / end_ms if end_ms > 0 else DEFAULT_ONE_WAY_DELAY_MS,
+    ]
     avg_rtt_ms = sum(delays_ms)
     bytes_per_sec = avg_cap_mbps * 1_000_000.0 / 8.0
     bdp_bytes = bytes_per_sec * (avg_rtt_ms / 1000.0)
@@ -318,8 +330,9 @@ def main() -> int:
             raise ValueError(f'benchmark binary missing: {BINARY}; run make build-bench')
         if (REPEATS < 1 or not isinstance(MAX_WORKERS, int) or MAX_WORKERS < 1
                 or not CCS or len(set(CCS)) != len(CCS) or not WORKLOADS or len(set(WORKLOADS)) != len(WORKLOADS)
-                or not math.isfinite(WORKLOAD_MAX_SIMULATION_S) or WORKLOAD_MAX_SIMULATION_S <= 0):
-            raise ValueError('invalid algorithms, workloads or repeats')
+                or not math.isfinite(WORKLOAD_MAX_SIMULATION_S) or WORKLOAD_MAX_SIMULATION_S <= 0
+                or not math.isfinite(DEFAULT_ONE_WAY_DELAY_MS) or DEFAULT_ONE_WAY_DELAY_MS < 0):
+            raise ValueError('invalid algorithms, workloads, default delay or repeats')
         tail_p = trace_report.validate_tail_percentile(TAIL_PERCENTILE)
         print('\nTCP Trace Bench\n' + '=' * 40, flush=True)
         print(f'数据集：{LINES_DIR}\n正在读取并校验输入…', flush=True)
@@ -369,17 +382,16 @@ def main() -> int:
                                'duration_s': scenario['duration_s'], 'status': 'failed', 'error': ''}
                         files = scenario['files']
                         stop_s = scenario['duration_s'] if wk == 'bulk' else WORKLOAD_MAX_SIMULATION_S
-                        cmd = [str(BINARY), '--profile=lines', f'--upTrace={files["up"]}', f'--downTrace={files["down"]}',
-                               f'--stopTime={stop_s}', f'--ccs={cc}', f'--run={repeat}',
-                               f'--defaultDelayMs={DEFAULT_ONE_WAY_DELAY_MS}',
-                               f'--segmentSize={TCP_SEGMENT_SIZE_BYTES}',
-                               f'--sndBuf={TCP_SND_BUF_BYTES}',
-                               f'--rcvBuf={TCP_RCV_BUF_BYTES}',
-                               f'--queueBytes={q_bytes}',
-                               f'--tailPercentile={tail_p:g}', '--evalJson=1']
-                        for direction in ('up', 'down'):
-                            if direction + '_delay' in files:
-                                cmd.append(f'--{direction}DelayFile={files[direction + "_delay"]}')
+                        cmd = [
+                            str(BINARY), '--profile=lines', f'--lineFile={files["line"]}',
+                            f'--stopTime={stop_s}', f'--ccs={cc}', f'--run={repeat}',
+                            f'--defaultDelayMs={DEFAULT_ONE_WAY_DELAY_MS}',
+                            f'--segmentSize={TCP_SEGMENT_SIZE_BYTES}',
+                            f'--sndBuf={TCP_SND_BUF_BYTES}',
+                            f'--rcvBuf={TCP_RCV_BUF_BYTES}',
+                            f'--queueBytes={q_bytes}',
+                            f'--tailPercentile={tail_p:g}', '--evalJson=1',
+                        ]
                         if wk != 'bulk':
                             cmd.append(f'--workloadFile={work[wk]["path"]}')
                             cmd.append(f'--linePeriodMs={round(scenario["duration_s"] * 1000)}')

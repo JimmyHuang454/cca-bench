@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Unit tests for datasets/lines -> Mahimahi conversion."""
+"""Unit tests for datasets/lines CSV -> Mahimahi conversion."""
 from __future__ import annotations
 
 import sys
@@ -21,12 +21,14 @@ class LinesToMahimahiTests(unittest.TestCase):
             root = Path(tmp)
             scene_dir = root / 'asym'
             scene_dir.mkdir()
-            # lines up.* = TCP data (50 Mbps, 5 ms delay)
-            # lines down.* = TCP ACK (100 Mbps, 80 ms delay)
-            (scene_dir / 'up.txt').write_text('0,50m\n1000,0\n', encoding='utf-8')
-            (scene_dir / 'down.txt').write_text('0,100m\n1000,0\n', encoding='utf-8')
-            (scene_dir / 'up.delay.txt').write_text('0,5\n# end_ms=1000\n', encoding='utf-8')
-            (scene_dir / 'down.delay.txt').write_text('0,80\n# end_ms=1000\n', encoding='utf-8')
+            # lines up_cap/up_delay = TCP data (50 Mbps, 5 ms delay)
+            # lines down_cap/down_delay = TCP ACK (100 Mbps, 80 ms delay)
+            (scene_dir / 'line.csv').write_text(
+                'time,up_cap,down_cap,up_delay,down_delay,comment\n'
+                '0,50m,100m,5ms,80ms,asymmetric link\n'
+                '1s,0,0,,,end\n',
+                encoding='utf-8',
+            )
 
             scenario = lines_common.discover(scene_dir)[0]
             conv = lines_to_mahimahi.convert_scenario(scenario, root / 'out')
@@ -37,7 +39,7 @@ class LinesToMahimahiTests(unittest.TestCase):
             self.assertAlmostEqual(conv.base_rtt_ms_period, 85.0)
             self.assertAlmostEqual(conv.data_capacity_mbps_bulk, 50.0, places=4)
 
-            # lines/up.* (data) -> Mahimahi downlink (server -> client)
+            # lines up (data) -> Mahimahi downlink (server -> client)
             dl_pkts = conv.mm_downlink_trace.read_text(encoding='utf-8').splitlines()
             ul_pkts = conv.mm_uplink_trace.read_text(encoding='utf-8').splitlines()
             # 50 Mbps over 1s = 50_000_000 / 8 / 1500 = 4166.67 -> 4166 packets
@@ -51,15 +53,18 @@ class LinesToMahimahiTests(unittest.TestCase):
     def test_mixed_count_mbps_outage_and_dynamic_delay(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            scene_dir = root / 'dyn'
-            scene_dir.mkdir()
+            scene_csv = root / 'dyn.csv'
             # 0..100ms: 2 pkts/ms (=200 pkts); 100..200ms: outage (0 pkts); 200..300ms: 12m (=1 pkt/ms = 100 pkts)
-            (scene_dir / 'up.txt').write_text('0,2\n100,0\n200,12m\n300,0\n', encoding='utf-8')
-            (scene_dir / 'down.txt').write_text('0,1\n300,0\n', encoding='utf-8')
-            (scene_dir / 'up.delay.txt').write_text('0,10\n100,50\n200,10\n# end_ms=300\n', encoding='utf-8')
-            (scene_dir / 'down.delay.txt').write_text('0,10\n# end_ms=300\n', encoding='utf-8')
+            scene_csv.write_text(
+                'time,up_cap,down_cap,delay,up_delay\n'
+                '0,2,1,10,10\n'
+                '100,0,,,50\n'
+                '200,12m,,,10\n'
+                '300,0,0,,\n',
+                encoding='utf-8',
+            )
 
-            scenario = lines_common.discover(scene_dir)[0]
+            scenario = lines_common.discover(scene_csv)[0]
             conv = lines_to_mahimahi.convert_scenario(scenario, root / 'out')
 
             dl_ts = [int(x) for x in conv.mm_downlink_trace.read_text(encoding='utf-8').splitlines()]
@@ -71,20 +76,18 @@ class LinesToMahimahiTests(unittest.TestCase):
             self.assertEqual(dl_delays[:10], [10] * 10)
             self.assertEqual(dl_delays[10:20], [50] * 10)
             self.assertEqual(dl_delays[20:30], [10] * 10)
-            # Downlink ACK delay is constant 10ms -> compressed to 1 line
+            # Downlink ACK delay fell back to delay=10ms -> compressed to 1 line
             self.assertEqual(conv.mm_uplink_delay.read_text(encoding='utf-8').splitlines(), ['10'])
-            # Average base RTT = (10*100 + 50*100 + 10*100)/300 + 10 = 23.333 + 10 = 33.333ms
+            # Average base RTT = (10*100 + 50*100 + 10*100)/300 + 10 = 33.333ms
             self.assertAlmostEqual(conv.base_rtt_ms_bulk, 100.0 / 3.0, places=4)
 
     def test_missing_delay_uses_default_and_all_zero_capacity_has_sentinel(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            scene_dir = root / 'zero'
-            scene_dir.mkdir()
-            (scene_dir / 'up.txt').write_text('0,0\n500,0\n', encoding='utf-8')
-            (scene_dir / 'down.txt').write_text('0,1\n500,0\n', encoding='utf-8')
+            scene_csv = root / 'zero.csv'
+            scene_csv.write_text('time,up_cap,down_cap\n0,0,1\n500,0,0\n', encoding='utf-8')
 
-            scenario = lines_common.discover(scene_dir)[0]
+            scenario = lines_common.discover(scene_csv)[0]
             conv = lines_to_mahimahi.convert_scenario(scenario, root / 'out', default_one_way_delay_ms=10.0)
             self.assertFalse(conv.has_up_delay_file)
             self.assertFalse(conv.has_down_delay_file)
@@ -96,14 +99,16 @@ class LinesToMahimahiTests(unittest.TestCase):
     def test_max_bulk_s_computes_truncated_window_base_rtt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            scene_dir = root / 'trunc'
-            scene_dir.mkdir()
-            (scene_dir / 'up.txt').write_text('0,24m\n2000,0\n', encoding='utf-8')
-            (scene_dir / 'down.txt').write_text('0,24m\n2000,0\n', encoding='utf-8')
-            (scene_dir / 'up.delay.txt').write_text('0,10\n1000,50\n# end_ms=2000\n', encoding='utf-8')
-            (scene_dir / 'down.delay.txt').write_text('0,10\n# end_ms=2000\n', encoding='utf-8')
+            scene_csv = root / 'trunc.csv'
+            scene_csv.write_text(
+                'time,cap,delay,up_delay\n'
+                '0,24m,10,\n'
+                '1s,,,50\n'
+                '2s,0,,\n',
+                encoding='utf-8',
+            )
 
-            scenario = lines_common.discover(scene_dir)[0]
+            scenario = lines_common.discover(scene_csv)[0]
             conv = lines_to_mahimahi.convert_scenario(scenario, root / 'out', max_bulk_s=1.0)
             self.assertAlmostEqual(conv.bulk_duration_s, 1.0)
             self.assertAlmostEqual(conv.duration_s, 2.0)
@@ -119,7 +124,7 @@ class LinesToMahimahiTests(unittest.TestCase):
             self.assertEqual(conv_asym.mm_downlink_delay.read_text(encoding='utf-8').strip(), '5')
             self.assertEqual(conv_asym.mm_uplink_delay.read_text(encoding='utf-8').strip(), '80')
 
-            leo = lines_common.discover(ROOT / 'datasets/lines/leocc/leo-bw')[0]
+            leo = lines_common.discover(ROOT / 'datasets/lines/leocc/leo-bw.csv')[0]
             conv_leo = lines_to_mahimahi.convert_scenario(leo, out)
             self.assertGreater(conv_leo.period_ms, 100_000)
             self.assertGreater(conv_leo.base_rtt_ms_bulk, 10.0)

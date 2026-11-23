@@ -1,0 +1,3 @@
+time,up_cap,down_cap,delay,comment
+0,100m,400m,8,稳定高容量、低基础延迟条件下的基线。
+120000,0,0,,end

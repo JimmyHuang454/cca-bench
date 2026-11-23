@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate deterministic Mortise-format (<gap_ms>\\t<size_bytes>) academic RCT workloads."""
+"""Generate deterministic CSV-format (<t_ms>,<size>) academic RCT workloads."""
 
 from __future__ import annotations
 
@@ -170,9 +170,22 @@ GENERATORS = {
 }
 
 
+def format_size(size_bytes: int) -> str:
+    """Losslessly format exact byte sizes with binary mb/kb suffixes when divisible."""
+    if size_bytes % (1024 * 1024) == 0:
+        return f"{size_bytes // (1024 * 1024)}mb"
+    if size_bytes % 1024 == 0:
+        return f"{size_bytes // 1024}kb"
+    return str(size_bytes)
+
+
 def write_workload(path: Path, items: list[tuple[int, int]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{gap_ms}\t{size}" for gap_ms, size in items]
+    t_ms = 0
+    lines: list[str] = []
+    for gap_ms, size in items:
+        t_ms += gap_ms
+        lines.append(f"{t_ms},{format_size(size)}")
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

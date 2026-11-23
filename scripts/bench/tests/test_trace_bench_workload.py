@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import statistics
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 
-from scripts.bench.tests.harness import TraceBenchCase
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import lines_common
+from scripts.bench.tests.harness import BINARY, TraceBenchCase
 
 
 class TraceBenchWorkloadTests(TraceBenchCase):
@@ -101,6 +106,68 @@ class TraceBenchWorkloadTests(TraceBenchCase):
             self.assertTrue(off_bins and on_bins)
             self.assertTrue(all(c == 0.0 for c in off_bins), f'cycle {cycle} expected 0 cap')
             self.assertAlmostEqual(statistics.mean(on_bins), 20.0, delta=1.0)
+
+    def test_05_csv_format_units_and_mortise_conversion(self):
+        csv_text = (
+            '# absolute non-decreasing ms with byte/kb/mb units\n'
+            '0,2048\n'
+            '20,1.5kb\n'
+            '20,16KB\n'
+            '500,512b\n'
+            '1000,0.25mb\n'
+            '1500,0.5M\n'
+        )
+        csv_wk = self.make_workload(csv_text, name='csv_units.wk')
+        parsed = lines_common.parse_workload(csv_wk)
+        self.assertEqual(parsed, [
+            (0.0, 2048),
+            (20.0, 1536),
+            (20.0, 16384),
+            (500.0, 512),
+            (1000.0, 262144),
+            (1500.0, 524288),
+        ])
+        self.assertEqual(lines_common.workload(csv_wk), (6, 1.5))
+
+        mortise_wk = csv_wk.parent / 'converted.mortise.wk'
+        lines_common.write_mortise_workload(csv_wk, mortise_wk)
+        self.assertEqual(lines_common.parse_workload(mortise_wk), parsed)
+
+        for bad in (
+            '100,1kb\n50,1kb\n',       # timestamp goes backwards
+            '0,1kb\n100 1024\n',       # mixed CSV and legacy
+            '0,0kb\n',                 # zero size
+            '0,-10\n',                 # negative size
+            '0,100mb\n',               # exceeds 100,000,000 bytes
+            '0,10 kb\n',               # space before unit
+            '0,1.5\n',                 # unsuffixed float
+        ):
+            bad_wk = self.make_workload(bad, name='bad.wk')
+            with self.assertRaises(ValueError, msg=f'expected ValueError for {bad!r}'):
+                lines_common.parse_workload(bad_wk)
+
+        scene = self.make_lines(
+            up='0,50m\n5000,0\n',
+            down='0,50m\n5000,0\n',
+            up_delay='0,10\n# end_ms=5000\n',
+            down_delay='0,10\n# end_ms=5000\n',
+            name='csv_vs_legacy',
+        )
+        d_csv = self.run_json(scene, stop_time=5.0, cc='cubic', workload_file=csv_wk, line_period_ms=5000)
+        d_leg = self.run_json(scene, stop_time=5.0, cc='cubic', workload_file=mortise_wk, line_period_ms=5000)
+        self.assertEqual(d_csv['requests'], 6)
+        self.assertEqual(d_csv['requests_expected'], 6)
+        for key in ('requests', 'duration_s', 'rct_mean_ms', 'rct_p95_ms', 'fct_slowdown', 'fct_slowdown_p95'):
+            self.assertAlmostEqual(d_csv[key], d_leg[key], places=6, msg=f'mismatch in {key}')
+
+        # Verify ns-3 binary also rejects out-of-order CSV workload
+        bad_order = self.make_workload('100,1kb\n50,1kb\n', name='bad_order.wk')
+        proc = subprocess.run([
+            str(BINARY), '--profile=lines',
+            f'--lineFile={scene.line}',
+            f'--workloadFile={bad_order}', '--stopTime=2', '--ccs=cubic', '--evalJson=1',
+        ], text=True, capture_output=True)
+        self.assertNotEqual(proc.returncode, 0)
 
 
 if __name__ == '__main__':

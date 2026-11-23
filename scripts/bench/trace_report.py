@@ -630,8 +630,8 @@ def render_report(
         text.append('')
     text.extend(ranking_tables(scenarios, rows, ccs=ccs, workloads=workloads, repeats=repeats, tail_percentile=tail_p))
     text.extend(['## 场景与运行配置', ''])
-    if any('up_delay' not in s.get('files', {}) or 'down_delay' not in s.get('files', {}) for s in scenarios):
-        text.append(f'- 缺失延迟文件时，单向基础延迟：{default_one_way_delay_ms:g} ms。')
+    if any(not s.get('has_up_delay', False) or not s.get('has_down_delay', False) for s in scenarios):
+        text.append(f'- 缺失延迟列时，单向基础延迟：{default_one_way_delay_ms:g} ms。')
     if any(wk != 'bulk' for wk in workloads):
         text.append(
             f'- Workload 循环回放 lines；全部数据块收到时立即结束，最多运行 {workload_max_s:g} s {workload_timeout_label}，超时记 0 分。'

@@ -17,4 +17,4 @@
 | `dynamic_jitter_regime_switch` | 平稳有线 42M → 抖动无线 42M → 平稳限速 12M | $\delta$ 双向自适应（$0.5 \to 0.03 \to 0.5$） |
 | `mmwave_intermittent_burst` | 5G 毫米波 44 Mbps 帧突发 + 每 12 秒 600 ms 短遮挡跌至 6M | 高速突发 + 短暂遮挡快速泄洪 |
 
-所有场景均为 60 秒，格式见 [TRACE-FORMAT.md](../TRACE-FORMAT.md)，由 [gen_special_lines.py](../../../scripts/data/gen_special_lines.py) 确定性生成（固定随机种子，可完全复现）。
+所有场景均为 60 秒，格式见 [FORMAT.md](../FORMAT.md)，由 [gen_special_lines.py](../../../scripts/data/gen_special_lines.py) 确定性生成（固定随机种子，可完全复现）。

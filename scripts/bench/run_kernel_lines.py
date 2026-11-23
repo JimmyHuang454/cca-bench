@@ -34,7 +34,9 @@ from lines_common import (  # noqa: E402
     atomic_write,
     digest,
     discover_dataset,
+    parse_workload,
     workload as load_workload,
+    write_mortise_workload,
 )
 
 MM_LAUNCH_LOCK = threading.Lock()
@@ -193,10 +195,13 @@ def build_lines_plan(
     bulk_warmup_s: float,
     max_shards: int,
     tail_percentile: float = trace_report.DEFAULT_TAIL_PERCENTILE,
+    default_one_way_delay_ms: float = DEFAULT_ONE_WAY_DELAY_MS,
     root: Path = ROOT,
 ) -> tuple[dict, dict]:
     """Compute balanced GitHub Actions matrix shards and full plan metadata."""
     tail_p = trace_report.validate_tail_percentile(tail_percentile)
+    if not math.isfinite(default_one_way_delay_ms) or default_one_way_delay_ms < 0:
+        raise ValueError(f'invalid default_one_way_delay_ms: {default_one_way_delay_ms}')
     if repeats < 1:
         raise ValueError('repeats must be >= 1')
     if max_shards < 1:
@@ -216,12 +221,10 @@ def build_lines_plan(
         wk_path = root / 'datasets' / 'workloads' / f'{wk}.wk'
         if not wk_path.is_file():
             raise ValueError(f'workload file not found: {wk_path}')
-        count, span_s = load_workload(wk_path)
-        total_bytes = sum(
-            int(line.split()[1])
-            for line in wk_path.read_text(encoding='utf-8').splitlines()
-            if line.strip() and not line.strip().startswith('#')
-        )
+        items = parse_workload(wk_path)
+        count = len(items)
+        span_s = items[-1][0] / 1000.0
+        total_bytes = sum(sz for _, sz in items)
         work_info[wk] = {
             'path': str(wk_path.relative_to(root)),
             'count': count,
@@ -284,8 +287,8 @@ def build_lines_plan(
                 'dataset': s.get('dataset', dataset),
                 'duration_s': (min(s['duration_s'], max_bulk_s) if max_bulk_s > 0 else s['duration_s']),
                 'period_ms': s['period_ms'],
-                'has_up_delay': 'up_delay' in s['files'],
-                'has_down_delay': 'down_delay' in s['files'],
+                'has_up_delay': bool(s.get('has_up_delay', False)),
+                'has_down_delay': bool(s.get('has_down_delay', False)),
             }
             for s in scenarios
         ],
@@ -295,6 +298,7 @@ def build_lines_plan(
         'queues': queues,
         'repeats': repeats,
         'tail_percentile': tail_p,
+        'default_one_way_delay_ms': default_one_way_delay_ms,
         'max_bulk_s': max_bulk_s,
         'workload_timeout_s': workload_timeout_s,
         'bulk_warmup_s': bulk_warmup_s,
@@ -501,7 +505,7 @@ def evaluate_single_run(
 
         # Request/object workload (app, websearch, pageload, vl2, ...)
         wk_meta = work_info[workload_name]
-        wk_path = Path(wk_meta['path'])
+        wk_path = Path(wk_meta.get('mortise_path') or wk_meta['path'])
         expected_reqs = int(wk_meta['count'])
         row['requests_expected'] = expected_reqs
         timeout_secs = max(10, int(math.ceil(workload_timeout_s)))
@@ -691,6 +695,10 @@ def cmd_plan(args: argparse.Namespace) -> int:
     tail_percentile = trace_report.validate_tail_percentile(
         args.tail_percentile if args.tail_percentile is not None else (os.environ.get('TAIL_PERCENTILE', '95') or '95')
     )
+    default_delay_ms = float(
+        args.default_delay_ms if args.default_delay_ms is not None
+        else (os.environ.get('DEFAULT_ONE_WAY_DELAY_MS', str(DEFAULT_ONE_WAY_DELAY_MS)) or DEFAULT_ONE_WAY_DELAY_MS)
+    )
 
     scenarios_filter = parse_csv_list(scenarios_raw) if scenarios_raw.strip() else None
     workloads = parse_csv_list(workloads_raw, default=['bulk'])
@@ -709,6 +717,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
         bulk_warmup_s=bulk_warmup_s,
         max_shards=max_shards,
         tail_percentile=tail_percentile,
+        default_one_way_delay_ms=default_delay_ms,
     )
 
     outputs = {
@@ -746,6 +755,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     tail_percentile = trace_report.validate_tail_percentile(
         args.tail_percentile if args.tail_percentile is not None else (os.environ.get('TAIL_PERCENTILE', '95') or '95')
     )
+    default_delay_ms = float(
+        args.default_delay_ms if args.default_delay_ms is not None
+        else (os.environ.get('DEFAULT_ONE_WAY_DELAY_MS', str(DEFAULT_ONE_WAY_DELAY_MS)) or DEFAULT_ONE_WAY_DELAY_MS)
+    )
+    if not math.isfinite(default_delay_ms) or default_delay_ms < 0:
+        raise ValueError(f'invalid --default-delay-ms: {default_delay_ms}')
     p_tag = f'p{tail_percentile:g}'
     keep_logs = args.keep_logs or os.environ.get('KEEP_LOGS', '0') == '1'
 
@@ -780,7 +795,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             conv = lines_to_mahimahi.convert_scenario(
                 sc,
                 tmp_path / 'traces' / key[0],
-                default_one_way_delay_ms=DEFAULT_ONE_WAY_DELAY_MS,
+                default_one_way_delay_ms=default_delay_ms,
                 max_bulk_s=max_bulk_s,
             )
             converted[key] = conv
@@ -789,6 +804,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         bulk_wk = tmp_path / 'bulk.wk'
         generate_bulk_workload(bulk_wk, max_bulk_bytes)
+        for wk, meta in work_info.items():
+            mortise_wk = tmp_path / f'{wk}.mortise.wk'
+            write_mortise_workload(Path(meta['path']), mortise_wk)
+            meta['mortise_path'] = str(mortise_wk)
 
         procs: list[tuple[subprocess.Popen, bool]] = []
         logs: list = []
@@ -870,6 +889,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         'queues': queues,
         'repeats': repeats,
         'tail_percentile': tail_percentile,
+        'default_one_way_delay_ms': default_delay_ms,
         'parallel': parallel,
         'max_bulk_s': max_bulk_s,
         'workload_timeout_s': workload_timeout_s,
@@ -929,6 +949,7 @@ def summarize_results(
         tail_percentile = trace_report.validate_tail_percentile(
             plan_meta.get('tail_percentile', trace_report.DEFAULT_TAIL_PERCENTILE)
         )
+        default_delay_ms = float(plan_meta.get('default_one_way_delay_ms', DEFAULT_ONE_WAY_DELAY_MS))
         dataset_label = f"datasets/lines/{plan_meta['dataset']}"
         max_bulk_s = float(plan_meta.get('max_bulk_s', 0.0))
         workload_timeout_s = float(plan_meta.get('workload_timeout_s', 300.0))
@@ -945,6 +966,8 @@ def summarize_results(
         tail_percentile = trace_report.validate_tail_percentile(
             meta_tail if meta_tail is not None else (row_tail if row_tail is not None else trace_report.DEFAULT_TAIL_PERCENTILE)
         )
+        meta_delay = shard_metas[0].get('default_one_way_delay_ms') if shard_metas else None
+        default_delay_ms = float(meta_delay) if meta_delay is not None else DEFAULT_ONE_WAY_DELAY_MS
         dataset_label = ', '.join(sorted({r.get('dataset', 'lines') for r in rows}))
         max_bulk_s = 0.0
         workload_timeout_s = 300.0
@@ -1005,7 +1028,7 @@ def summarize_results(
         repeats=repeats,
         tail_percentile=tail_percentile,
         tcp_segment_size_bytes=None,
-        default_one_way_delay_ms=DEFAULT_ONE_WAY_DELAY_MS,
+        default_one_way_delay_ms=default_delay_ms,
         workload_max_s=workload_timeout_s,
         workload_timeout_label='实际运行时间',
         extra_header_lines=extra_header,
@@ -1087,6 +1110,7 @@ def main() -> int:
     p_plan.add_argument('--bulk-warmup-s', type=float, default=None)
     p_plan.add_argument('--max-shards', type=int, default=None)
     p_plan.add_argument('--tail-percentile', type=float, default=None)
+    p_plan.add_argument('--default-delay-ms', type=float, default=None)
 
     p_run = sub.add_parser('run')
     p_run.add_argument('--mortise-dir', required=True)
@@ -1100,6 +1124,7 @@ def main() -> int:
     p_run.add_argument('--workload-timeout-s', type=float, default=None)
     p_run.add_argument('--bulk-warmup-s', type=float, default=None)
     p_run.add_argument('--tail-percentile', type=float, default=None)
+    p_run.add_argument('--default-delay-ms', type=float, default=None)
     p_run.add_argument('--keep-logs', action='store_true')
 
     p_sum = sub.add_parser('summarize')

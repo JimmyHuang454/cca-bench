@@ -456,12 +456,7 @@ class TraceBenchConsistencyAndParityTests(TraceBenchCase):
         pageload_wk = ROOT / 'datasets/workloads/pageload.wk'
         for name, expected_base_rtt, dur_s in cases:
             scene_dir = ROOT / 'datasets/lines/basic' / name
-            scene = LineScenario(
-                up=scene_dir / 'up.txt',
-                down=scene_dir / 'down.txt',
-                up_delay=scene_dir / 'up.delay.txt',
-                down_delay=scene_dir / 'down.delay.txt',
-            )
+            scene = LineScenario(line=scene_dir / 'line.csv')
             bulk = self.run_json(scene, stop_time=dur_s, cc='bbr')
             self.assertAlmostEqual(bulk['base_rtt_ms'], expected_base_rtt, places=3, msg=name)
             self.assertGreater(bulk['throughput_mbps'], 0.0, name)
@@ -504,7 +499,7 @@ class TraceBenchConsistencyAndParityTests(TraceBenchCase):
         self.assertAlmostEqual(rr_span, srpt_span, places=3)
 
         def parse_sizes(path):
-            return [int(line.split()[1]) for line in path.read_text(encoding='utf-8').splitlines() if line.strip() and not line.startswith('#')]
+            return [sz for _, sz in lines_common.parse_workload(path)]
 
         rr_sizes = parse_sizes(rr_wk)
         srpt_sizes = parse_sizes(srpt_wk)
@@ -514,12 +509,7 @@ class TraceBenchConsistencyAndParityTests(TraceBenchCase):
         self.assertNotEqual(rr_sizes, srpt_sizes)
 
         scene_dir = ROOT / 'datasets/lines/basic/wired_congested'
-        scene = LineScenario(
-            up=scene_dir / 'up.txt',
-            down=scene_dir / 'down.txt',
-            up_delay=scene_dir / 'up.delay.txt',
-            down_delay=scene_dir / 'down.delay.txt',
-        )
+        scene = LineScenario(line=scene_dir / 'line.csv')
         for wk_path in (rr_wk, srpt_wk):
             res = self.run_json(scene, stop_time=300.0, cc='copa_auto', workload_file=wk_path, line_period_ms=60000)
             self.assertEqual(res['requests'], rr_count)

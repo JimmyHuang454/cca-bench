@@ -1,0 +1,3 @@
+time,up_cap,down_cap,delay,comment
+0,10m,100m,10,上行容量较低而下行容量较高，用于观察上行瓶颈下的表现。
+60000,0,0,,end

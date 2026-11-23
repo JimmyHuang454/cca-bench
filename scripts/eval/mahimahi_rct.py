@@ -5,10 +5,13 @@ import argparse
 import csv
 import math
 import statistics
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "bench"))
 from eval_report import parse_meta_from_stem
+from lines_common import parse_workload
 
 DEADLINES_S = (1, 5, 15, 30)
 
@@ -44,14 +47,8 @@ class Timing:
 
 def load_schedule(path: Path) -> list[Timing]:
     planned = []
-    scheduled_us = 0
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        gap_ms, size = map(int, line.split()[:2])
-        scheduled_us += gap_ms * 1000
-        planned.append(Timing(len(planned) + 1, size, scheduled_us))
+    for idx, (t_ms, size) in enumerate(parse_workload(path), 1):
+        planned.append(Timing(idx, size, int(round(t_ms * 1000.0))))
     return planned
 
 

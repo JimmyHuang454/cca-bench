@@ -370,10 +370,10 @@ main(int argc, char* argv[])
     std::string ccs = "bbrv2";
     std::string profile = "lines";
     std::string traceFile;
+    std::string lineFile;
     std::string downTrace;
     std::string upTrace;
     std::string delayTrace;
-    std::string upDelayFile, downDelayFile;
     double defaultDelayMs = 10.0;
     double traceOffset = 0.0;
     std::string prefix = "tcp-capacity";
@@ -426,10 +426,9 @@ main(int argc, char* argv[])
     cmd.AddValue("traceFile",
                  "Schedule for --profile=file: 'time_s rate_mbps [loss [delay_ms]]'",
                  traceFile);
+    cmd.AddValue("lineFile", "Unified CSV lines scenario file (time,cap/up_cap/down_cap,...)", lineFile);
     cmd.AddValue("downTrace", "Mahimahi trace of the data direction (mahimahi)", downTrace);
     cmd.AddValue("upTrace", "Mahimahi trace of the ACK direction, empty = unlimited", upTrace);
-    cmd.AddValue("upDelayFile", "Uplink lines delay", upDelayFile);
-    cmd.AddValue("downDelayFile", "Downlink lines delay", downDelayFile);
     cmd.AddValue("linePeriodMs", "Repeat all lines at this common period in ms; 0 disables looping", g_linePeriodMs);
     cmd.AddValue("defaultDelayMs", "Default one-way delay", defaultDelayMs);
     cmd.AddValue("delayTrace", "One-way delay per 10 ms [ms], both directions (mahimahi)", delayTrace);
@@ -493,13 +492,16 @@ main(int argc, char* argv[])
     NS_ABORT_MSG_UNLESS(std::isfinite(tailPercentile) && tailPercentile > 0.0 && tailPercentile <= 100.0,
                         "Invalid --tailPercentile (expected (0, 100]): " << tailPercentile);
 
+    std::vector<LinePoint> downCapacityLines;
     if (profile == "lines")
     {
-        NS_ABORT_MSG_IF(downTrace.empty() || upTrace.empty(), "Both capacity files are required");
+        NS_ABORT_MSG_IF(lineFile.empty(), "--lineFile CSV path is required for --profile=lines");
         NS_ABORT_MSG_IF(defaultDelayMs < 0 || !std::isfinite(defaultDelayMs), "Invalid default delay");
-        g_upCapacity = ReadLine(upTrace, true);
-        g_upDelay = upDelayFile.empty() ? std::vector<LinePoint>{{0, defaultDelayMs}} : ReadLine(upDelayFile, false);
-        g_downDelay = downDelayFile.empty() ? std::vector<LinePoint>{{0, defaultDelayMs}} : ReadLine(downDelayFile, false);
+        LineScenarioData sc = ReadLineCsv(lineFile, defaultDelayMs);
+        g_upCapacity = std::move(sc.upCapacity);
+        downCapacityLines = std::move(sc.downCapacity);
+        g_upDelay = std::move(sc.upDelay);
+        g_downDelay = std::move(sc.downDelay);
         accessDelayMs = 0;
         bottleneckDelayMs = 0;
         g_warmup = 0;
@@ -762,10 +764,10 @@ main(int argc, char* argv[])
     if (profile == "lines")
     {
         g_mmDataGate = CreateObject<MahimahiGate>();
-        g_mmDataGate->SetupLines(g_reverseDevice, upTrace, queueBytes, g_upDelay);
+        g_mmDataGate->SetupLines(g_reverseDevice, g_upCapacity, queueBytes, g_upDelay);
         g_reverseDevice->SetReceiveErrorModel(g_mmDataGate);
         g_mmAckGate = CreateObject<MahimahiGate>();
-        g_mmAckGate->SetupLines(g_forwardDevice, downTrace, queueBytes, g_downDelay);
+        g_mmAckGate->SetupLines(g_forwardDevice, downCapacityLines, queueBytes, g_downDelay);
         g_forwardDevice->SetReceiveErrorModel(g_mmAckGate);
     }
     else if (profile == "mahimahi")

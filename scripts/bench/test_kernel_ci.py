@@ -181,12 +181,9 @@ class KernelCiTests(unittest.TestCase):
             root = Path(tmp)
             scene = root / 'scene'
             scene.mkdir()
-            (scene / 'up.txt').write_text('0,12m\n2000,0\n', encoding='utf-8')
-            (scene / 'down.txt').write_text('0,12m\n2000,0\n', encoding='utf-8')
-            (scene / 'up.delay.txt').write_text('0,10\n# end_ms=2000\n', encoding='utf-8')
-            (scene / 'down.delay.txt').write_text('0,10\n# end_ms=2000\n', encoding='utf-8')
+            (scene / 'line.csv').write_text('time,cap,delay\n0,12m,10\n2s,0,\n', encoding='utf-8')
             wk_file = root / 'tiny.wk'
-            wk_file.write_text('0 15000\n10 15000\n', encoding='utf-8')
+            wk_file.write_text('0,15000\n10,15000\n', encoding='utf-8')
 
             conv = lines_to_mahimahi.convert_scenario(lines_common.discover(scene)[0], root / 'conv')
             out_dir = root / 'shard1'
@@ -294,12 +291,9 @@ class KernelCiTests(unittest.TestCase):
             root = Path(tmp)
             scene = root / 'scene'
             scene.mkdir()
-            (scene / 'up.txt').write_text('0,12m\n2000,0\n', encoding='utf-8')
-            (scene / 'down.txt').write_text('0,12m\n2000,0\n', encoding='utf-8')
-            (scene / 'up.delay.txt').write_text('0,10\n# end_ms=2000\n', encoding='utf-8')
-            (scene / 'down.delay.txt').write_text('0,10\n# end_ms=2000\n', encoding='utf-8')
+            (scene / 'line.csv').write_text('time,cap,delay\n0,12m,10\n2s,0,\n', encoding='utf-8')
             wk_file = root / 'tiny.wk'
-            wk_file.write_text('0 15000\n10 15000\n', encoding='utf-8')
+            wk_file.write_text('0,15000\n10,15000\n', encoding='utf-8')
 
             _, plan_meta_99 = run_kernel_lines.build_lines_plan(
                 dataset='basic',

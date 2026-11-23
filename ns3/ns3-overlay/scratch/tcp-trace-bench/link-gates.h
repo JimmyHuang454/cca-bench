@@ -197,11 +197,11 @@ class MahimahiGate : public ErrorModel
         ScheduleNext();
     }
 
-    void SetupLines(Ptr<PointToPointNetDevice> dev, const std::string& file,
+    void SetupLines(Ptr<PointToPointNetDevice> dev, const std::vector<LinePoint>& capacity,
                     uint64_t limit, const std::vector<LinePoint>& delay)
     {
         m_lineMode = true;
-        m_line = ReadLine(file, true);
+        m_line = capacity;
         m_lineDelay = delay;
         m_dev = dev;
         m_limit = limit;

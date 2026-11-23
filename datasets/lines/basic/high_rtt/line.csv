@@ -1,0 +1,3 @@
+time,up_cap,down_cap,delay,comment
+0,50m,100m,100,上下行基础延迟均较高，观察高基础 RTT 下的启动、吞吐和完成时间。
+120000,0,0,,end

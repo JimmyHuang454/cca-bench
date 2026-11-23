@@ -230,13 +230,8 @@ def shift_replay(replay: Replay, trace_dir: Path, rep: int, repeats: int) -> Rep
 
 
 def workload_span_secs(path: Path) -> float:
-    total_ms = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
-        total_ms += int(s.split()[0])
-    return total_ms / 1000.0
+    from lines_common import workload as _parse_wk
+    return _parse_wk(path)[1]
 
 
 def normalize_workload_label(wk: str) -> str:
@@ -623,11 +618,14 @@ def main() -> int:
         manifest = args.out_dir / f"{wk_label}.wk"
         if wk_path.resolve() != manifest.resolve():
             shutil.copyfile(wk_path, manifest)
+        from lines_common import write_mortise_workload
+        mortise_wk = args.out_dir / f".{wk_label}.mortise.wk"
+        write_mortise_workload(wk_path, mortise_wk)
         if args.app_secs > 0:
             obs_secs = args.app_secs
         else:
             obs_secs = max(180, int(math.ceil(workload_span_secs(wk_path))) + 150)
-        workloads.append((wk_label, wk_path, obs_secs))
+        workloads.append((wk_label, mortise_wk, obs_secs))
 
     base_replays: dict[str, Replay] = {}
     for t in traces:

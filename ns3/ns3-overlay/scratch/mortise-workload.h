@@ -7,6 +7,7 @@
 #include "ns3/network-module.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <sstream>
@@ -148,6 +149,86 @@ class MortiseAppReceiver : public Application
 };
 
 inline bool
+ParseMortiseSizeBytes(const std::string& raw, uint64_t& outBytes)
+{
+    const auto first = raw.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+    {
+        return false;
+    }
+    const auto last = raw.find_last_not_of(" \t\r\n");
+    const std::string s = raw.substr(first, last - first + 1);
+    std::string lower = s;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::string numStr = s;
+    double mult = 1.0;
+    bool hasUnit = false;
+    if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "mb") == 0)
+    {
+        numStr = s.substr(0, s.size() - 2);
+        mult = 1024.0 * 1024.0;
+        hasUnit = true;
+    }
+    else if (lower.size() > 2 && lower.compare(lower.size() - 2, 2, "kb") == 0)
+    {
+        numStr = s.substr(0, s.size() - 2);
+        mult = 1024.0;
+        hasUnit = true;
+    }
+    else if (lower.size() > 1 && lower.back() == 'm')
+    {
+        numStr = s.substr(0, s.size() - 1);
+        mult = 1024.0 * 1024.0;
+        hasUnit = true;
+    }
+    else if (lower.size() > 1 && lower.back() == 'k')
+    {
+        numStr = s.substr(0, s.size() - 1);
+        mult = 1024.0;
+        hasUnit = true;
+    }
+    else if (lower.size() > 1 && lower.back() == 'b')
+    {
+        numStr = s.substr(0, s.size() - 1);
+        mult = 1.0;
+        hasUnit = true;
+    }
+    if (numStr.empty() || std::isspace(static_cast<unsigned char>(numStr.back())))
+    {
+        return false;
+    }
+    if (!hasUnit)
+    {
+        if (numStr.find_first_not_of("0123456789") != std::string::npos)
+        {
+            return false;
+        }
+        std::istringstream iss(numStr);
+        int64_t val = 0;
+        if (!(iss >> val) || !iss.eof() || val <= 0 || val > 100000000)
+        {
+            return false;
+        }
+        outBytes = static_cast<uint64_t>(val);
+        return true;
+    }
+    std::istringstream iss(numStr);
+    double val = 0.0;
+    if (!(iss >> val) || !iss.eof() || !std::isfinite(val) || val <= 0.0)
+    {
+        return false;
+    }
+    const double scaled = std::round(val * mult);
+    if (!std::isfinite(scaled) || scaled < 1.0 || scaled > 100000000.0)
+    {
+        return false;
+    }
+    outBytes = static_cast<uint64_t>(scaled);
+    return true;
+}
+
+inline bool
 LoadMortiseWorkload(const std::string& path,
                     std::vector<double>& arrSec,
                     std::vector<uint32_t>& sizes,
@@ -159,23 +240,72 @@ LoadMortiseWorkload(const std::string& path,
         return false;
     }
     double tSec = startOffsetS;
+    double prevAbsMs = -1.0;
+    int mode = 0; // 0=unset, 1=csv (<t_ms>,<size>), 2=legacy (<gap_ms> <size_bytes>)
     std::string line;
     while (std::getline(f, line))
     {
-        if (line.empty() || line[0] == '#')
+        const auto first = line.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos || line[first] == '#')
         {
             continue;
         }
-        std::istringstream iss(line);
-        double gapMs = 0.0;
-        uint64_t sz = 0;
-        if (!(iss >> gapMs >> sz) || sz == 0)
+        const auto last = line.find_last_not_of(" \t\r\n");
+        const std::string trimmed = line.substr(first, last - first + 1);
+        const auto commaPos = trimmed.find(',');
+        const int lineMode = (commaPos != std::string::npos) ? 1 : 2;
+        if (mode == 0)
         {
-            continue;
+            mode = lineMode;
         }
-        tSec += gapMs / 1000.0;
-        arrSec.push_back(tSec);
-        sizes.push_back(static_cast<uint32_t>(std::min<uint64_t>(sz, 100000000ULL)));
+        else if (mode != lineMode)
+        {
+            return false;
+        }
+        if (mode == 1)
+        {
+            if (trimmed.find(',', commaPos + 1) != std::string::npos)
+            {
+                return false;
+            }
+            const std::string tRaw = trimmed.substr(0, commaPos);
+            const auto tFirst = tRaw.find_first_not_of(" \t\r\n");
+            if (tFirst == std::string::npos)
+            {
+                return false;
+            }
+            const auto tLast = tRaw.find_last_not_of(" \t\r\n");
+            std::istringstream ts(tRaw.substr(tFirst, tLast - tFirst + 1));
+            double absMs = 0.0;
+            uint64_t sz = 0;
+            ts >> absMs;
+            if (ts.fail() || !ts.eof() || !std::isfinite(absMs) || absMs < 0.0 ||
+                (prevAbsMs >= 0.0 && absMs < prevAbsMs) ||
+                !ParseMortiseSizeBytes(trimmed.substr(commaPos + 1), sz) || sz == 0)
+            {
+                return false;
+            }
+            prevAbsMs = absMs;
+            arrSec.push_back(startOffsetS + absMs / 1000.0);
+            sizes.push_back(static_cast<uint32_t>(std::min<uint64_t>(sz, 100000000ULL)));
+        }
+        else
+        {
+            std::istringstream iss(trimmed);
+            double gapMs = 0.0;
+            std::string szStr;
+            std::string extra;
+            uint64_t sz = 0;
+            if (!(iss >> gapMs >> szStr) || (iss >> extra) ||
+                !std::isfinite(gapMs) || gapMs < 0.0 ||
+                !ParseMortiseSizeBytes(szStr, sz) || sz == 0)
+            {
+                continue;
+            }
+            tSec += gapMs / 1000.0;
+            arrSec.push_back(tSec);
+            sizes.push_back(static_cast<uint32_t>(std::min<uint64_t>(sz, 100000000ULL)));
+        }
     }
     return !arrSec.empty();
 }
